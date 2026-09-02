@@ -1,0 +1,53 @@
+schema_version = 1
+
+[service]
+database_path = "/tmp/signalwatch-development.db"
+lock_path = "/tmp/signalwatch-development.lock"
+log_level = "INFO"
+source_failure_alert_after = 3
+retention_days = 90
+delivery_lease_seconds = 60
+max_delivery_retry_seconds = 3600
+
+[ntfy]
+enabled = false
+base_url_env = "NTFY_BASE_URL"
+token_env = "NTFY_TOKEN"
+default_topic = "signalwatch"
+timeout_seconds = 15
+
+[[sources]]
+id = "bloomberg_markets"
+kind = "rss"
+publisher = "Bloomberg"
+section = "Markets"
+dedupe_scope = "bloomberg"
+url = "https://feeds.bloomberg.com/markets/news.rss"
+allowed_hosts = ["feeds.bloomberg.com", "www.bloomberg.com"]
+poll_interval_seconds = 120
+request_timeout_seconds = 20
+request_attempts = 3
+retry_base_seconds = 2
+max_response_bytes = 2097152
+
+[[rules]]
+id = "bloomberg_breaking"
+kind = "weighted_text"
+source_ids = ["bloomberg_markets"]
+threshold = 8
+max_item_age_seconds = 43200
+notification_title = "Bloomberg 重大新闻"
+priority = 5
+tags = ["rotating_light", "newspaper"]
+
+[[rules.patterns]]
+label = "明确突发标记"
+regex = '(?i)\b(?:breaking|urgent)\b'
+title_weight = 12
+summary_weight = 12
+
+[[rules.patterns]]
+label = "紧急状态"
+regex = '(?i)\b(?:state of emergency|national emergency|emergency action)\b'
+title_weight = 10
+summary_weight = 5

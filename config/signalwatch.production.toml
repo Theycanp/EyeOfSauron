@@ -1,0 +1,166 @@
+schema_version = 1
+
+[service]
+database_path = "/var/lib/signalwatch/state.db"
+lock_path = "/var/lib/signalwatch/service.lock"
+log_level = "INFO"
+source_failure_alert_after = 3
+retention_days = 90
+delivery_lease_seconds = 60
+max_delivery_retry_seconds = 3600
+
+[ntfy]
+enabled = true
+base_url_env = "NTFY_BASE_URL"
+token_env = "NTFY_TOKEN"
+default_topic = "signalwatch"
+timeout_seconds = 15
+
+[[sources]]
+id = "bloomberg_markets"
+kind = "rss"
+publisher = "Bloomberg"
+section = "Markets"
+dedupe_scope = "bloomberg"
+url = "https://feeds.bloomberg.com/markets/news.rss"
+allowed_hosts = ["feeds.bloomberg.com", "www.bloomberg.com"]
+poll_interval_seconds = 120
+request_timeout_seconds = 20
+request_attempts = 3
+retry_base_seconds = 2
+max_response_bytes = 2097152
+
+[[sources]]
+id = "bloomberg_politics"
+kind = "rss"
+publisher = "Bloomberg"
+section = "Politics"
+dedupe_scope = "bloomberg"
+url = "https://feeds.bloomberg.com/politics/news.rss"
+allowed_hosts = ["feeds.bloomberg.com", "www.bloomberg.com"]
+poll_interval_seconds = 120
+request_timeout_seconds = 20
+request_attempts = 3
+retry_base_seconds = 2
+max_response_bytes = 2097152
+
+[[sources]]
+id = "bloomberg_technology"
+kind = "rss"
+publisher = "Bloomberg"
+section = "Technology"
+dedupe_scope = "bloomberg"
+url = "https://feeds.bloomberg.com/technology/news.rss"
+allowed_hosts = ["feeds.bloomberg.com", "www.bloomberg.com"]
+poll_interval_seconds = 120
+request_timeout_seconds = 20
+request_attempts = 3
+retry_base_seconds = 2
+max_response_bytes = 2097152
+
+[[sources]]
+id = "bloomberg_economics"
+kind = "rss"
+publisher = "Bloomberg"
+section = "Economics"
+dedupe_scope = "bloomberg"
+url = "https://feeds.bloomberg.com/economics/news.rss"
+allowed_hosts = ["feeds.bloomberg.com", "www.bloomberg.com"]
+poll_interval_seconds = 120
+request_timeout_seconds = 20
+request_attempts = 3
+retry_base_seconds = 2
+max_response_bytes = 2097152
+
+[[rules]]
+id = "bloomberg_breaking"
+kind = "weighted_text"
+source_ids = [
+  "bloomberg_markets",
+  "bloomberg_politics",
+  "bloomberg_technology",
+  "bloomberg_economics",
+]
+threshold = 8
+max_item_age_seconds = 43200
+notification_title = "Bloomberg 重大新闻"
+priority = 5
+tags = ["rotating_light", "newspaper"]
+
+[[rules.patterns]]
+label = "明确突发标记"
+regex = '(?i)\b(?:breaking|urgent)\b'
+title_weight = 12
+summary_weight = 12
+
+[[rules.patterns]]
+label = "紧急状态或行动"
+regex = '(?i)\b(?:state of emergency|national emergency|emergency action|emergency meeting)\b'
+title_weight = 10
+summary_weight = 5
+
+[[rules.patterns]]
+label = "战争或政权突变"
+regex = '(?i)\b(?:declares? war|invasion|military coup|coup d.etat|ceasefire|cease-fire|assassinated|nuclear strike|nuclear attack)\b'
+title_weight = 10
+summary_weight = 5
+
+[[rules.patterns]]
+label = "重大袭击或灾害"
+regex = '(?i)\b(?:missile attack|airstrike|terrorist attack|mass shooting|explosion|earthquake|tsunami|major blast)\b'
+title_weight = 8
+summary_weight = 4
+
+[[rules.patterns]]
+label = "关键领导层突变"
+regex = '(?i)\b(?:president|prime minister|premier|chancellor|chief executive|CEO|chairman|chairwoman|central bank governor)\b.{0,60}\b(?:resigns?|ousted|removed|fired|dies?|dead)\b'
+title_weight = 9
+summary_weight = 4
+
+[[rules.patterns]]
+label = "主权或大型机构危机"
+regex = '(?i)\b(?:sovereign default|defaults? on|files? for bankruptcy|bank run|government bailout|bank failure|bank collapse)\b'
+title_weight = 9
+summary_weight = 4
+
+[[rules.patterns]]
+label = "主要央行利率决定"
+regex = '(?i)\b(?:Federal Reserve|Fed|ECB|European Central Bank|Bank of Japan|BOJ|PBOC|Bank of England)\b.{0,70}\b(?:cuts?|raises?|hikes?)\b.{0,30}\b(?:rate|rates)\b'
+title_weight = 9
+summary_weight = 4
+
+[[rules.patterns]]
+label = "市场或交易暂停"
+regex = '(?i)\b(?:trading|market|markets|exchange)\b.{0,40}\b(?:halted|suspended|shutdown|closed indefinitely)\b'
+title_weight = 9
+summary_weight = 4
+
+[[rules.patterns]]
+label = "剧烈市场动作"
+regex = '(?i)\b(?:plunges?|tumbles?|soars?|surges?|crashes?|collapses?)\b'
+title_weight = 5
+summary_weight = 2
+
+[[rules.patterns]]
+label = "大幅百分比变化"
+regex = '(?i)(?:\b(?:[5-9](?:\.\d+)?|[1-9]\d+(?:\.\d+)?)%)'
+title_weight = 4
+summary_weight = 1
+
+[[rules.patterns]]
+label = "意外或冲击"
+regex = '(?i)\b(?:unexpectedly|surprise|shock decision|shock move)\b'
+title_weight = 4
+summary_weight = 2
+
+[[rules.patterns]]
+label = "播客或常规栏目降权"
+regex = '(?i)\b(?:podcast|newsletter|quiz|week in review|what to know|explainer|markets wrap|daybreak|opening bid|oddlots)\b'
+title_weight = -8
+summary_weight = -3
+
+[[rules.patterns]]
+label = "评论文章降权"
+regex = '(?i)\b(?:opinion|commentary)\b'
+title_weight = -6
+summary_weight = -2

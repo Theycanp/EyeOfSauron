@@ -1,0 +1,46 @@
+[Unit]
+Description=SignalWatch event monitoring and ntfy delivery
+Documentation=file:/opt/signalwatch/docs/OPERATIONS.md
+After=network-online.target ntfy.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=signalwatch
+Group=signalwatch
+WorkingDirectory=/var/lib/signalwatch
+Environment=PYTHONPATH=/opt/signalwatch/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/etc/signalwatch/ntfy.env
+ExecStart=/usr/bin/python3 -m signalwatch --config /etc/signalwatch/config.toml run
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/signalwatch
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

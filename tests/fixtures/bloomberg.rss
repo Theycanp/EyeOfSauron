@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Bloomberg Markets</title>
+    <item>
+      <title>Stocks Rise as Buyers Return: Markets Wrap</title>
+      <description><![CDATA[Routine market coverage with <b>daily</b> analysis.]]></description>
+      <link>https://www.bloomberg.com/news/articles/routine</link>
+      <guid>routine-guid</guid>
+      <dc:creator>Reporter One</dc:creator>
+      <pubDate>Wed, 02 Sep 2026 14:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Federal Reserve Makes Emergency Rate Cut as Markets Plunge 8%</title>
+      <description><![CDATA[Officials acted after an unexpected market shock.]]></description>
+      <link>https://www.bloomberg.com/news/articles/breaking</link>
+      <guid>breaking-guid</guid>
+      <dc:creator>Reporter Two</dc:creator>
+      <pubDate>Wed, 02 Sep 2026 15:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
