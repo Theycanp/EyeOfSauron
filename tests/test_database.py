@@ -57,6 +57,10 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(1, first.queued_alerts)
         self.assertEqual(0, second.queued_alerts)
         self.assertEqual(1, self.database.status()["outbox"]["pending"])
+        incidents = self.database.list_incidents()
+        self.assertEqual(1, len(incidents))
+        self.assertEqual("open", incidents[0]["status"])
+        self.assertEqual(["bloomberg_markets"], incidents[0]["source_ids"])
 
     def test_guid_is_deduplicated_across_sections(self) -> None:
         self._success("bloomberg_markets")
@@ -121,6 +125,22 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertTrue(report.recovery_queued)
         self.assertEqual(2, self.database.status()["outbox"]["pending"])
+
+    def test_config_revision_history_and_activation(self) -> None:
+        payload = {"sources": [], "rules": []}
+        self.database.record_config_revision(1, payload, "tester", "initial")
+        self.database.record_config_revision(2, payload, "tester", "change")
+        revisions = self.database.list_config_revisions()
+        self.assertEqual([2, 1], [item["revision"] for item in revisions])
+        self.assertEqual(1, revisions[0]["active"])
+        self.assertTrue(self.database.activate_config_revision(1, "tester"))
+        self.assertEqual(1, self.database.status()["config_revision"]["revision"])
+
+    def test_prometheus_metrics_include_source_and_incident_counts(self) -> None:
+        self._success("bloomberg_markets", observation("baseline", "Ordinary market article"))
+        metrics = self.database.metrics_prometheus()
+        self.assertIn("signalwatch_observations_total 1", metrics)
+        self.assertIn('signalwatch_source_consecutive_failures{source="bloomberg_markets"} 0', metrics)
 
 
 if __name__ == "__main__":

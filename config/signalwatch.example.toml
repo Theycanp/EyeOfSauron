@@ -103,7 +103,8 @@ max_response_bytes = 2097152
 # inode_used_percent = 90
 # memory_used_percent = 90
 # load1 = 8
-# allowed_listen_ports = [22, 10008, 10009, 18080]
+# allowed_listen_ports = [22, 80, 10001, 10008, 10009, 18080, 25565, 5244, 59827]
+# required_listen_ports = [22, 10008, 25565]
 
 [[rules]]
 id = "bloomberg_breaking"

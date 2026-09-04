@@ -31,6 +31,7 @@ class AlertCandidate:
     confidence: float = 0.5
     evidence: tuple[str, ...] = ()
     incident_key: str | None = None
+    recovery: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,3 +77,17 @@ class OutboxMessage:
     attempts: int
     confidence: float = 0.5
     evidence: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Incident:
+    id: int
+    incident_key: str
+    status: str
+    first_seen_at: int
+    last_seen_at: int
+    recovered_at: int | None
+    confidence: float
+    evidence: tuple[str, ...]
+    source_ids: tuple[str, ...]
+    observation_count: int

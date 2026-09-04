@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .models import (
     AlertCandidate,
@@ -16,7 +17,7 @@ from .rules import RuleSet
 from .util import sanitize_error, to_epoch
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class Database:
@@ -54,9 +55,24 @@ class Database:
                     UNIQUE (dedupe_scope, external_id)
                 );
 
+                CREATE TABLE incidents (
+                    id INTEGER PRIMARY KEY,
+                    incident_key TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL CHECK (status IN ('open', 'recovered')),
+                    first_seen_at INTEGER NOT NULL,
+                    last_seen_at INTEGER NOT NULL,
+                    recovered_at INTEGER,
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    evidence_json TEXT NOT NULL DEFAULT '[]',
+                    source_ids_json TEXT NOT NULL DEFAULT '[]',
+                    observation_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL
+                );
+
                 CREATE TABLE alerts (
                     id INTEGER PRIMARY KEY,
                     observation_id INTEGER REFERENCES observations(id),
+                    incident_id INTEGER REFERENCES incidents(id),
                     rule_id TEXT NOT NULL,
                     dedupe_key TEXT NOT NULL UNIQUE,
                     topic TEXT NOT NULL,
@@ -80,6 +96,8 @@ class Database:
                 CREATE INDEX alerts_due_idx
                     ON alerts(status, next_attempt_at, lease_until, priority, created_at);
 
+                CREATE INDEX incidents_status_idx ON incidents(status, last_seen_at);
+
                 CREATE TABLE collector_state (
                     source_id TEXT PRIMARY KEY,
                     initialized INTEGER NOT NULL DEFAULT 0,
@@ -91,14 +109,38 @@ class Database:
                     outage_alerted INTEGER NOT NULL DEFAULT 0,
                     outage_started_at INTEGER,
                     last_error TEXT,
-                    cursor TEXT
+                    cursor TEXT,
+                    last_duration_ms INTEGER,
+                    last_error_kind TEXT,
+                    last_http_status INTEGER
                 );
 
-                PRAGMA user_version=2;
+                CREATE TABLE config_revisions (
+                    id INTEGER PRIMARY KEY,
+                    revision INTEGER NOT NULL UNIQUE,
+                    payload_json TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1))
+                );
+
+                CREATE TABLE config_audit (
+                    id INTEGER PRIMARY KEY,
+                    revision_id INTEGER REFERENCES config_revisions(id),
+                    action TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX config_audit_time_idx ON config_audit(created_at, id);
+                PRAGMA user_version=3;
                 COMMIT;
                 """
             )
-        elif version == 1:
+            return
+        if version < 2:
             # Multiple systemd units may open the database during an upgrade.
             # Take the writer lock and re-read the version before altering.
             self.connection.execute("BEGIN IMMEDIATE")
@@ -110,6 +152,72 @@ class Database:
                     self.connection.execute("ALTER TABLE alerts ADD COLUMN incident_key TEXT")
                     self.connection.execute("ALTER TABLE collector_state ADD COLUMN cursor TEXT")
                     self.connection.execute("PRAGMA user_version=2")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 2
+        if version < 3:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 3:
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS incidents (
+                            id INTEGER PRIMARY KEY,
+                            incident_key TEXT NOT NULL UNIQUE,
+                            status TEXT NOT NULL CHECK (status IN ('open', 'recovered')),
+                            first_seen_at INTEGER NOT NULL,
+                            last_seen_at INTEGER NOT NULL,
+                            recovered_at INTEGER,
+                            confidence REAL NOT NULL DEFAULT 0.5,
+                            evidence_json TEXT NOT NULL DEFAULT '[]',
+                            source_ids_json TEXT NOT NULL DEFAULT '[]',
+                            observation_count INTEGER NOT NULL DEFAULT 0,
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute("CREATE INDEX IF NOT EXISTS incidents_status_idx ON incidents(status, last_seen_at)")
+                    alert_columns = {str(row[1]) for row in self.connection.execute("PRAGMA table_info(alerts)")}
+                    if "incident_id" not in alert_columns:
+                        self.connection.execute("ALTER TABLE alerts ADD COLUMN incident_id INTEGER REFERENCES incidents(id)")
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS config_revisions (
+                            id INTEGER PRIMARY KEY,
+                            revision INTEGER NOT NULL UNIQUE,
+                            payload_json TEXT NOT NULL,
+                            actor TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            created_at INTEGER NOT NULL,
+                            active INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1))
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS config_audit (
+                            id INTEGER PRIMARY KEY,
+                            revision_id INTEGER REFERENCES config_revisions(id),
+                            action TEXT NOT NULL,
+                            actor TEXT NOT NULL,
+                            details_json TEXT NOT NULL DEFAULT '{}',
+                            created_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute("CREATE INDEX IF NOT EXISTS config_audit_time_idx ON config_audit(created_at, id)")
+                    collector_columns = {str(row[1]) for row in self.connection.execute("PRAGMA table_info(collector_state)")}
+                    for name, definition in (
+                        ("last_duration_ms", "INTEGER"),
+                        ("last_error_kind", "TEXT"),
+                        ("last_http_status", "INTEGER"),
+                    ):
+                        if name not in collector_columns:
+                            self.connection.execute(f"ALTER TABLE collector_state ADD COLUMN {name} {definition}")
+                    self.connection.execute("PRAGMA user_version=3")
                 self.connection.commit()
             except Exception:
                 self.connection.rollback()
@@ -146,7 +254,9 @@ class Database:
         observation_id: int | None,
         now: int,
     ) -> bool:
+        incident_id: int | None = None
         if candidate.incident_key:
+            incident_id = self._upsert_incident(candidate, observation_id, now)
             existing = self.connection.execute(
                 """
                 SELECT 1 FROM alerts
@@ -155,18 +265,19 @@ class Database:
                 """,
                 (candidate.rule_id, candidate.incident_key, now - 1800),
             ).fetchone()
-            if existing is not None:
+            if existing is not None and not candidate.recovery:
                 return False
         cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO alerts(
-                observation_id, rule_id, dedupe_key, topic, title, message,
+                observation_id, incident_id, rule_id, dedupe_key, topic, title, message,
                 priority, confidence, evidence_json, incident_key, tags_json, click_url,
                 status, next_attempt_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
             (
                 observation_id,
+                incident_id,
                 candidate.rule_id,
                 candidate.dedupe_key,
                 candidate.topic,
@@ -184,6 +295,85 @@ class Database:
         )
         return cursor.rowcount == 1
 
+    def _upsert_incident(
+        self,
+        candidate: AlertCandidate,
+        observation_id: int | None,
+        now: int,
+    ) -> int:
+        """Create or update the durable incident represented by a candidate."""
+        assert candidate.incident_key
+        row = self.connection.execute(
+            "SELECT * FROM incidents WHERE incident_key = ?",
+            (candidate.incident_key,),
+        ).fetchone()
+        if row is None:
+            source_ids: list[str] = []
+            if observation_id is not None:
+                source_row = self.connection.execute(
+                    "SELECT source_id FROM observations WHERE id = ?", (observation_id,)
+                ).fetchone()
+                if source_row:
+                    source_ids.append(str(source_row["source_id"]))
+            self.connection.execute(
+                """
+                INSERT INTO incidents(
+                    incident_key, status, first_seen_at, last_seen_at, recovered_at,
+                    confidence, evidence_json, source_ids_json, observation_count, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candidate.incident_key,
+                    "recovered" if candidate.recovery else "open",
+                    now,
+                    now,
+                    now if candidate.recovery else None,
+                    candidate.confidence,
+                    json.dumps(list(candidate.evidence), ensure_ascii=False),
+                    json.dumps(source_ids, ensure_ascii=False),
+                    1 if observation_id is not None else 0,
+                    now,
+                ),
+            )
+            return int(self.connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        try:
+            evidence = set(json.loads(row["evidence_json"]))
+        except (TypeError, ValueError):
+            evidence = set()
+        evidence.update(candidate.evidence)
+        try:
+            source_ids = set(json.loads(row["source_ids_json"]))
+        except (TypeError, ValueError):
+            source_ids = set()
+        if observation_id is not None:
+            source_row = self.connection.execute(
+                "SELECT source_id FROM observations WHERE id = ?", (observation_id,)
+            ).fetchone()
+            if source_row:
+                source_ids.add(str(source_row["source_id"]))
+        status = "recovered" if candidate.recovery else "open"
+        recovered_at = now if candidate.recovery else None
+        self.connection.execute(
+            """
+            UPDATE incidents SET status = ?, last_seen_at = ?, recovered_at = ?,
+                confidence = MAX(confidence, ?), evidence_json = ?, source_ids_json = ?,
+                observation_count = observation_count + ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                now,
+                recovered_at,
+                candidate.confidence,
+                json.dumps(sorted(evidence), ensure_ascii=False),
+                json.dumps(sorted(source_ids), ensure_ascii=False),
+                1 if observation_id is not None else 0,
+                now,
+                int(row["id"]),
+            ),
+        )
+        return int(row["id"])
+
     def record_source_success(
         self,
         source_id: str,
@@ -191,6 +381,7 @@ class Database:
         rules: RuleSet,
         now: int,
         default_topic: str,
+        duration_ms: int | None = None,
     ) -> IngestReport:
         state = self.get_source_state(source_id)
         inserted = 0
@@ -255,10 +446,13 @@ class Database:
                     outage_alerted = 0,
                     outage_started_at = NULL,
                     last_error = NULL,
-                    cursor = ?
+                    cursor = ?,
+                    last_duration_ms = ?,
+                    last_error_kind = NULL,
+                    last_http_status = NULL
                 WHERE source_id = ?
                 """,
-                (result.etag, result.last_modified, now, now, result.cursor, source_id),
+                (result.etag, result.last_modified, now, now, result.cursor, duration_ms, source_id),
             )
             self.connection.commit()
         except Exception:
@@ -278,6 +472,9 @@ class Database:
         threshold: int,
         default_topic: str,
         now: int,
+        duration_ms: int | None = None,
+        error_kind: str | None = None,
+        http_status: int | None = None,
     ) -> bool:
         state = self.get_source_state(source_id)
         failures = state.consecutive_failures + 1
@@ -309,7 +506,10 @@ class Database:
                     consecutive_failures = ?,
                     outage_alerted = ?,
                     outage_started_at = ?,
-                    last_error = ?
+                    last_error = ?,
+                    last_duration_ms = ?,
+                    last_error_kind = ?,
+                    last_http_status = ?
                 WHERE source_id = ?
                 """,
                 (
@@ -318,6 +518,9 @@ class Database:
                     int(state.outage_alerted or should_alert),
                     outage_started,
                     error_text,
+                    duration_ms,
+                    error_kind,
+                    http_status,
                     source_id,
                 ),
             )
@@ -413,6 +616,119 @@ class Database:
                 (next_attempt_at, sanitize_error(error), alert_id),
             )
 
+    def list_incidents(self, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        query = "SELECT * FROM incidents"
+        params: list[Any] = []
+        if status:
+            query += " WHERE status = ?"
+            params.append(status)
+        query += " ORDER BY last_seen_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = []
+        for row in self.connection.execute(query, params):
+            item = dict(row)
+            for field in ("evidence_json", "source_ids_json"):
+                try:
+                    item[field[:-5]] = json.loads(item.pop(field))
+                except (TypeError, ValueError):
+                    item[field[:-5]] = []
+            rows.append(item)
+        return rows
+
+    def record_config_revision(
+        self,
+        revision: int,
+        payload: Mapping[str, Any],
+        actor: str = "admin",
+        reason: str = "configuration update",
+        active: bool = True,
+    ) -> int:
+        now = int(time.time())
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self.connection:
+            if active:
+                self.connection.execute("UPDATE config_revisions SET active = 0")
+            self.connection.execute(
+                """
+                INSERT INTO config_revisions(revision, payload_json, actor, reason, created_at, active)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(revision) DO UPDATE SET payload_json=excluded.payload_json,
+                    actor=excluded.actor, reason=excluded.reason, active=excluded.active
+                """,
+                (int(revision), encoded, actor[:128], reason[:512], now, int(active)),
+            )
+            row = self.connection.execute(
+                "SELECT id FROM config_revisions WHERE revision = ?", (int(revision),)
+            ).fetchone()
+            assert row is not None
+            revision_id = int(row["id"])
+            self.connection.execute(
+                "INSERT INTO config_audit(revision_id, action, actor, details_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (revision_id, "activate" if active else "save", actor[:128], "{}", now),
+            )
+        return revision_id
+
+    def activate_config_revision(self, revision: int, actor: str = "admin", reason: str = "rollback") -> bool:
+        now = int(time.time())
+        with self.connection:
+            row = self.connection.execute(
+                "SELECT id FROM config_revisions WHERE revision = ?", (int(revision),)
+            ).fetchone()
+            if row is None:
+                return False
+            self.connection.execute("UPDATE config_revisions SET active = 0")
+            self.connection.execute(
+                "UPDATE config_revisions SET active = 1 WHERE revision = ?", (int(revision),)
+            )
+            self.connection.execute(
+                "INSERT INTO config_audit(revision_id, action, actor, details_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (int(row["id"]), "rollback", actor[:128], json.dumps({"reason": reason[:512]}), now),
+            )
+        return True
+
+    def list_config_revisions(self, limit: int = 50) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 200))
+        return [dict(row) for row in self.connection.execute(
+            "SELECT id, revision, actor, reason, created_at, active FROM config_revisions ORDER BY revision DESC LIMIT ?",
+            (limit,),
+        )]
+
+    def get_config_revision(self, revision: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM config_revisions WHERE revision = ?", (int(revision),)
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["payload"] = json.loads(result.pop("payload_json"))
+        except (TypeError, ValueError):
+            result["payload"] = {}
+        return result
+
+    def metrics_prometheus(self) -> str:
+        status = self.status()
+        lines = [
+            "# HELP signalwatch_observations_total Stored normalized observations.",
+            "# TYPE signalwatch_observations_total gauge",
+            f"signalwatch_observations_total {status['observations']}",
+        ]
+        for state, count in status["outbox"].items():
+            lines.append(f'signalwatch_outbox{{status="{state}"}} {count}')
+        lines.extend([
+            "# TYPE signalwatch_incidents gauge",
+            f"signalwatch_incidents{{status=\"open\"}} {status['incidents'].get('open', 0)}",
+            f"signalwatch_incidents{{status=\"recovered\"}} {status['incidents'].get('recovered', 0)}",
+        ])
+        for source in status["sources"]:
+            source_id = str(source["source_id"]).replace('"', '')
+            success = source.get("last_success_at") or 0
+            age = max(0, int(time.time()) - int(success)) if success else -1
+            lines.append(f'signalwatch_source_last_success_age_seconds{{source="{source_id}"}} {age}')
+            lines.append(f'signalwatch_source_consecutive_failures{{source="{source_id}"}} {source["consecutive_failures"]}')
+        return "\n".join(lines) + "\n"
+
     def cleanup(self, cutoff: int) -> tuple[int, int]:
         with self.connection:
             deleted_alerts = self.connection.execute(
@@ -434,7 +750,8 @@ class Database:
         sources = [dict(row) for row in self.connection.execute(
             """
             SELECT source_id, initialized, last_attempt_at, last_success_at,
-                   consecutive_failures, outage_alerted, last_error
+                   consecutive_failures, outage_alerted, last_error,
+                   last_duration_ms, last_error_kind, last_http_status
             FROM collector_state ORDER BY source_id
             """
         )]
@@ -445,4 +762,18 @@ class Database:
             )
         }
         observations = int(self.connection.execute("SELECT COUNT(*) FROM observations").fetchone()[0])
-        return {"database_schema": SCHEMA_VERSION, "observations": observations, "outbox": outbox, "sources": sources}
+        incidents = {
+            str(row["status"]): int(row["count"])
+            for row in self.connection.execute("SELECT status, COUNT(*) AS count FROM incidents GROUP BY status")
+        }
+        revisions = [dict(row) for row in self.connection.execute(
+            "SELECT revision, created_at, active FROM config_revisions WHERE active = 1 ORDER BY revision DESC LIMIT 1"
+        )]
+        return {
+            "database_schema": SCHEMA_VERSION,
+            "observations": observations,
+            "outbox": outbox,
+            "incidents": incidents,
+            "config_revision": revisions[0] if revisions else None,
+            "sources": sources,
+        }

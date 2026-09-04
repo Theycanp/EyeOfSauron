@@ -1,6 +1,6 @@
 # SignalWatch
 
-SignalWatch is a small event-monitoring service for this host. It collects data
+SignalWatch is an event-monitoring service for this host. It collects data
 from adapters, normalizes and deduplicates observations, evaluates rules, and
 delivers durable notifications through ntfy.
 
@@ -14,7 +14,7 @@ event, rule, state, and delivery contracts.
 
 - First successful collection establishes a baseline and never floods old news.
 - Bloomberg GUIDs are deduplicated across multiple RSS sections.
-- Observations and notifications are committed in one SQLite transaction.
+- Observations, durable incidents, and notifications are committed in one SQLite transaction.
 - Notifications use an at-least-once outbox with leases and exponential retry.
 - RSS requests use TLS validation, ETag/Last-Modified, bounded fast retries,
   timeouts, and a size cap.
@@ -33,7 +33,9 @@ to the service-owned managed JSON file and take effect after restarting
 SignalWatch. Credentials are referenced by `*_env` names and are never entered
 into the managed file.
 
-The backend can add custom stock symbols and thresholds, official RSS/Atom
+The backend supports configuration revisions, audit history, full-set validation,
+source connection tests, enable/disable, rollback, incident inspection, and
+Prometheus-compatible metrics. It can add custom stock symbols and thresholds, official RSS/Atom
 feeds (including WSJ, The Economist, blogs and YouTube channel feeds), X
 numeric user IDs, and IMAP searches. Sources without credentials remain
 disabled. Do not use display names as identity for X or other accounts.

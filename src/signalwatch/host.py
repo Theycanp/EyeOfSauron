@@ -52,6 +52,30 @@ def _failed_units(units: list[str]) -> list[str]:
     return failed
 
 
+def _listen_ports() -> set[tuple[str, int]] | None:
+    """Return protocol/port pairs currently bound by TCP or UDP sockets."""
+    try:
+        result = subprocess.run(
+            ["ss", "-H", "-lntu"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=False, timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    ports: set[tuple[str, int]] = set()
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 5:
+            continue
+        protocol = fields[0].lower()
+        endpoint = fields[4].rsplit(":", 1)[-1].strip("[]")
+        if endpoint.isdigit():
+            ports.add((protocol, int(endpoint)))
+    return ports
+
+
 class HostHealthCollector:
     """Low-frequency local checks; high-rate telemetry belongs in Prometheus."""
 
@@ -65,6 +89,7 @@ class HostHealthCollector:
         self.memory_threshold = float(settings.get("memory_used_percent", 90.0))
         self.load_threshold = float(settings.get("load1", max(1.0, os.cpu_count() or 1)))
         self.port_allowlist = {int(port) for port in settings.get("allowed_listen_ports", []) if str(port).isdigit()}
+        self.required_ports = {int(port) for port in settings.get("required_listen_ports", []) if str(port).isdigit()}
 
     def fetch(self, state: SourceState) -> FeedFetchResult:
         now = datetime.now(UTC)
@@ -93,6 +118,18 @@ class HostHealthCollector:
             pass
         for unit in _failed_units(list(self.units)):
             active[f"unit:{unit}"] = f"systemd 单元 {unit} 未处于 active"
+
+        if self.port_allowlist or self.required_ports:
+            listening = _listen_ports()
+            if listening is None:
+                active["listen:probe"] = "无法读取当前 TCP/UDP 监听端口"
+            else:
+                actual_ports = {port for _, port in listening}
+                for protocol, port in sorted(listening):
+                    if self.port_allowlist and port not in self.port_allowlist:
+                        active[f"listen:{protocol}:{port}"] = f"发现未列入白名单的 {protocol.upper()} 监听端口 {port}"
+                for port in sorted(self.required_ports - actual_ports):
+                    active[f"listen:missing:{port}"] = f"要求的监听端口 {port} 当前未监听"
 
         previous: dict[str, Any]
         try:

@@ -4,6 +4,7 @@ import asyncio
 import fcntl
 import logging
 import os
+import time
 from pathlib import Path
 
 from .config import AppConfig
@@ -73,6 +74,7 @@ class SignalWatchService:
         source_config = next(source for source in self.config.sources if source.id == source_id)
         state = self.database.get_source_state(source_id)
         now = now_epoch()
+        started = time.monotonic()
         result: FeedFetchResult | None = None
         last_error: Exception | None = None
         for attempt in range(1, source_config.request_attempts + 1):
@@ -102,6 +104,8 @@ class SignalWatchService:
                 self.config.service.source_failure_alert_after,
                 self.config.ntfy.default_topic,
                 now,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                error_kind=type(last_error).__name__,
             )
             LOGGER.warning(
                 "source_poll_failed source=%s alert_queued=%s error=%s",
@@ -117,6 +121,7 @@ class SignalWatchService:
             self.rules,
             now,
             self.config.ntfy.default_topic,
+            duration_ms=int((time.monotonic() - started) * 1000),
         )
 
         if report.baseline_created:
@@ -159,7 +164,7 @@ class SignalWatchService:
             )
             return False
         self.database.mark_delivered(alert.id, now_epoch())
-        LOGGER.info("notification_delivered alert_id=%d topic=%s", alert.id, alert.topic)
+        LOGGER.info("notification_delivered alert_id=%d topic=%s attempts=%d", alert.id, alert.topic, alert.attempts)
         return True
 
     async def _source_loop(self, source_id: str, interval: int) -> None:

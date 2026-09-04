@@ -27,6 +27,15 @@ collectors -> normalized observations -> rules -> incidents -> SQLite outbox -> 
 These contracts allow future adapters for market APIs, X, host events, webhooks,
 and MQTT without changing delivery reliability.
 
+Incidents are durable records separate from notification attempts. An incident
+collects source IDs, evidence, confidence, timestamps, and recovery state;
+multiple alerts can refer to one incident while the outbox remains at-least-once.
+This prevents notification deduplication from erasing operational history.
+
+Configuration changes are revisioned and audited. The management API validates
+the complete managed set before writing an atomic current file, stores a private
+revision snapshot, and rolls back by creating a new revision.
+
 ## Delivery semantics
 
 The outbox is at-least-once. An alert is inserted in the same transaction as its

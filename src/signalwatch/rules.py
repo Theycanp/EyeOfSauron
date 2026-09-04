@@ -42,9 +42,22 @@ class WeightedTextRule:
 
         identity = f"{self.config.id}\x1f{observation.dedupe_scope}\x1f{observation.external_id}"
         dedupe_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-        # A normalized headline gives independent feeds a shared incident key.
+        # Prefer stable domain identities when a collector has one. A headline
+        # fallback is retained for generic RSS, but is scoped by the rule so
+        # unrelated publishers cannot collapse into the same incident.
+        attributes = observation.attributes
+        explicit_identity = str(attributes.get("incident_key", "")).strip()
+        if not explicit_identity and attributes.get("check"):
+            explicit_identity = f"check:{attributes['check']}"
+        if not explicit_identity and attributes.get("symbol"):
+            event_types = attributes.get("event_types", attributes.get("recovered", []))
+            if isinstance(event_types, (list, tuple)):
+                explicit_identity = f"symbol:{attributes['symbol']}:{','.join(map(str, event_types))}"
+            else:
+                explicit_identity = f"symbol:{attributes['symbol']}"
         normalized = re.sub(r"[^a-z0-9 ]+", " ", observation.title.lower())
         normalized = re.sub(r"\s+", " ", normalized).strip()[:240]
+        normalized = explicit_identity or normalized
         incident_key = hashlib.sha256(
             f"{self.config.id}\x1f{normalized}".encode("utf-8")
         ).hexdigest()
@@ -65,6 +78,7 @@ class WeightedTextRule:
             confidence=max(0.0, min(1.0, score / max(self.config.threshold * 2, 1.0))),
             evidence=tuple(dict.fromkeys(reasons)),
             incident_key=incident_key,
+            recovery=bool(attributes.get("recovery")),
         )
 
 

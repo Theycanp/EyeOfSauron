@@ -4,13 +4,17 @@ import json
 import sqlite3
 import tempfile
 import unittest
+import urllib.request
+import threading
+from http.server import HTTPServer
 from pathlib import Path
 
 from signalwatch.adapters import build_collector
-from signalwatch.admin import AdminError, ManagedConfigStore
+from signalwatch.admin import AdminError, ManagedConfigStore, make_handler
 from signalwatch.database import Database
 from signalwatch.market import MarketCollector
 from signalwatch.host import HostHealthCollector
+from unittest.mock import patch
 from signalwatch.models import SourceState
 from signalwatch.mqtt import CommandPolicy, CommandRequest, MqttError, SensorNormalizer
 
@@ -69,6 +73,33 @@ class ExtensionTests(unittest.TestCase):
             with self.assertRaises(AdminError):
                 store.upsert("source", source)
 
+    def test_admin_revision_and_metrics_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = load_config(PROJECT_ROOT / "config" / "signalwatch.example.toml")
+            database = Database(root / "state.db")
+            store = ManagedConfigStore(root / "managed.json", {source.id for source in config.sources}, {rule.id for rule in config.rules})
+            server = HTTPServer(("127.0.0.1", 0), make_handler(store, database, "token"))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}/api/health"
+                request = urllib.request.Request(url, headers={"Authorization": "Bearer token"})
+                with urllib.request.urlopen(request) as response:
+                    self.assertEqual(200, response.status)
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/api/validate",
+                    data=json.dumps({"sources": [], "rules": []}).encode(),
+                    headers={"Authorization": "Bearer token", "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request) as response:
+                    self.assertTrue(json.loads(response.read())["valid"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                database.close()
+
     def test_sensor_normalizer_and_command_policy(self) -> None:
         event = SensorNormalizer().parse("home/cat_feeder/state", b'{"value":"ok","unit":"state"}', observed_at=10)
         self.assertEqual("cat_feeder", event.device_id)
@@ -89,6 +120,20 @@ class ExtensionTests(unittest.TestCase):
         result = HostHealthCollector(source).fetch(SourceState("host_health", True, None, None, None, None, 0, False, None))
         self.assertTrue(result.cursor)
         self.assertTrue(result.observations)
+
+    def test_host_collector_detects_unexpected_and_missing_listen_ports(self) -> None:
+        source = load_config(PROJECT_ROOT / "config" / "signalwatch.example.toml").sources[0]
+        source = source.__class__(
+            id="host_ports", kind="host", publisher="bk", section="Host", dedupe_scope="host",
+            poll_interval_seconds=300, request_timeout_seconds=5, request_attempts=1,
+            retry_base_seconds=1, max_response_bytes=1024, enabled=True,
+            settings={"paths": ["/tmp"], "units": [], "allowed_listen_ports": [22], "required_listen_ports": [22, 443]},
+        )
+        with patch("signalwatch.host._listen_ports", return_value={("tcp", 22), ("tcp", 8080)}):
+            result = HostHealthCollector(source).fetch(SourceState("host_ports", True, None, None, None, None, 0, False, None))
+        titles = {item.title for item in result.observations}
+        self.assertTrue(any("8080" in title for title in titles))
+        self.assertTrue(any("443" in title for title in titles))
 
     def test_disabled_source_factory_returns_none(self) -> None:
         config = load_config(PROJECT_ROOT / "config" / "signalwatch.example.toml")
@@ -125,7 +170,7 @@ class ExtensionTests(unittest.TestCase):
             """)
             connection.close()
             database = Database(path)
-            self.assertEqual(2, database.status()["database_schema"])
+            self.assertEqual(3, database.status()["database_schema"])
             self.assertTrue(database.get_source_state("legacy").initialized)
             columns = {row[1] for row in database.connection.execute("PRAGMA table_info(alerts)")}
             self.assertIn("confidence", columns)

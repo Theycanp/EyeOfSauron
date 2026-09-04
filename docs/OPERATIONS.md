@@ -46,6 +46,12 @@ them with `sudo systemctl restart signalwatch` after reviewing the managed
 configuration. The listener is loopback-only and must not be reverse proxied
 to the public ntfy endpoint.
 
+The same API also provides `POST /api/validate`, `POST /api/test-source`,
+`GET /api/revisions`, `POST /api/revisions/<id>/rollback`,
+`POST /api/sources/<id>/enable|disable`, `GET /api/incidents`, and `/metrics`.
+Every accepted change receives a revision and audit record; rollback creates a
+new revision rather than mutating history.
+
 Retrieve the one-time browser credential locally when needed; do not send it
 through chat or store it in the project:
 
@@ -62,7 +68,8 @@ sources use `username_env` and `password_env`.
 
 Host checks can be enabled with `kind = "host"` and a `settings` table containing
 `paths`, `units`, `disk_used_percent`, `inode_used_percent`,
-`memory_used_percent`, `load1`, and `allowed_listen_ports`. This probe is
+`memory_used_percent`, `load1`, `allowed_listen_ports`, and
+`required_listen_ports`. This probe is
 transition-based and intentionally low frequency; use node_exporter,
 smartctl_exporter and blackbox_exporter for continuous metrics.
 
