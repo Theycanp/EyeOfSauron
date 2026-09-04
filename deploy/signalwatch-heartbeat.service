@@ -1,0 +1,19 @@
+[Unit]
+Description=SignalWatch outbound heartbeat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=signalwatch
+Group=signalwatch
+EnvironmentFile=/etc/signalwatch/heartbeat.env
+ExecStart=/usr/bin/python3 -c "from signalwatch.heartbeat import main; raise SystemExit(main(['--url-env','SIGNALWATCH_HEARTBEAT_URL','--token-env','SIGNALWATCH_HEARTBEAT_TOKEN']))"
+Environment=PYTHONPATH=/opt/signalwatch/src
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=

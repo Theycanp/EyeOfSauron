@@ -7,8 +7,8 @@ delivers durable notifications through ntfy.
 The first production adapter monitors Bloomberg's official RSS feeds. A
 configurable weighted headline rule emits a high-priority notification for
 likely breaking or market-moving news. The project is intentionally not tied to
-Bloomberg: stock, host-health, social, and MQTT adapters can use the same event,
-rule, state, and delivery contracts.
+Bloomberg: stock, email, X, YouTube, host-health, and MQTT adapters use the same
+event, rule, state, and delivery contracts.
 
 ## Reliability properties
 
@@ -22,6 +22,21 @@ rule, state, and delivery contracts.
 - The service runs as a dedicated unprivileged account with systemd hardening.
 - Its ntfy identity has write-only access to the single `signalwatch` topic.
 - No secret is stored in this repository, SQLite, or application logs.
+
+## Management backend
+
+The optional `admin` command serves a small JSON/HTML management backend. The
+production template binds it to `127.0.0.1:18080`; access it remotely with an
+SSH tunnel, for example `ssh -N -L 18080:127.0.0.1:18080 joker@host`. It does
+not add a public firewall rule. Source and rule changes are validated and saved
+to the service-owned managed JSON file and take effect after restarting
+SignalWatch. Credentials are referenced by `*_env` names and are never entered
+into the managed file.
+
+The backend can add custom stock symbols and thresholds, official RSS/Atom
+feeds (including WSJ, The Economist, blogs and YouTube channel feeds), X
+numeric user IDs, and IMAP searches. Sources without credentials remain
+disabled. Do not use display names as identity for X or other accounts.
 
 ## Local development
 

@@ -1,4 +1,4 @@
-schema_version = 1
+schema_version = 2
 
 [service]
 database_path = "/tmp/signalwatch-development.db"
@@ -8,6 +8,13 @@ source_failure_alert_after = 3
 retention_days = 90
 delivery_lease_seconds = 60
 max_delivery_retry_seconds = 3600
+managed_sources_path = "/tmp/signalwatch-managed-sources.json"
+
+[admin]
+enabled = true
+bind = "127.0.0.1"
+port = 18080
+auth_token_env = "SIGNALWATCH_ADMIN_TOKEN"
 
 [ntfy]
 enabled = false
@@ -29,6 +36,74 @@ request_timeout_seconds = 20
 request_attempts = 3
 retry_base_seconds = 2
 max_response_bytes = 2097152
+
+# Add custom feeds (WSJ, The Economist, official blogs, YouTube channel RSS)
+# by copying this block and filling in the publisher-owned HTTPS URL. Keep
+# allowed_hosts limited to the exact feed/article hosts you trust.
+# [[sources]]
+# id = "wsj_world"
+# kind = "rss"
+# publisher = "The Wall Street Journal"
+# section = "World"
+# dedupe_scope = "wsj"
+# url = "https://<official-feed-host>/<feed>.xml"
+# allowed_hosts = ["<official-feed-host>"]
+# poll_interval_seconds = 300
+# request_timeout_seconds = 20
+# request_attempts = 3
+# retry_base_seconds = 2
+# max_response_bytes = 2097152
+
+# A market source is disabled until a provider and credentials are configured.
+# [[sources]]
+# id = "stocks"
+# kind = "market"
+# publisher = "Alpaca"
+# section = "Watchlist"
+# dedupe_scope = "market"
+# enabled = false
+# poll_interval_seconds = 300
+# request_timeout_seconds = 15
+# request_attempts = 2
+# retry_base_seconds = 2
+# max_response_bytes = 524288
+# [sources.settings]
+# api_base_url = "https://data.alpaca.markets"
+# path_template = "/v2/stocks/{symbol}/snapshot"
+# api_key_env = "ALPACA_API_KEY"
+# api_secret_env = "ALPACA_API_SECRET"
+# symbols = ["AAPL", "MSFT"]
+# price_change_threshold = 5.0
+# volume_multiplier = 3.0
+# gap_threshold = 3.0
+# cooldown_seconds = 1800
+
+# X, IMAP, YouTube and MQTT sources are also disabled by default. X requires
+# numeric user_id; YouTube requires channel_id; IMAP uses username/password
+# environment variables. Store only *_env names here, never credentials.
+
+# Host checks are opt-in. For continuous CPU/temperature/network telemetry use
+# Prometheus exporters and forward only evaluated incidents to SignalWatch.
+# [[sources]]
+# id = "host_health"
+# kind = "host"
+# publisher = "bk"
+# section = "Host"
+# dedupe_scope = "host"
+# enabled = false
+# poll_interval_seconds = 300
+# request_timeout_seconds = 5
+# request_attempts = 1
+# retry_base_seconds = 1
+# max_response_bytes = 65536
+# [sources.settings]
+# paths = ["/", "/var/lib/signalwatch"]
+# units = ["signalwatch.service", "ntfy.service", "nginx.service"]
+# disk_used_percent = 90
+# inode_used_percent = 90
+# memory_used_percent = 90
+# load1 = 8
+# allowed_listen_ports = [22, 10008, 10009, 18080]
 
 [[rules]]
 id = "bloomberg_breaking"

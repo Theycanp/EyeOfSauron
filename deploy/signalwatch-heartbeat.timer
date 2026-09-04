@@ -1,0 +1,10 @@
+[Unit]
+Description=Run SignalWatch outbound heartbeat
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=signalwatch-heartbeat.service
+
+[Install]
+WantedBy=timers.target

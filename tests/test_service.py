@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -75,12 +76,13 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_poll_baseline_then_deliver_new_alert(self) -> None:
-        collector = _Collector(FeedFetchResult((observation("baseline", "Ordinary news"),), None, None))
+        recent = int(time.time()) - 60
+        collector = _Collector(FeedFetchResult((observation("baseline", "Ordinary news", timestamp=recent),), None, None))
         notifier = _Notifier()
         service = self._service(collector, notifier)
         self.assertTrue(await service.poll_source_once(self.source.id))
         collector.result = FeedFetchResult(
-            (observation("new", "Breaking: Prime Minister Resigns"),), None, None
+            (observation("new", "Breaking: Prime Minister Resigns", timestamp=recent),), None, None
         )
         self.assertTrue(await service.poll_source_once(self.source.id))
         self.assertTrue(await service.deliver_one())

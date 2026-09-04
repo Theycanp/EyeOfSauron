@@ -1,7 +1,7 @@
 [Unit]
-Description=SignalWatch event monitoring and ntfy delivery
+Description=SignalWatch loopback-only management API
 Documentation=file:/opt/signalwatch/docs/OPERATIONS.md
-After=network-online.target ntfy.service
+After=network-online.target signalwatch.service
 Wants=network-online.target
 
 [Service]
@@ -11,12 +11,10 @@ Group=signalwatch
 WorkingDirectory=/var/lib/signalwatch
 Environment=PYTHONPATH=/opt/signalwatch/src
 Environment=PYTHONDONTWRITEBYTECODE=1
-EnvironmentFile=/etc/signalwatch/ntfy.env
-EnvironmentFile=-/etc/signalwatch/providers.env
-ExecStart=/usr/bin/python3 -m signalwatch --config /etc/signalwatch/config.toml run
+EnvironmentFile=/etc/signalwatch/admin.env
+ExecStart=/usr/bin/python3 -m signalwatch --config /etc/signalwatch/config.toml admin
 Restart=on-failure
 RestartSec=10s
-TimeoutStopSec=30s
 UMask=0077
 
 NoNewPrivileges=true

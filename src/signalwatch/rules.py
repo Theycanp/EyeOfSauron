@@ -42,6 +42,12 @@ class WeightedTextRule:
 
         identity = f"{self.config.id}\x1f{observation.dedupe_scope}\x1f{observation.external_id}"
         dedupe_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        # A normalized headline gives independent feeds a shared incident key.
+        normalized = re.sub(r"[^a-z0-9 ]+", " ", observation.title.lower())
+        normalized = re.sub(r"\s+", " ", normalized).strip()[:240]
+        incident_key = hashlib.sha256(
+            f"{self.config.id}\x1f{normalized}".encode("utf-8")
+        ).hexdigest()
         section = str(observation.attributes.get("section", "")).strip()
         source_label = observation.publisher if not section else f"{observation.publisher} · {section}"
         summary = truncate(observation.summary, 700)
@@ -56,6 +62,9 @@ class WeightedTextRule:
             tags=self.config.tags,
             click_url=observation.url,
             topic=self.config.topic or self.default_topic,
+            confidence=max(0.0, min(1.0, score / max(self.config.threshold * 2, 1.0))),
+            evidence=tuple(dict.fromkeys(reasons)),
+            incident_key=incident_key,
         )
 
 

@@ -57,7 +57,7 @@ class SignalWatchService:
         self,
         config: AppConfig,
         database: Database,
-        collectors: dict[str, RssCollector],
+        collectors: dict[str, object],
         rules: RuleSet,
         notifier: Notifier | None,
     ) -> None:
@@ -77,7 +77,7 @@ class SignalWatchService:
         last_error: Exception | None = None
         for attempt in range(1, source_config.request_attempts + 1):
             try:
-                result = await asyncio.to_thread(collector.fetch, state)
+                result = await asyncio.to_thread(collector.fetch, state)  # type: ignore[attr-defined]
                 break
             except asyncio.CancelledError:
                 raise
@@ -200,10 +200,11 @@ class SignalWatchService:
         try:
             async with asyncio.TaskGroup() as group:
                 for source in self.config.sources:
-                    group.create_task(
-                        self._source_loop(source.id, source.poll_interval_seconds),
-                        name=f"source:{source.id}",
-                    )
+                    if source.id in self.collectors:
+                        group.create_task(
+                            self._source_loop(source.id, source.poll_interval_seconds),
+                            name=f"source:{source.id}",
+                        )
                 group.create_task(self._delivery_loop(), name="delivery")
                 group.create_task(self._maintenance_loop(), name="maintenance")
                 await self.stop_event.wait()
@@ -211,7 +212,7 @@ class SignalWatchService:
             LOGGER.info("service_stopped")
 
     async def run_once(self, deliver: bool = False) -> None:
-        await asyncio.gather(*(self.poll_source_once(source.id) for source in self.config.sources))
+        await asyncio.gather(*(self.poll_source_once(source.id) for source in self.config.sources if source.id in self.collectors))
         if deliver:
             while await self.deliver_one():
                 pass

@@ -28,6 +28,9 @@ class AlertCandidate:
     tags: tuple[str, ...]
     click_url: str
     topic: str | None = None
+    confidence: float = 0.5
+    evidence: tuple[str, ...] = ()
+    incident_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +39,7 @@ class FeedFetchResult:
     etag: str | None
     last_modified: str | None
     not_modified: bool = False
+    cursor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +53,7 @@ class SourceState:
     consecutive_failures: int
     outage_alerted: bool
     outage_started_at: int | None
+    cursor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,3 +74,5 @@ class OutboxMessage:
     tags: tuple[str, ...]
     click_url: str
     attempts: int
+    confidence: float = 0.5
+    evidence: tuple[str, ...] = ()

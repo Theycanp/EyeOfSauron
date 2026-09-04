@@ -8,7 +8,7 @@ produce immutable `Observation` records. Rules turn observations into
 rule output, and the notification outbox. Notifiers deliver outbox entries.
 
 ```text
-collectors -> normalized observations -> rules -> SQLite outbox -> notifiers
+collectors -> normalized observations -> rules -> incidents -> SQLite outbox -> notifiers
                      |                    |
                      +---- SQLite --------+
 ```
@@ -20,6 +20,9 @@ collectors -> normalized observations -> rules -> SQLite outbox -> notifiers
 - A notifier knows nothing about collectors or rules.
 - A dedupe scope plus external ID identifies the same item across collectors.
 - A rule ID plus observation identity identifies the same alert.
+- A matching rule records confidence and human-readable evidence. A normalized
+  incident key suppresses repeated headlines from independent feeds for a short
+  window while retaining the original observation and link.
 
 These contracts allow future adapters for market APIs, X, host events, webhooks,
 and MQTT without changing delivery reliability.
@@ -48,6 +51,27 @@ This classifier is deliberately conservative and auditable. It cannot understand
 every important event and may produce false positives. Later improvements can add
 an optional semantic classifier as a second opinion while retaining deterministic
 rules as the reliable fallback.
+
+## Configurable sources
+
+`kind = "rss"` is the generic HTTPS RSS/Atom adapter, so publisher-specific
+feeds are configuration rather than hard-coded integrations. `kind = "market"`
+uses a provider interface and stores a compact per-symbol cursor; it supports
+price moves, gaps, volume spikes and cooldowns. `kind = "imap"`, `"x"`, and
+`"youtube"` use UID, numeric user ID, and channel ID cursors respectively.
+All are disabled until explicitly configured.
+
+`kind = "host"` is an opt-in low-frequency local probe for disk/inode,
+memory, load and selected systemd units. It emits transitions (including
+recovery) rather than storing every sample. For CPU, temperature, SMART,
+network rates and certificate age, use Prometheus exporters and forward only
+alert events.
+
+Continuous host metrics should be collected by Prometheus exporters and sent as
+already-evaluated incidents. SignalWatch also includes outbound heartbeat,
+MQTT sensor normalization, and an allowlisted command policy for future
+devices; neither opens an inbound public control port nor persists high-rate
+telemetry in SQLite.
 
 ## Security
 

@@ -16,7 +16,7 @@ from .rules import RuleSet
 from .util import sanitize_error, to_epoch
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Database:
@@ -63,6 +63,9 @@ class Database:
                     title TEXT NOT NULL,
                     message TEXT NOT NULL,
                     priority INTEGER NOT NULL CHECK (priority BETWEEN 1 AND 5),
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    evidence_json TEXT NOT NULL DEFAULT '[]',
+                    incident_key TEXT,
                     tags_json TEXT NOT NULL,
                     click_url TEXT NOT NULL,
                     status TEXT NOT NULL CHECK (status IN ('pending', 'sending', 'delivered')),
@@ -87,13 +90,30 @@ class Database:
                     consecutive_failures INTEGER NOT NULL DEFAULT 0,
                     outage_alerted INTEGER NOT NULL DEFAULT 0,
                     outage_started_at INTEGER,
-                    last_error TEXT
+                    last_error TEXT,
+                    cursor TEXT
                 );
 
-                PRAGMA user_version=1;
+                PRAGMA user_version=2;
                 COMMIT;
                 """
             )
+        elif version == 1:
+            # Multiple systemd units may open the database during an upgrade.
+            # Take the writer lock and re-read the version before altering.
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version == 1:
+                    self.connection.execute("ALTER TABLE alerts ADD COLUMN confidence REAL NOT NULL DEFAULT 0.5")
+                    self.connection.execute("ALTER TABLE alerts ADD COLUMN evidence_json TEXT NOT NULL DEFAULT '[]'")
+                    self.connection.execute("ALTER TABLE alerts ADD COLUMN incident_key TEXT")
+                    self.connection.execute("ALTER TABLE collector_state ADD COLUMN cursor TEXT")
+                    self.connection.execute("PRAGMA user_version=2")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def close(self) -> None:
         self.connection.close()
@@ -117,6 +137,7 @@ class Database:
             consecutive_failures=int(row["consecutive_failures"]),
             outage_alerted=bool(row["outage_alerted"]),
             outage_started_at=row["outage_started_at"],
+            cursor=row["cursor"],
         )
 
     def _insert_alert(
@@ -125,12 +146,24 @@ class Database:
         observation_id: int | None,
         now: int,
     ) -> bool:
+        if candidate.incident_key:
+            existing = self.connection.execute(
+                """
+                SELECT 1 FROM alerts
+                WHERE rule_id = ? AND incident_key = ? AND created_at >= ?
+                LIMIT 1
+                """,
+                (candidate.rule_id, candidate.incident_key, now - 1800),
+            ).fetchone()
+            if existing is not None:
+                return False
         cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO alerts(
                 observation_id, rule_id, dedupe_key, topic, title, message,
-                priority, tags_json, click_url, status, next_attempt_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                priority, confidence, evidence_json, incident_key, tags_json, click_url,
+                status, next_attempt_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
             (
                 observation_id,
@@ -140,6 +173,9 @@ class Database:
                 candidate.title,
                 candidate.message,
                 candidate.priority,
+                candidate.confidence,
+                json.dumps(candidate.evidence, ensure_ascii=False),
+                candidate.incident_key,
                 json.dumps(candidate.tags, ensure_ascii=False),
                 candidate.click_url,
                 now,
@@ -218,10 +254,11 @@ class Database:
                     consecutive_failures = 0,
                     outage_alerted = 0,
                     outage_started_at = NULL,
-                    last_error = NULL
+                    last_error = NULL,
+                    cursor = ?
                 WHERE source_id = ?
                 """,
-                (result.etag, result.last_modified, now, now, source_id),
+                (result.etag, result.last_modified, now, now, result.cursor, source_id),
             )
             self.connection.commit()
         except Exception:
@@ -335,8 +372,12 @@ class Database:
             raise
         try:
             tags = tuple(json.loads(row["tags_json"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, KeyError):
             tags = ()
+        try:
+            evidence = tuple(json.loads(row["evidence_json"]))
+        except (TypeError, ValueError, KeyError):
+            evidence = ()
         return OutboxMessage(
             id=int(row["id"]),
             topic=str(row["topic"]),
@@ -346,6 +387,8 @@ class Database:
             tags=tags,
             click_url=str(row["click_url"]),
             attempts=attempts,
+            confidence=float(row["confidence"]),
+            evidence=evidence,
         )
 
     def mark_delivered(self, alert_id: int, now: int) -> None:

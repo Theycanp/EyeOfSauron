@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import json
+import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -27,6 +29,7 @@ class ServiceConfig:
     retention_days: int
     delivery_lease_seconds: int
     max_delivery_retry_seconds: int
+    managed_sources_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,19 +42,33 @@ class NtfyConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class RssSourceConfig:
+class SourceConfig:
     id: str
     kind: str
     publisher: str
     section: str
     dedupe_scope: str
-    url: str
-    allowed_hosts: tuple[str, ...]
     poll_interval_seconds: int
     request_timeout_seconds: int
     request_attempts: int
     retry_base_seconds: int
     max_response_bytes: int
+    url: str | None = None
+    allowed_hosts: tuple[str, ...] = ()
+    enabled: bool = True
+    settings: Mapping[str, Any] = field(default_factory=dict)
+
+
+# Kept as an alias for integrations written against the 0.1 RSS-only API.
+RssSourceConfig = SourceConfig
+
+
+@dataclass(frozen=True, slots=True)
+class AdminConfig:
+    enabled: bool
+    bind: str
+    port: int
+    auth_token_env: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,8 +98,9 @@ class AppConfig:
     schema_version: int
     service: ServiceConfig
     ntfy: NtfyConfig
-    sources: tuple[RssSourceConfig, ...]
+    sources: tuple[SourceConfig, ...]
     rules: tuple[WeightedTextRuleConfig, ...]
+    admin: AdminConfig = AdminConfig(False, "127.0.0.1", 18080, None)
 
 
 def _mapping(value: Any, location: str) -> Mapping[str, Any]:
@@ -148,6 +166,7 @@ def _parse_service(raw: Any) -> ServiceConfig:
     allowed = {
         "database_path", "lock_path", "log_level", "source_failure_alert_after",
         "retention_days", "delivery_lease_seconds", "max_delivery_retry_seconds",
+        "managed_sources_path",
     }
     _reject_unknown(data, allowed, "service")
     log_level = _required(data, "log_level", str, "service").upper()
@@ -161,6 +180,10 @@ def _parse_service(raw: Any) -> ServiceConfig:
         retention_days=_bounded_int(data, "retention_days", "service", 1, 3650),
         delivery_lease_seconds=_bounded_int(data, "delivery_lease_seconds", "service", 10, 3600),
         max_delivery_retry_seconds=_bounded_int(data, "max_delivery_retry_seconds", "service", 30, 86400),
+        managed_sources_path=(
+            _absolute_path(data, "managed_sources_path", "service")
+            if data.get("managed_sources_path") is not None else None
+        ),
     )
 
 
@@ -184,23 +207,64 @@ def _parse_ntfy(raw: Any) -> NtfyConfig:
     )
 
 
-def _parse_source(raw: Any, index: int) -> RssSourceConfig:
+def _parse_source(raw: Any, index: int) -> SourceConfig:
     location = f"sources[{index}]"
     data = _mapping(raw, location)
     allowed = {
         "id", "kind", "publisher", "section", "dedupe_scope", "url", "allowed_hosts",
         "poll_interval_seconds", "request_timeout_seconds", "request_attempts",
-        "retry_base_seconds", "max_response_bytes",
+        "retry_base_seconds", "max_response_bytes", "enabled", "settings",
     }
     _reject_unknown(data, allowed, location)
     source_id = _identifier(_required(data, "id", str, location), f"{location}.id")
     kind = _required(data, "kind", str, location)
-    if kind != "rss":
+    supported_kinds = {"rss", "market", "imap", "x", "youtube", "mqtt", "heartbeat", "host"}
+    if kind not in supported_kinds:
         raise ConfigError(f"{location}.kind is unsupported: {kind}")
-    allowed_hosts = tuple(host.lower() for host in _string_list(data.get("allowed_hosts"), f"{location}.allowed_hosts"))
-    url = _https_url(_required(data, "url", str, location), f"{location}.url")
-    if urlsplit(url).hostname.lower() not in allowed_hosts:
-        raise ConfigError(f"{location}.url host must be present in allowed_hosts")
+    raw_hosts = data.get("allowed_hosts", [])
+    allowed_hosts = tuple(host.lower() for host in _string_list(raw_hosts, f"{location}.allowed_hosts")) if raw_hosts else ()
+    raw_url = data.get("url")
+    url = _https_url(raw_url, f"{location}.url") if raw_url is not None else None
+    if kind == "rss":
+        if url is None:
+            raise ConfigError(f"missing {location}.url")
+        if urlsplit(url).hostname.lower() not in allowed_hosts:
+            raise ConfigError(f"{location}.url host must be present in allowed_hosts")
+    settings = data.get("settings", {})
+    if not isinstance(settings, Mapping):
+        raise ConfigError(f"{location}.settings must be a table")
+    if any(not isinstance(key, str) for key in settings):
+        raise ConfigError(f"{location}.settings keys must be strings")
+    enabled = data.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"{location}.enabled must be bool")
+    if enabled and kind == "market":
+        symbols = settings.get("symbols")
+        if not isinstance(symbols, list) or not symbols or not all(isinstance(item, str) and item.strip() for item in symbols):
+            raise ConfigError(f"{location}.settings.symbols must be a non-empty string array")
+        api_base = settings.get("api_base_url")
+        if not isinstance(api_base, str):
+            raise ConfigError(f"{location}.settings.api_base_url is required")
+        _https_url(api_base, f"{location}.settings.api_base_url")
+        for key in ("api_key_env", "api_secret_env"):
+            env_name = settings.get(key)
+            if not isinstance(env_name, str) or not _ENV_RE.fullmatch(env_name):
+                raise ConfigError(f"{location}.settings.{key} is invalid")
+    if enabled and kind == "x":
+        if not str(settings.get("user_id", "")).isdigit():
+            raise ConfigError(f"{location}.settings.user_id must be numeric")
+        token_env = settings.get("bearer_token_env")
+        if not isinstance(token_env, str) or not _ENV_RE.fullmatch(token_env):
+            raise ConfigError(f"{location}.settings.bearer_token_env is invalid")
+    if enabled and kind == "youtube" and not str(settings.get("channel_id", "")).strip():
+        raise ConfigError(f"{location}.settings.channel_id is required")
+    if enabled and kind == "imap":
+        if not str(settings.get("host", "")).strip():
+            raise ConfigError(f"{location}.settings.host is required")
+        for key in ("username_env", "password_env"):
+            env_name = settings.get(key)
+            if not isinstance(env_name, str) or not _ENV_RE.fullmatch(env_name):
+                raise ConfigError(f"{location}.settings.{key} is invalid")
     publisher = _required(data, "publisher", str, location).strip()
     section = _required(data, "section", str, location).strip()
     dedupe_scope = _identifier(
@@ -208,7 +272,7 @@ def _parse_source(raw: Any, index: int) -> RssSourceConfig:
     )
     if not publisher or not section:
         raise ConfigError(f"{location} publisher and section cannot be empty")
-    return RssSourceConfig(
+    return SourceConfig(
         id=source_id,
         kind=kind,
         publisher=publisher,
@@ -221,7 +285,27 @@ def _parse_source(raw: Any, index: int) -> RssSourceConfig:
         request_attempts=_bounded_int(data, "request_attempts", location, 1, 5),
         retry_base_seconds=_bounded_int(data, "retry_base_seconds", location, 1, 30),
         max_response_bytes=_bounded_int(data, "max_response_bytes", location, 1024, 10485760),
+        enabled=enabled,
+        settings=dict(settings),
     )
+
+
+def _parse_admin(raw: Any) -> AdminConfig:
+    if raw is None:
+        return AdminConfig(False, "127.0.0.1", 18080, None)
+    data = _mapping(raw, "admin")
+    _reject_unknown(data, {"enabled", "bind", "port", "auth_token_env"}, "admin")
+    enabled = _required(data, "enabled", bool, "admin")
+    bind = _required(data, "bind", str, "admin").strip()
+    if not bind:
+        raise ConfigError("admin.bind cannot be empty")
+    if bind not in {"127.0.0.1", "::1", "localhost"}:
+        raise ConfigError("admin.bind must be loopback-only")
+    port = _bounded_int(data, "port", "admin", 1024, 65535)
+    auth_env = data.get("auth_token_env")
+    if auth_env is not None and (not isinstance(auth_env, str) or not _ENV_RE.fullmatch(auth_env)):
+        raise ConfigError("admin.auth_token_env is invalid")
+    return AdminConfig(enabled, bind, port, auth_env)
 
 
 def _parse_rule(raw: Any, index: int) -> WeightedTextRuleConfig:
@@ -280,7 +364,7 @@ def _parse_rule(raw: Any, index: int) -> WeightedTextRuleConfig:
     )
 
 
-def load_config(path: str | Path) -> AppConfig:
+def load_config(path: str | Path, *, include_managed: bool = True) -> AppConfig:
     config_path = Path(path)
     try:
         with config_path.open("rb") as handle:
@@ -288,9 +372,9 @@ def load_config(path: str | Path) -> AppConfig:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"cannot load configuration: {exc}") from exc
 
-    _reject_unknown(data, {"schema_version", "service", "ntfy", "sources", "rules"}, "top-level")
+    _reject_unknown(data, {"schema_version", "service", "ntfy", "sources", "rules", "admin"}, "top-level")
     version = _required(data, "schema_version", int, "top-level")
-    if version != 1:
+    if version not in {1, 2}:
         raise ConfigError(f"unsupported schema_version: {version}")
     raw_sources = data.get("sources")
     raw_rules = data.get("rules")
@@ -299,8 +383,35 @@ def load_config(path: str | Path) -> AppConfig:
     if not isinstance(raw_rules, list) or not raw_rules:
         raise ConfigError("rules must be a non-empty table array")
 
-    sources = tuple(_parse_source(source, index) for index, source in enumerate(raw_sources))
-    rules = tuple(_parse_rule(rule, index) for index, rule in enumerate(raw_rules))
+    source_rows = list(raw_sources)
+    rule_rows = list(raw_rules)
+    base_service = _parse_service(data.get("service"))
+    managed_path = base_service.managed_sources_path
+    try:
+        managed_readable = bool(managed_path and managed_path.exists() and os.access(managed_path, os.R_OK))
+    except OSError:
+        managed_readable = False
+    if include_managed and managed_readable and managed_path is not None:
+        try:
+            managed = json.loads(base_service.managed_sources_path.read_text(encoding="utf-8"))
+        except PermissionError:
+            # A non-service operator may validate the base TOML without access
+            # to the service-owned managed file.
+            managed = None
+        except (OSError, ValueError) as exc:
+            raise ConfigError(f"cannot load managed configuration: {exc}") from exc
+        if managed is not None and not isinstance(managed, Mapping):
+            raise ConfigError("managed configuration must be an object")
+        if isinstance(managed, Mapping) and isinstance(managed.get("sources", []), list):
+            overrides = {item.get("id"): item for item in managed["sources"] if isinstance(item, Mapping)}
+            source_rows = [overrides.pop(item.get("id"), item) if isinstance(item, Mapping) else item for item in source_rows]
+            source_rows.extend(overrides.values())
+        if isinstance(managed, Mapping) and isinstance(managed.get("rules", []), list):
+            overrides = {item.get("id"): item for item in managed["rules"] if isinstance(item, Mapping)}
+            rule_rows = [overrides.pop(item.get("id"), item) if isinstance(item, Mapping) else item for item in rule_rows]
+            rule_rows.extend(overrides.values())
+    sources = tuple(_parse_source(source, index) for index, source in enumerate(source_rows))
+    rules = tuple(_parse_rule(rule, index) for index, rule in enumerate(rule_rows))
     source_ids = [source.id for source in sources]
     rule_ids = [rule.id for rule in rules]
     if len(source_ids) != len(set(source_ids)):
@@ -313,8 +424,9 @@ def load_config(path: str | Path) -> AppConfig:
 
     return AppConfig(
         schema_version=version,
-        service=_parse_service(data.get("service")),
+        service=base_service,
         ntfy=_parse_ntfy(data.get("ntfy")),
         sources=sources,
         rules=rules,
+        admin=_parse_admin(data.get("admin")),
     )
