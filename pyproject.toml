@@ -1,12 +1,31 @@
 [project]
 name = "eyeofsauron"
-version = "0.6.0"
+version = "0.7.0"
 description = "EyeOfSauron personal intelligence monitoring, powered by the Argus watcher engine"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = []
+keywords = ["monitoring", "alerts", "ntfy", "rss", "personal-intelligence"]
+
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: No Input/Output (Daemon)",
+  "Intended Audience :: End Users/Desktop",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: System :: Monitoring",
+]
+
+[project.urls]
+Homepage = "https://github.com/Theycanp/EyeOfSauron"
+Repository = "https://github.com/Theycanp/EyeOfSauron.git"
+Issues = "https://github.com/Theycanp/EyeOfSauron/issues"
+Changelog = "https://github.com/Theycanp/EyeOfSauron/blob/main/CHANGELOG.md"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools==84.0.0", "wheel==0.48.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -17,7 +36,39 @@ argus = ["admin_web/**/*"]
 
 [project.scripts]
 argus = "argus.cli:main"
+argus-backup = "argus.backup:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["argus"]
+
+[tool.coverage.report]
+fail_under = 75
+show_missing = true
+skip_covered = true
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+]
+
+[tool.coverage.xml]
+output = "artifacts/coverage.xml"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["src/argus/admin_web"]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+files = ["src/argus/backup.py", "scripts/operations/check_status.py", "scripts/operations/daily_backup.py"]

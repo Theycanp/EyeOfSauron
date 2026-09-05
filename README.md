@@ -32,12 +32,16 @@ API. The production template binds it to `127.0.0.1:18080`; access it remotely
 with an SSH tunnel, for example `ssh -N -L 18080:127.0.0.1:18080 joker@host`.
 It does not add a public firewall rule. The UI is a static build: Node is used
 only during development/build and is never a production runtime dependency.
-Source and rule changes are validated and saved to the service-owned managed
-JSON file and take effect after restarting Argus. Credentials are
-referenced by `*_env` names and are never entered into the managed file.
+Source and rule changes are validated and committed as versioned SQLite
+configuration snapshots. The engine detects a new revision within five seconds
+and gracefully restarts under systemd; the UI distinguishes saved and applied
+revisions. The old managed JSON file is a one-time migration input, not the authority;
+after import it is not rewritten. Use the management API to export current settings.
+Concurrent edits are rejected instead of overwriting a newer revision.
+Credentials are referenced by `*_env` names, never entered as literal values.
 
 The backend supports configuration revisions, audit history, full-set validation,
-source connection tests, enable/disable, rollback, incident inspection, and
+bounded asynchronous source connection tests, enable/disable, rollback, incident inspection, and
 Prometheus-compatible metrics. It also creates, edits, disables, and deletes
 one-time, countdown, and daily reminders without a service restart. Countdown
 input is persisted as an absolute time; daily reminders keep an IANA timezone.
@@ -45,6 +49,12 @@ It can add custom stock symbols and thresholds, official RSS/Atom
 feeds (including WSJ, The Economist, blogs and YouTube channel feeds), X
 numeric user IDs, and IMAP searches. Sources without credentials remain
 disabled. Do not use display names as identity for X or other accounts.
+
+Failed notifications have explicit retryable, dead-letter, and cancelled states.
+Operators can retry a dead letter or cancel a pending message from the UI.
+The reviewed news catalog includes Bloomberg, WSJ, The Economist, FT, and
+official central-bank/regulator feeds; licensed-only providers are labeled
+unavailable rather than using an unofficial scraping endpoint.
 
 ## Naming
 
@@ -68,5 +78,6 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 -m argus --config config/argus.example.toml check-config
 ```
 
-See `docs/ARCHITECTURE.md` for design decisions and `docs/OPERATIONS.md` for
-deployment and recovery commands.
+See `docs/ARCHITECTURE.md` for design decisions, `docs/PROVIDERS.md` for the
+provider capability contract and reviewed news catalog, and `docs/OPERATIONS.md`
+for deployment and recovery commands.

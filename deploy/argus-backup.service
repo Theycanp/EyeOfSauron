@@ -1,0 +1,30 @@
+[Unit]
+Description=EyeOfSauron verified daily SQLite backup
+Documentation=file:/opt/eyeofsauron/current/docs/OPERATIONS.md
+
+[Service]
+Type=oneshot
+Environment=PYTHONPATH=/opt/eyeofsauron/current/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/eyeofsauron/current/scripts/operations/daily_backup.py
+TimeoutStartSec=5min
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/argus /var/backups/eyeofsauron
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+MemoryMax=256M
+TasksMax=16

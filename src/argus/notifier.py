@@ -8,6 +8,7 @@ import urllib.request
 from typing import Mapping, Protocol
 from urllib.parse import urlsplit
 
+from . import __version__
 from .config import NtfyConfig
 from .models import OutboxMessage
 
@@ -16,7 +17,26 @@ _TOPIC_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class NotifyError(RuntimeError):
-    pass
+    """A delivery failure with an explicit retry policy."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        failure_kind: str = "permanent",
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.failure_kind = failure_kind
+
+
+def delivery_error_details(error: BaseException) -> tuple[bool, str]:
+    """Classify notifier failures without coupling the service to one provider."""
+    if isinstance(error, NotifyError):
+        return error.retryable, error.failure_kind
+    # Unknown adapters default to transient so omission cannot drop an alert.
+    return True, "transient_unknown"
 
 
 class Notifier(Protocol):
@@ -60,7 +80,9 @@ class NtfyNotifier:
 
     def publish(self, alert: OutboxMessage) -> None:
         if not _TOPIC_RE.fullmatch(alert.topic):
-            raise NotifyError("outbox contains an invalid ntfy topic")
+            raise NotifyError(
+                "outbox contains an invalid ntfy topic", failure_kind="invalid_payload"
+            )
         payload: dict[str, object] = {
             "topic": alert.topic,
             "title": alert.title,
@@ -76,7 +98,7 @@ class NtfyNotifier:
             headers={
                 "Authorization": f"Bearer {self.token}",
                 "Content-Type": "application/json; charset=utf-8",
-                "User-Agent": "Argus/0.6",
+                "User-Agent": f"Argus/{__version__}",
             },
             method="POST",
         )
@@ -85,8 +107,24 @@ class NtfyNotifier:
             with response:
                 response.read(65537)
                 if not 200 <= response.status < 300:
-                    raise NotifyError(f"ntfy returned HTTP {response.status}")
+                    retryable = response.status in {408, 425, 429} or response.status >= 500
+                    raise NotifyError(
+                        f"ntfy returned HTTP {response.status}",
+                        retryable=retryable,
+                        failure_kind=(
+                            "remote_transient" if retryable else "remote_rejected"
+                        ),
+                    )
         except urllib.error.HTTPError as exc:
-            raise NotifyError(f"ntfy returned HTTP {exc.code}") from exc
+            retryable = exc.code in {408, 425, 429} or exc.code >= 500
+            raise NotifyError(
+                f"ntfy returned HTTP {exc.code}",
+                retryable=retryable,
+                failure_kind="remote_transient" if retryable else "remote_rejected",
+            ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise NotifyError(f"ntfy request failed: {type(exc).__name__}") from exc
+            raise NotifyError(
+                f"ntfy request failed: {type(exc).__name__}",
+                retryable=True,
+                failure_kind="transport",
+            ) from exc

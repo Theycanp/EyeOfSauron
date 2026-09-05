@@ -42,6 +42,7 @@ class FeedFetchResult:
     last_modified: str | None
     not_modified: bool = False
     cursor: str | None = None
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +77,7 @@ class OutboxMessage:
     tags: tuple[str, ...]
     click_url: str
     attempts: int
+    created_at: int = 0
     confidence: float = 0.5
     evidence: tuple[str, ...] = ()
 

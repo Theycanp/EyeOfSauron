@@ -11,9 +11,8 @@ from pathlib import Path
 from .config import ConfigError, load_config
 from .adapters import AdapterError, build_collector
 from .admin import ManagedConfigStore, serve
-from .database import Database
+from .database import Database, read_active_config
 from .notifier import NtfyNotifier, NotifyError
-from .rss import RssCollector
 from .rules import RuleSet
 from .service import AlreadyRunningError, ProcessLock, ArgusService
 from .util import now_epoch
@@ -41,24 +40,26 @@ def _configure_logging(level: str) -> None:
     )
 
 
-def _build_service(config, database: Database) -> ArgusService:  # type: ignore[no-untyped-def]
+def _build_service(
+    config, database: Database, config_revision: int | None = None
+) -> ArgusService:  # type: ignore[no-untyped-def]
     collectors = {}
     for source in config.sources:
         try:
             collector = build_collector(source)
-        except AdapterError as exc:
-            if source.kind in {"imap", "x", "youtube", "mqtt", "heartbeat"}:
-                logging.getLogger("argus").warning(
-                    "source_disabled source=%s reason=credentials_or_settings_unavailable",
-                    source.id,
-                )
-                continue
-            raise
+        except (AdapterError, ValueError, OSError) as exc:
+            logging.getLogger("argus").error(
+                "source_initialization_failed source=%s error_type=%s",
+                source.id, type(exc).__name__,
+            )
+            continue
         if collector is not None:
             collectors[source.id] = collector
     rules = RuleSet.from_config(config.rules, config.ntfy.default_topic)
     notifier = NtfyNotifier.from_config(config.ntfy) if config.ntfy.enabled else None
-    return ArgusService(config, database, collectors, rules, notifier)
+    return ArgusService(
+        config, database, collectors, rules, notifier, config_revision=config_revision
+    )
 
 
 def _print_status(status: dict, as_json: bool) -> None:
@@ -72,7 +73,9 @@ def _print_status(status: dict, as_json: bool) -> None:
         "outbox: "
         f"pending={outbox.get('pending', 0)} "
         f"sending={outbox.get('sending', 0)} "
-        f"delivered={outbox.get('delivered', 0)}"
+        f"delivered={outbox.get('delivered', 0)} "
+        f"dead={outbox.get('dead', 0)} "
+        f"cancelled={outbox.get('cancelled', 0)}"
     )
     reminders = status.get("reminders", {})
     print(
@@ -88,27 +91,48 @@ def _print_status(status: dict, as_json: bool) -> None:
         )
 
 
-async def _run_service(service: ArgusService) -> None:
+async def _run_service(service: ArgusService) -> bool:
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signum, service.request_stop)
-    await service.run_forever()
+    return await service.run_forever()
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
-        config = load_config(Path(arguments.config))
-        _configure_logging(config.service.log_level)
+        config_path = Path(arguments.config)
+        base_config = load_config(config_path, include_managed=False)
+        _configure_logging(base_config.service.log_level)
         if arguments.command == "check-config":
+            active_payload = read_active_config(base_config.service.database_path)
+            config = load_config(config_path, managed_override=active_payload)
             print(
                 f"configuration valid: {len(config.sources)} sources, "
                 f"{len(config.rules)} rules, schema {config.schema_version}"
             )
             return 0
 
-        database = Database(config.service.database_path)
+        database = Database(base_config.service.database_path)
         try:
+            managed_path = base_config.service.managed_sources_path or (
+                base_config.service.database_path.parent / "managed-sources.json"
+            )
+            store = ManagedConfigStore(
+                managed_path,
+                {source.id for source in base_config.sources},
+                {rule.id for rule in base_config.rules},
+                database,
+            )
+            active_revision = database.get_active_config_revision()
+            config = (
+                load_config(
+                    config_path,
+                    managed_override=active_revision["payload"],
+                )
+                if active_revision is not None
+                else base_config
+            )
             if arguments.command == "status":
                 _print_status(database.status(), arguments.json)
                 return 0
@@ -120,20 +144,26 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.command == "admin":
                 if not config.admin.enabled:
                     raise ConfigError("admin.enabled is false")
-                managed_path = config.service.managed_sources_path or (config.service.database_path.parent / "managed-sources.json")
-                base_config = load_config(Path(arguments.config), include_managed=False)
-                store = ManagedConfigStore(
-                    managed_path,
-                    {source.id for source in base_config.sources},
-                    {rule.id for rule in base_config.rules},
+                serve(
+                    config.admin,
+                    store,
+                    database,
+                    heartbeat_timeout_seconds=max(
+                        60, config.service.heartbeat_interval_seconds * 4
+                    ),
                 )
-                serve(config.admin, store, database)
                 return 0
 
-            service = _build_service(config, database)
+            service = _build_service(
+                config,
+                database,
+                int(active_revision["revision"]) if active_revision is not None else None,
+            )
             with ProcessLock(config.service.lock_path):
                 if arguments.command == "run":
-                    asyncio.run(_run_service(service))
+                    reload_requested = asyncio.run(_run_service(service))
+                    if reload_requested:
+                        return 75
                 elif arguments.command == "once":
                     asyncio.run(service.run_once(deliver=arguments.deliver))
                 else:

@@ -92,7 +92,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("eos", notifier.sent[0].topic)
 
     async def test_notification_failure_returns_alert_to_pending(self) -> None:
-        self.database.enqueue_test_alert("eos", 1)
+        self.database.enqueue_test_alert("eos", int(time.time()))
         service = self._service(_Collector(FeedFetchResult((), None, None)), _Notifier(fail=True))
         self.assertFalse(await service.deliver_one())
         self.assertEqual(1, self.database.status()["outbox"]["pending"])
@@ -137,6 +137,30 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(5, retry_delay(1, 3600))
         self.assertEqual(10, retry_delay(2, 3600))
         self.assertEqual(3600, retry_delay(100, 3600))
+
+    async def test_source_supervisor_contains_one_source_exception(self) -> None:
+        service = self._service(_Collector(FeedFetchResult((), None, None)), _Notifier())
+        calls = 0
+
+        async def poll(source_id: str) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("rule bug")
+            service.request_stop()
+            return True
+
+        service.poll_source_once = poll  # type: ignore[method-assign]
+        await service._source_loop(self.source.id, 0)
+        self.assertEqual(2, calls)
+
+    async def test_normal_poll_does_not_mark_source_as_starting(self) -> None:
+        collector = _Collector(FeedFetchResult((), None, None))
+        service = self._service(collector, _Notifier())
+        with patch.object(self.database, "mark_source_runtime", wraps=self.database.mark_source_runtime) as mark:
+            await service.poll_source_once(self.source.id)
+        self.assertEqual("active", mark.call_args_list[0].args[1])
+        self.assertNotIn("starting", [call.args[1] for call in mark.call_args_list])
 
 
 if __name__ == "__main__":

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from datetime import datetime
 
 from .config import WeightedTextRuleConfig
 from .models import AlertCandidate, Observation
+from .safe_regex import compile_safe_regex
 from .util import to_epoch, truncate
 
 
@@ -13,7 +15,7 @@ class WeightedTextRule:
     def __init__(self, config: WeightedTextRuleConfig, default_topic: str) -> None:
         self.config = config
         self.default_topic = default_topic
-        self._patterns = tuple((pattern, re.compile(pattern.regex)) for pattern in config.patterns)
+        self._patterns = tuple((pattern, compile_safe_regex(pattern.regex)) for pattern in config.patterns)
 
     @property
     def source_ids(self) -> tuple[str, ...]:
@@ -55,8 +57,13 @@ class WeightedTextRule:
                 explicit_identity = f"symbol:{attributes['symbol']}:{','.join(map(str, event_types))}"
             else:
                 explicit_identity = f"symbol:{attributes['symbol']}"
-        normalized = re.sub(r"[^a-z0-9 ]+", " ", observation.title.lower())
+        folded = unicodedata.normalize("NFKC", observation.title).casefold()
+        normalized = "".join(
+            character if character.isalnum() else " " for character in folded
+        )
         normalized = re.sub(r"\s+", " ", normalized).strip()[:240]
+        if not normalized:
+            normalized = hashlib.sha256(folded.encode("utf-8")).hexdigest()
         normalized = explicit_identity or normalized
         incident_key = hashlib.sha256(
             f"{self.config.id}\x1f{normalized}".encode("utf-8")

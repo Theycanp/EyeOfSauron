@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import urllib.request
 import threading
+from datetime import UTC, datetime
 from http.server import HTTPServer
 from pathlib import Path
 
@@ -41,10 +42,15 @@ class ExtensionTests(unittest.TestCase):
             retry_base_seconds=1, max_response_bytes=1024, enabled=True,
             settings={"symbols": ["ABC"], "price_change_threshold": 5, "cooldown_seconds": 60},
         )
-        collector = MarketCollector(source, _Provider({"ABC": {"price": 100, "volume": 10, "timestamp": "1"}}))
+        now = datetime(2026, 9, 5, 8, 0, tzinfo=UTC)
+        collector = MarketCollector(
+            source,
+            _Provider({"ABC": {"price": 100, "volume": 10, "timestamp": now.isoformat()}}),
+            now_factory=lambda: now,
+        )
         first = collector.fetch(SourceState("stocks", True, None, None, None, None, 0, False, None))
         self.assertTrue(first.not_modified)
-        collector.provider = _Provider({"ABC": {"price": 110, "volume": 10, "timestamp": "2"}})
+        collector.provider = _Provider({"ABC": {"price": 110, "volume": 10, "timestamp": now.isoformat()}})
         second = collector.fetch(SourceState("stocks", True, None, None, None, None, 0, False, None, first.cursor))
         self.assertEqual(1, len(second.observations))
         self.assertIn("ABC", second.observations[0].title)
@@ -242,7 +248,7 @@ class ExtensionTests(unittest.TestCase):
             retry_base_seconds=1, max_response_bytes=1024, enabled=True,
             settings={"paths": ["/tmp"], "units": [], "allowed_listen_ports": [22], "required_listen_ports": [22, 443]},
         )
-        with patch("argus.host._listen_ports", return_value={("tcp", 22), ("tcp", 8080)}):
+        with patch("argus.host._listen_ports", return_value={("tcp", "0.0.0.0", 22), ("tcp", "0.0.0.0", 8080)}):
             result = HostHealthCollector(source).fetch(SourceState("host_ports", True, None, None, None, None, 0, False, None))
         titles = {item.title for item in result.observations}
         self.assertTrue(any("8080" in title for title in titles))
@@ -305,7 +311,7 @@ class ExtensionTests(unittest.TestCase):
             """)
             connection.close()
             database = Database(path)
-            self.assertEqual(6, database.status()["database_schema"])
+            self.assertEqual(7, database.status()["database_schema"])
             self.assertTrue(database.get_source_state("legacy").initialized)
             columns = {row[1] for row in database.connection.execute("PRAGMA table_info(alerts)")}
             self.assertIn("confidence", columns)
@@ -315,6 +321,22 @@ class ExtensionTests(unittest.TestCase):
             ).fetchone()[0])
             self.assertEqual("ok", database.connection.execute("PRAGMA integrity_check").fetchone()[0])
             database.close()
+
+    def test_host_unknown_probe_does_not_emit_false_recovery(self) -> None:
+        source = load_config(PROJECT_ROOT / "config" / "argus.example.toml").sources[0]
+        source = source.__class__(
+            id="host_unknown", kind="host", publisher="bk", section="Host", dedupe_scope="host",
+            poll_interval_seconds=300, request_timeout_seconds=5, request_attempts=1,
+            retry_base_seconds=1, max_response_bytes=1024, enabled=True,
+            settings={"paths": ["/tmp"], "units": ["demo.service"]},
+        )
+        cursor = json.dumps({"active": ["unit:demo.service"]})
+        with patch("argus.host._unit_health", return_value={"demo.service": "unknown"}):
+            result = HostHealthCollector(source).fetch(
+                SourceState("host_unknown", True, None, None, None, None, 0, False, None, cursor)
+            )
+        self.assertFalse(any(item.attributes.get("recovery") for item in result.observations))
+        self.assertIn("unit:demo.service", json.loads(result.cursor)["active"])
 
 
 if __name__ == "__main__":

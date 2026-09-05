@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import html
+import ipaddress
+import socket
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from .config import RssSourceConfig
 from .models import FeedFetchResult, Observation, SourceState
@@ -17,6 +19,11 @@ from .util import truncate
 
 class FeedError(RuntimeError):
     pass
+
+
+class _NoDoctypeTreeBuilder(ET.TreeBuilder):
+    def doctype(self, name: str, pubid: str | None, system: str | None) -> None:
+        raise FeedError("feed document types and entity declarations are not allowed")
 
 
 class _TextExtractor(HTMLParser):
@@ -62,8 +69,13 @@ def _parse_datetime(value: str | None) -> datetime:
 def _safe_link(value: str | None, allowed_hosts: tuple[str, ...]) -> str:
     if not value:
         return ""
-    parsed = urlsplit(value.strip())
-    if parsed.scheme != "https" or not parsed.hostname:
+    try:
+        parsed = urlsplit(value.strip())
+        parsed.port
+    except ValueError:
+        return ""
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+            or any(ord(char) < 32 for char in value)):
         return ""
     hostname = parsed.hostname.lower()
     if hostname not in allowed_hosts:
@@ -74,13 +86,15 @@ def _safe_link(value: str | None, allowed_hosts: tuple[str, ...]) -> str:
 def _external_id(guid: str, link: str, title: str, published_at: datetime) -> str:
     if guid.strip():
         return truncate(guid.strip(), 512)
-    material = "\x1f".join((link, title, published_at.isoformat()))
+    material = "\x1f".join((link.strip(), " ".join(title.casefold().split())))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ...]:
+    if len(payload) > source.max_response_bytes:
+        raise FeedError("feed exceeds the configured response limit")
     try:
-        root = ET.fromstring(payload)
+        root = ET.fromstring(payload, parser=ET.XMLParser(target=_NoDoctypeTreeBuilder()))
     except ET.ParseError as exc:
         raise FeedError(f"invalid XML: {exc}") from exc
 
@@ -145,42 +159,100 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
     return tuple(observations)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+def _validate_fetch_url(
+    value: str,
+    allowed_hosts: tuple[str, ...],
+    resolver: object = socket.getaddrinfo,
+) -> None:
+    parsed = urlsplit(value)
+    host = (parsed.hostname or "").lower()
+    if (
+        parsed.scheme != "https"
+        or not host
+        or host not in allowed_hosts
+        or parsed.username
+        or parsed.password
+    ):
+        raise FeedError("feed URL is outside the configured HTTPS host allowlist")
+    try:
+        addresses = resolver(host, parsed.port or 443, type=socket.SOCK_STREAM)  # type: ignore[operator]
+    except OSError as exc:
+        raise FeedError(f"feed host resolution failed: {type(exc).__name__}") from exc
+    if not addresses:
+        raise FeedError("feed host resolution returned no addresses")
+    for item in addresses:
+        address = ipaddress.ip_address(item[4][0])
+        if not address.is_global:
+            raise FeedError("feed host resolved to a non-public address")
+
+
 class RssCollector:
-    def __init__(self, config: RssSourceConfig) -> None:
+    def __init__(
+        self,
+        config: RssSourceConfig,
+        opener: object | None = None,
+        resolver: object = socket.getaddrinfo,
+    ) -> None:
         self.config = config
+        self._opener = opener or urllib.request.build_opener(_NoRedirect())
+        self._resolver = resolver
 
     def fetch(self, state: SourceState) -> FeedFetchResult:
         headers = {
             "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9",
-            "User-Agent": "Argus/0.6 (personal feed monitor)",
+            "User-Agent": "Argus/0.7 (personal feed monitor)",
         }
         if state.etag:
             headers["If-None-Match"] = state.etag
         if state.last_modified:
             headers["If-Modified-Since"] = state.last_modified
-        request = urllib.request.Request(self.config.url, headers=headers, method="GET")
-
-        try:
-            response = urllib.request.urlopen(request, timeout=self.config.request_timeout_seconds)
-        except urllib.error.HTTPError as exc:
-            if exc.code == 304:
-                return FeedFetchResult(
-                    observations=(),
-                    etag=exc.headers.get("ETag") or state.etag,
-                    last_modified=exc.headers.get("Last-Modified") or state.last_modified,
-                    not_modified=True,
+        current_url = str(self.config.url)
+        response = None
+        for _ in range(6):
+            _validate_fetch_url(current_url, self.config.allowed_hosts, self._resolver)
+            request = urllib.request.Request(current_url, headers=headers, method="GET")
+            try:
+                response = self._opener.open(
+                    request, timeout=self.config.request_timeout_seconds  # type: ignore[attr-defined]
                 )
-            raise FeedError(f"feed returned HTTP {exc.code}") from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise FeedError(f"feed request failed: {exc}") from exc
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 304:
+                    return FeedFetchResult(
+                        observations=(),
+                        etag=exc.headers.get("ETag") or state.etag,
+                        last_modified=exc.headers.get("Last-Modified") or state.last_modified,
+                        not_modified=True,
+                    )
+                if exc.code in {301, 302, 303, 307, 308}:
+                    location = exc.headers.get("Location")
+                    if not location:
+                        raise FeedError("feed redirect omitted Location") from exc
+                    current_url = urljoin(current_url, location)
+                    continue
+                raise FeedError(f"feed returned HTTP {exc.code}") from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                raise FeedError(f"feed request failed: {type(exc).__name__}") from exc
+        else:
+            raise FeedError("feed exceeded the redirect limit")
+        if response is None:
+            raise FeedError("feed returned no response")
 
         with response:
-            final_url = urlsplit(response.geturl())
-            final_host = (final_url.hostname or "").lower()
-            if final_url.scheme != "https" or final_host not in self.config.allowed_hosts:
-                raise FeedError("feed redirected outside the configured HTTPS host allowlist")
+            final_url = response.geturl()
+            _validate_fetch_url(final_url, self.config.allowed_hosts, self._resolver)
             content_type = response.headers.get_content_type().lower()
-            if content_type not in {"application/rss+xml", "application/atom+xml", "application/xml", "text/xml"}:
+            if content_type not in {
+                "application/rss+xml",
+                "application/atom+xml",
+                "application/xml",
+                "text/xml",
+            }:
                 raise FeedError(f"unexpected feed content type: {content_type}")
             payload = response.read(self.config.max_response_bytes + 1)
             if len(payload) > self.config.max_response_bytes:

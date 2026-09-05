@@ -5,7 +5,7 @@ import unittest
 import urllib.error
 from dataclasses import replace
 from email.message import Message
-from unittest.mock import patch
+from unittest.mock import Mock
 
 from argus.config import load_config
 from argus.models import SourceState
@@ -33,6 +33,22 @@ class RssTests(unittest.TestCase):
     def test_rejects_invalid_xml(self) -> None:
         with self.assertRaisesRegex(FeedError, "invalid XML"):
             parse_feed(b"<rss>", self.source)
+
+    def test_rejects_doctype_and_entities_in_all_encodings(self) -> None:
+        document = '<!DOCTYPE rss [<!ENTITY x "expanded">]><rss><channel><item><title>&x;</title></item></channel></rss>'
+        for encoding in ("utf-8", "utf-16"):
+            with self.subTest(encoding=encoding), self.assertRaisesRegex(FeedError, "document types"):
+                parse_feed(document.encode(encoding), self.source)
+
+    def test_parser_enforces_size_limit_for_direct_callers(self) -> None:
+        with self.assertRaisesRegex(FeedError, "response limit"):
+            parse_feed(self.payload, replace(self.source, max_response_bytes=10))
+
+    def test_article_links_cannot_embed_credentials_or_invalid_ports(self) -> None:
+        from argus.rss import _safe_link
+        for value in ("https://secret@www.bloomberg.com/news", "https://www.bloomberg.com:bad/news",
+                      "https://[broken/news", "https://www.bloomberg.com/\nnews"):
+            self.assertEqual("", _safe_link(value, self.source.allowed_hosts))
 
     def test_drops_article_link_outside_allowlist(self) -> None:
         payload = self.payload.replace(
@@ -71,9 +87,13 @@ class RssTests(unittest.TestCase):
                 return "https://www.bloomberg.com/feeds/markets/news.rss"
 
         response = Response(self.payload)
-        with patch("urllib.request.urlopen", return_value=response) as mocked:
-            result = RssCollector(self.source).fetch(self._state('W/"old"', "yesterday"))
-        request = mocked.call_args.args[0]
+        opener = Mock()
+        opener.open.return_value = response
+        resolver = lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))]
+        result = RssCollector(self.source, opener=opener, resolver=resolver).fetch(
+            self._state('W/"old"', "yesterday")
+        )
+        request = opener.open.call_args.args[0]
         self.assertEqual('W/"old"', request.get_header("If-none-match"))
         self.assertEqual("yesterday", request.get_header("If-modified-since"))
         self.assertEqual('W/"new"', result.etag)
@@ -82,8 +102,12 @@ class RssTests(unittest.TestCase):
         headers = Message()
         headers["ETag"] = 'W/"same"'
         error = urllib.error.HTTPError(self.source.url, 304, "Not Modified", headers, None)
-        with patch("urllib.request.urlopen", side_effect=error):
-            result = RssCollector(self.source).fetch(self._state('W/"same"'))
+        opener = Mock()
+        opener.open.side_effect = error
+        resolver = lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))]
+        result = RssCollector(self.source, opener=opener, resolver=resolver).fetch(
+            self._state('W/"same"')
+        )
         self.assertTrue(result.not_modified)
         self.assertEqual((), result.observations)
 
@@ -102,9 +126,37 @@ class RssTests(unittest.TestCase):
             def geturl(self) -> str:
                 return "https://www.bloomberg.com/feeds/markets/news.rss"
 
-        with patch("urllib.request.urlopen", return_value=Response()):
-            with self.assertRaisesRegex(FeedError, "size limit"):
-                RssCollector(source).fetch(self._state())
+        opener = Mock()
+        opener.open.return_value = Response()
+        resolver = lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))]
+        with self.assertRaisesRegex(FeedError, "size limit"):
+            RssCollector(source, opener=opener, resolver=resolver).fetch(self._state())
+
+    def test_fallback_id_is_stable_when_date_is_missing(self) -> None:
+        payload = b"""<rss><channel><item><title>Same title</title><description>x</description></item></channel></rss>"""
+        first = parse_feed(payload, self.source)[0]
+        second = parse_feed(payload, self.source)[0]
+        self.assertEqual(first.external_id, second.external_id)
+
+    def test_collector_rejects_private_resolution_before_request(self) -> None:
+        opener = Mock()
+        resolver = lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 443))]
+        with self.assertRaisesRegex(FeedError, "non-public"):
+            RssCollector(self.source, opener=opener, resolver=resolver).fetch(self._state())
+        opener.open.assert_not_called()
+
+    def test_redirect_is_validated_before_following(self) -> None:
+        headers = Message()
+        headers["Location"] = "https://127.0.0.1/private"
+        redirect = urllib.error.HTTPError(self.source.url, 302, "Found", headers, None)
+        opener = Mock()
+        opener.open.side_effect = redirect
+        resolver = lambda host, *args, **kwargs: [
+            (2, 1, 6, "", ("93.184.216.34", 443))
+        ]
+        with self.assertRaisesRegex(FeedError, "allowlist"):
+            RssCollector(self.source, opener=opener, resolver=resolver).fetch(self._state())
+        self.assertEqual(1, opener.open.call_count)
 
 
 if __name__ == "__main__":

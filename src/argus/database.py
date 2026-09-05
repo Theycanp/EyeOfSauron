@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -16,22 +19,62 @@ from .models import (
 from .rules import RuleSet
 from .reminders import ReminderError, ReminderSpec, next_daily_occurrence
 from .util import sanitize_error, to_epoch
+from .persistence import RevisionConflictError, SQLiteUnitOfWork
+
+SCHEMA_VERSION = 7
 
 
-SCHEMA_VERSION = 6
+def read_active_config(path: Path) -> dict[str, Any] | None:
+    """Read the desired configuration without creating or migrating a database."""
+    if not path.exists():
+        return None
+    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5.0)
+    try:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'config_revisions'"
+        ).fetchone()
+        if exists is None:
+            return None
+        row = connection.execute(
+            "SELECT payload_json FROM config_revisions WHERE active = 1 ORDER BY revision DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row[0])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("active configuration revision is invalid") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("active configuration revision must be an object")
+        return payload
+    finally:
+        connection.close()
 
 
 class Database:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self.connection = sqlite3.connect(path, timeout=5.0)
-        self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.execute("PRAGMA synchronous=NORMAL")
-        self.connection.execute("PRAGMA foreign_keys=ON")
-        self.connection.execute("PRAGMA busy_timeout=5000")
-        self._migrate()
+        # Serialize the version read and the complete migration sequence. SQLite
+        # serializes individual DDL writes, but without this lock two processes
+        # can both observe user_version=0 and race the initial CREATE TABLE script.
+        lock_fd = os.open(f"{path}.migrate.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            self.connection = sqlite3.connect(path, timeout=5.0)
+            try:
+                self.connection.row_factory = sqlite3.Row
+                self.connection.execute("PRAGMA journal_mode=WAL")
+                self.connection.execute("PRAGMA synchronous=FULL")
+                self.connection.execute("PRAGMA foreign_keys=ON")
+                self.connection.execute("PRAGMA busy_timeout=5000")
+                self._migrate()
+            except Exception:
+                self.connection.close()
+                raise
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
     def _migrate(self) -> None:
         version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
@@ -179,7 +222,7 @@ class Database:
                 COMMIT;
                 """
             )
-            return
+            version = 6
         if version < 2:
             # Multiple systemd units may open the database during an upgrade.
             # Take the writer lock and re-read the version before altering.
@@ -421,9 +464,428 @@ class Database:
                 self.connection.execute("PRAGMA foreign_keys=ON")
             if self.connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise RuntimeError("database foreign key check failed after schema 6 migration")
+        if version < 7:
+            self.connection.commit()
+            self.connection.execute("PRAGMA foreign_keys=OFF")
+            try:
+                self.connection.execute("BEGIN IMMEDIATE")
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 7:
+                    self.connection.execute(
+                        """
+                        CREATE TABLE alerts_v7 (
+                            id INTEGER PRIMARY KEY,
+                            observation_id INTEGER REFERENCES observations(id),
+                            incident_id INTEGER REFERENCES incidents(id),
+                            reminder_id TEXT REFERENCES reminders(id) ON DELETE SET NULL,
+                            rule_id TEXT NOT NULL,
+                            dedupe_key TEXT NOT NULL UNIQUE,
+                            topic TEXT NOT NULL,
+                            title TEXT NOT NULL,
+                            message TEXT NOT NULL,
+                            priority INTEGER NOT NULL CHECK (priority BETWEEN 1 AND 5),
+                            confidence REAL NOT NULL DEFAULT 0.5,
+                            evidence_json TEXT NOT NULL DEFAULT '[]',
+                            incident_key TEXT,
+                            tags_json TEXT NOT NULL,
+                            click_url TEXT NOT NULL,
+                            status TEXT NOT NULL CHECK (
+                                status IN ('pending', 'sending', 'delivered', 'dead', 'cancelled')
+                            ),
+                            attempts INTEGER NOT NULL DEFAULT 0,
+                            next_attempt_at INTEGER NOT NULL,
+                            lease_until INTEGER,
+                            last_error TEXT,
+                            failure_kind TEXT,
+                            created_at INTEGER NOT NULL,
+                            delivered_at INTEGER,
+                            dead_at INTEGER,
+                            retry_started_at INTEGER,
+                            config_revision INTEGER,
+                            rule_hash TEXT,
+                            collector_version TEXT
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        INSERT INTO alerts_v7(
+                            id, observation_id, incident_id, reminder_id, rule_id, dedupe_key,
+                            topic, title, message, priority, confidence, evidence_json,
+                            incident_key, tags_json, click_url, status, attempts,
+                            next_attempt_at, lease_until, last_error, created_at, delivered_at
+                        )
+                        SELECT id, observation_id, incident_id, reminder_id, rule_id, dedupe_key,
+                            topic, title, message, priority, confidence, evidence_json,
+                            incident_key, tags_json, click_url, status, attempts,
+                            next_attempt_at, lease_until, last_error, created_at, delivered_at
+                        FROM alerts
+                        """
+                    )
+                    self.connection.execute("DROP TABLE alerts")
+                    self.connection.execute("ALTER TABLE alerts_v7 RENAME TO alerts")
+                    self.connection.execute(
+                        "CREATE INDEX alerts_due_idx ON alerts(status, next_attempt_at, lease_until, priority, created_at)"
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX alerts_reminder_idx ON alerts(reminder_id, created_at)"
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX alerts_observation_idx ON alerts(observation_id)"
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX alerts_incident_idx ON alerts(incident_id, created_at DESC, id DESC)"
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS observations_fetched_idx ON observations(fetched_at)"
+                    )
+                    collector_columns = {
+                        str(row[1]) for row in self.connection.execute("PRAGMA table_info(collector_state)")
+                    }
+                    for name, definition in (
+                        ("poll_count", "INTEGER NOT NULL DEFAULT 0"),
+                        ("success_count", "INTEGER NOT NULL DEFAULT 0"),
+                        ("failure_count", "INTEGER NOT NULL DEFAULT 0"),
+                        ("last_observation_count", "INTEGER"),
+                        ("last_alert_count", "INTEGER"),
+                        ("last_warning", "TEXT"),
+                    ):
+                        if name not in collector_columns:
+                            self.connection.execute(
+                                f"ALTER TABLE collector_state ADD COLUMN {name} {definition}"
+                            )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS source_runtime (
+                            source_id TEXT PRIMARY KEY,
+                            kind TEXT NOT NULL,
+                            configured_enabled INTEGER NOT NULL CHECK (configured_enabled IN (0, 1)),
+                            runtime_status TEXT NOT NULL CHECK (
+                                runtime_status IN (
+                                    'disabled', 'configured', 'starting', 'active',
+                                    'degraded', 'invalid', 'stale'
+                                )
+                            ),
+                            expected_interval_seconds INTEGER NOT NULL,
+                            config_revision INTEGER,
+                            registered_at INTEGER,
+                            heartbeat_at INTEGER,
+                            last_error TEXT,
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS engine_runtime (
+                            id INTEGER PRIMARY KEY CHECK (id = 1),
+                            instance_id TEXT,
+                            state TEXT NOT NULL CHECK (
+                                state IN ('offline', 'starting', 'running', 'degraded', 'stopping', 'failed')
+                            ),
+                            started_at INTEGER,
+                            heartbeat_at INTEGER,
+                            applied_revision INTEGER,
+                            applied_at INTEGER,
+                            code_version TEXT,
+                            configured_sources INTEGER NOT NULL DEFAULT 0,
+                            active_sources INTEGER NOT NULL DEFAULT 0,
+                            last_error TEXT
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "INSERT OR IGNORE INTO engine_runtime(id, state) VALUES (1, 'offline')"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS admin_jobs (
+                            id TEXT PRIMARY KEY,
+                            kind TEXT NOT NULL,
+                            status TEXT NOT NULL CHECK (
+                                status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')
+                            ),
+                            request_json TEXT NOT NULL,
+                            result_json TEXT,
+                            error TEXT,
+                            actor TEXT NOT NULL,
+                            created_at INTEGER NOT NULL,
+                            started_at INTEGER,
+                            completed_at INTEGER,
+                            expires_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS admin_jobs_status_idx ON admin_jobs(status, created_at)"
+                    )
+
+                    self.connection.execute("PRAGMA user_version=7")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            finally:
+                self.connection.execute("PRAGMA foreign_keys=ON")
+            if self.connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise RuntimeError("database foreign key check failed after schema 7 migration")
 
     def close(self) -> None:
         self.connection.close()
+
+    def unit_of_work(self, *, immediate: bool = True) -> SQLiteUnitOfWork:
+        return SQLiteUnitOfWork(self.connection, immediate=immediate)
+    def register_engine(
+        self,
+        instance_id: str,
+        *,
+        started_at: int,
+        applied_revision: int | None,
+        code_version: str,
+        configured_sources: int,
+        active_sources: int,
+    ) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE engine_runtime
+                SET instance_id = ?, state = ?, started_at = ?, heartbeat_at = ?,
+                    applied_revision = ?, applied_at = ?, code_version = ?,
+                    configured_sources = ?, active_sources = ?, last_error = NULL
+                WHERE id = 1
+                """,
+                (
+                    instance_id,
+                    "running" if configured_sources == active_sources else "degraded",
+                    started_at,
+                    started_at,
+                    applied_revision,
+                    started_at,
+                    code_version,
+                    configured_sources,
+                    active_sources,
+                ),
+            )
+
+    def heartbeat_engine(self, instance_id: str, now: int, *, state: str = "running") -> bool:
+        with self.connection:
+            updated = self.connection.execute(
+                """
+                UPDATE engine_runtime SET heartbeat_at = ?, state = ?
+                WHERE id = 1 AND instance_id = ?
+                """,
+                (now, state, instance_id),
+            )
+            if updated.rowcount == 1:
+                self.connection.execute(
+                    "UPDATE source_runtime SET heartbeat_at = ?, updated_at = ? WHERE runtime_status IN ('active', 'degraded')",
+                    (now, now),
+                )
+        return updated.rowcount == 1
+
+    def stop_engine(self, instance_id: str, now: int, *, error: str | None = None) -> None:
+        state = "failed" if error else "offline"
+        with self.connection:
+            updated = self.connection.execute(
+                """
+                UPDATE engine_runtime SET state = ?, heartbeat_at = ?, last_error = ?
+                WHERE id = 1 AND instance_id = ?
+                """,
+                (state, now, sanitize_error(error) if error else None, instance_id),
+            )
+            if updated.rowcount != 1:
+                return
+            self.connection.execute(
+                """
+                UPDATE source_runtime SET runtime_status = CASE
+                    WHEN configured_enabled = 1 THEN 'stale' ELSE 'disabled' END,
+                    updated_at = ?
+                """,
+                (now,),
+            )
+
+    def sync_source_runtime(
+        self,
+        sources: list[tuple[str, str, bool, int]],
+        active_source_ids: set[str],
+        *,
+        config_revision: int | None,
+        now: int,
+    ) -> None:
+        identifiers = {source_id for source_id, _, _, _ in sources}
+        with self.unit_of_work():
+            if identifiers:
+                placeholders = ",".join("?" for _ in identifiers)
+                self.connection.execute(
+                    f"DELETE FROM source_runtime WHERE source_id NOT IN ({placeholders})",
+                    tuple(sorted(identifiers)),
+                )
+            else:
+                self.connection.execute("DELETE FROM source_runtime")
+            for source_id, kind, enabled, interval in sources:
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO collector_state(source_id) VALUES (?)",
+                    (source_id,),
+                )
+                status = "active" if source_id in active_source_ids else "disabled" if not enabled else "invalid"
+                self.connection.execute(
+                    """
+                    INSERT INTO source_runtime(
+                        source_id, kind, configured_enabled, runtime_status,
+                        expected_interval_seconds, config_revision, registered_at,
+                        heartbeat_at, last_error, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                    ON CONFLICT(source_id) DO UPDATE SET
+                        kind = excluded.kind,
+                        configured_enabled = excluded.configured_enabled,
+                        runtime_status = excluded.runtime_status,
+                        expected_interval_seconds = excluded.expected_interval_seconds,
+                        config_revision = excluded.config_revision,
+                        registered_at = excluded.registered_at,
+                        heartbeat_at = excluded.heartbeat_at,
+                        last_error = NULL,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        source_id,
+                        kind,
+                        int(enabled),
+                        status,
+                        interval,
+                        config_revision,
+                        now if source_id in active_source_ids else None,
+                        now if source_id in active_source_ids else None,
+                        now,
+                    ),
+                )
+
+    def mark_source_runtime(
+        self,
+        source_id: str,
+        status: str,
+        now: int,
+        error: BaseException | str | None = None,
+    ) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE source_runtime
+                SET runtime_status = ?, heartbeat_at = ?, last_error = ?, updated_at = ?
+                WHERE source_id = ?
+                """,
+                (
+                    status,
+                    now,
+                    sanitize_error(error) if error is not None else None,
+                    now,
+                    source_id,
+                ),
+            )
+
+    def create_admin_job(
+        self,
+        kind: str,
+        request: Mapping[str, Any],
+        actor: str,
+        now: int,
+        *,
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        job_id = uuid.uuid4().hex
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO admin_jobs(
+                    id, kind, status, request_json, actor, created_at, expires_at
+                ) VALUES (?, ?, 'queued', ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    kind[:64],
+                    json.dumps(dict(request), ensure_ascii=False, sort_keys=True),
+                    actor[:128],
+                    now,
+                    now + max(60, min(ttl_seconds, 86400)),
+                ),
+            )
+        result = self.get_admin_job(job_id)
+        assert result is not None
+        return result
+
+    def claim_admin_job(self, kind: str, now: int) -> dict[str, Any] | None:
+        with self.unit_of_work():
+            self.connection.execute(
+                "UPDATE admin_jobs SET status = 'failed', error = 'job expired', completed_at = ? WHERE status IN ('queued', 'running') AND expires_at <= ?",
+                (now, now),
+            )
+            # Jobs are processed serially by the singleton daemon. A running row
+            # seen while claiming the next job therefore belongs to an interrupted
+            # worker and must become terminal instead of remaining stuck forever.
+            self.connection.execute(
+                "UPDATE admin_jobs SET status = 'failed', error = 'worker interrupted', completed_at = ? WHERE status = 'running'",
+                (now,),
+            )
+            row = self.connection.execute(
+                "SELECT id FROM admin_jobs WHERE kind = ? AND status = 'queued' ORDER BY created_at, id LIMIT 1",
+                (kind,),
+            ).fetchone()
+            if row is None:
+                return None
+            job_id = str(row["id"])
+            self.connection.execute(
+                "UPDATE admin_jobs SET status = 'running', started_at = ? WHERE id = ? AND status = 'queued'",
+                (now, job_id),
+            )
+        return self.get_admin_job(job_id)
+
+    def finish_admin_job(
+        self,
+        job_id: str,
+        now: int,
+        *,
+        result: Mapping[str, Any] | None = None,
+        error: BaseException | str | None = None,
+    ) -> bool:
+        status = "failed" if error is not None else "succeeded"
+        with self.connection:
+            updated = self.connection.execute(
+                """
+                UPDATE admin_jobs
+                SET status = ?, result_json = ?, error = ?, completed_at = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (
+                    status,
+                    json.dumps(dict(result or {}), ensure_ascii=False, sort_keys=True),
+                    sanitize_error(error) if error is not None else None,
+                    now,
+                    job_id,
+                ),
+            )
+        return updated.rowcount == 1
+
+    def cancel_admin_job(self, job_id: str, now: int) -> bool:
+        with self.connection:
+            updated = self.connection.execute(
+                "UPDATE admin_jobs SET status = 'cancelled', completed_at = ? WHERE id = ? AND status = 'queued'",
+                (now, job_id),
+            )
+        return updated.rowcount == 1
+
+    def get_admin_job(self, job_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute("SELECT * FROM admin_jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            item["request"] = json.loads(item.pop("request_json"))
+        except (TypeError, ValueError):
+            item["request"] = {}
+        try:
+            item["result"] = json.loads(item.pop("result_json")) if item.get("result_json") else None
+        except (TypeError, ValueError):
+            item["result"] = None
+        return item
 
     def get_source_state(self, source_id: str) -> SourceState:
         self.connection.execute(
@@ -596,8 +1058,7 @@ class Database:
         inserted = 0
         queued = 0
         recovery_queued = False
-        self.connection.execute("BEGIN IMMEDIATE")
-        try:
+        with self.unit_of_work():
             for observation in result.observations:
                 cursor = self.connection.execute(
                     """
@@ -661,15 +1122,27 @@ class Database:
                     cursor = ?,
                     last_duration_ms = ?,
                     last_error_kind = NULL,
-                    last_http_status = NULL
+                    last_http_status = NULL,
+                    poll_count = poll_count + 1,
+                    success_count = success_count + 1,
+                    last_observation_count = ?,
+                    last_alert_count = ?,
+                    last_warning = ?
                 WHERE source_id = ?
                 """,
-                (result.etag, result.last_modified, now, now, result.cursor, duration_ms, source_id),
+                (
+                    result.etag,
+                    result.last_modified,
+                    now,
+                    now,
+                    result.cursor,
+                    duration_ms,
+                    inserted,
+                    queued,
+                    "; ".join(result.warnings)[:1024] if result.warnings else None,
+                    source_id,
+                ),
             )
-            self.connection.commit()
-        except Exception:
-            self.connection.rollback()
-            raise
         return IngestReport(
             inserted_observations=inserted,
             queued_alerts=queued,
@@ -693,8 +1166,7 @@ class Database:
         outage_started = state.outage_started_at or now
         should_alert = failures >= threshold and not state.outage_alerted
         error_text = sanitize_error(error)
-        self.connection.execute("BEGIN IMMEDIATE")
-        try:
+        with self.unit_of_work():
             alert_inserted = False
             if should_alert:
                 candidate = AlertCandidate(
@@ -723,7 +1195,12 @@ class Database:
                     last_error = ?,
                     last_duration_ms = ?,
                     last_error_kind = ?,
-                    last_http_status = ?
+                    last_http_status = ?,
+                    poll_count = poll_count + 1,
+                    failure_count = failure_count + 1,
+                    last_observation_count = NULL,
+                    last_alert_count = NULL,
+                    last_warning = NULL
                 WHERE source_id = ?
                 """,
                 (
@@ -738,10 +1215,6 @@ class Database:
                     source_id,
                 ),
             )
-            self.connection.commit()
-        except Exception:
-            self.connection.rollback()
-            raise
         return alert_inserted
 
     def enqueue_test_alert(self, topic: str, now: int) -> bool:
@@ -1086,6 +1559,7 @@ class Database:
             attempts=attempts,
             confidence=float(row["confidence"]),
             evidence=evidence,
+            created_at=int(row["created_at"]),
         )
 
     def mark_delivered(self, alert_id: int, now: int) -> None:
@@ -1097,7 +1571,8 @@ class Database:
             updated = self.connection.execute(
                 """
                 UPDATE alerts
-                SET status = 'delivered', delivered_at = ?, lease_until = NULL, last_error = NULL
+                SET status = 'delivered', delivered_at = ?, lease_until = NULL,
+                    last_error = NULL, failure_kind = NULL, dead_at = NULL
                 WHERE id = ? AND status = 'sending'
                 """,
                 (now, alert_id),
@@ -1113,12 +1588,128 @@ class Database:
             self.connection.execute(
                 """
                 UPDATE alerts
-                SET status = 'pending', next_attempt_at = ?, lease_until = NULL, last_error = ?
+                SET status = 'pending', next_attempt_at = ?, lease_until = NULL,
+                    last_error = ?, failure_kind = 'transient_unknown', dead_at = NULL
                 WHERE id = ? AND status = 'sending'
                 """,
                 (next_attempt_at, sanitize_error(error), alert_id),
             )
 
+
+    def mark_delivery_failure(
+        self,
+        alert_id: int,
+        now: int,
+        next_attempt_at: int,
+        error: BaseException | str,
+        *,
+        retryable: bool,
+        failure_kind: str,
+        max_attempts: int,
+        max_age_seconds: int,
+    ) -> str:
+        """Return the durable state selected for a failed delivery."""
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT attempts, COALESCE(retry_started_at, created_at) AS retry_started_at FROM alerts WHERE id = ? AND status = 'sending'",
+                (alert_id,),
+            ).fetchone()
+            if row is None:
+                return "missing"
+            expired = now - int(row["retry_started_at"]) >= max_age_seconds
+            exhausted = int(row["attempts"]) >= max_attempts
+            status = "pending" if retryable and not expired and not exhausted else "dead"
+            self.connection.execute(
+                """
+                UPDATE alerts
+                SET status = ?, next_attempt_at = ?, lease_until = NULL,
+                    last_error = ?, failure_kind = ?, dead_at = ?
+                WHERE id = ? AND status = 'sending'
+                """,
+                (
+                    status,
+                    next_attempt_at,
+                    sanitize_error(error),
+                    failure_kind[:64],
+                    now if status == "dead" else None,
+                    alert_id,
+                ),
+            )
+        return status
+
+    @staticmethod
+    def _decode_alert(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        for field in ("tags_json", "evidence_json"):
+            try:
+                item[field[:-5]] = json.loads(item.pop(field))
+            except (TypeError, ValueError):
+                item[field[:-5]] = []
+        return item
+
+    def get_alert(self, alert_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+        return self._decode_alert(row) if row is not None else None
+
+    def list_alerts(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        before_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        valid = {"pending", "sending", "delivered", "dead", "cancelled"}
+        if status is not None and status not in valid:
+            raise ValueError("invalid alert status")
+        limit = max(1, min(int(limit), 500))
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if before_id is not None:
+            clauses.append("id < ?")
+            params.append(int(before_id))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = self.connection.execute(
+            f"SELECT * FROM alerts {where} ORDER BY id DESC LIMIT ?", params
+        )
+        return [self._decode_alert(row) for row in rows]
+
+    def retry_alert(self, alert_id: int, now: int) -> bool:
+        with self.connection:
+            updated = self.connection.execute(
+                """
+                UPDATE alerts
+                SET status = 'pending', attempts = 0, next_attempt_at = ?, retry_started_at = ?,
+                    lease_until = NULL, last_error = NULL, failure_kind = NULL, dead_at = NULL
+                WHERE id = ? AND status IN ('dead', 'cancelled')
+                """,
+                (now, now, alert_id),
+            )
+        return updated.rowcount == 1
+
+    def cancel_alert(self, alert_id: int, now: int) -> bool:
+        with self.connection:
+            updated = self.connection.execute(
+                """
+                UPDATE alerts
+                SET status = 'cancelled', lease_until = NULL, dead_at = ?,
+                    failure_kind = 'cancelled', last_error = 'cancelled by administrator'
+                WHERE id = ? AND status = 'pending'
+                """,
+                (now, alert_id),
+            )
+        return updated.rowcount == 1
+
+    def discard_alert(self, alert_id: int) -> bool:
+        with self.connection:
+            deleted = self.connection.execute(
+                "DELETE FROM alerts WHERE id = ? AND status IN ('dead', 'cancelled')",
+                (alert_id,),
+            )
+        return deleted.rowcount == 1
     def list_incidents(self, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
         query = """
@@ -1155,10 +1746,18 @@ class Database:
         actor: str = "admin",
         reason: str = "configuration update",
         active: bool = True,
+        *,
+        only_if_empty: bool = False,
     ) -> int:
         now = int(time.time())
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        with self.connection:
+        with self.unit_of_work():
+            if only_if_empty:
+                existing = self.connection.execute(
+                    "SELECT id FROM config_revisions WHERE active = 1 LIMIT 1"
+                ).fetchone()
+                if existing is not None:
+                    return int(existing["id"])
             if active:
                 self.connection.execute("UPDATE config_revisions SET active = 0")
             self.connection.execute(
@@ -1215,9 +1814,78 @@ class Database:
         result = dict(row)
         try:
             result["payload"] = json.loads(result.pop("payload_json"))
-        except (TypeError, ValueError):
-            result["payload"] = {}
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("stored configuration revision is invalid") from exc
+        if not isinstance(result["payload"], dict):
+            raise RuntimeError("stored configuration revision must be an object")
         return result
+
+    def get_active_config_revision(self) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM config_revisions WHERE active = 1 ORDER BY revision DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["payload"] = json.loads(result.pop("payload_json"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("active configuration revision is invalid") from exc
+        if not isinstance(result["payload"], dict):
+            raise RuntimeError("active configuration revision must be an object")
+        return result
+
+    def save_managed_config(
+        self,
+        payload: Mapping[str, Any],
+        actor: str,
+        reason: str,
+        *,
+        expected_revision: int | None = None,
+    ) -> int:
+        """Atomically create and activate a new immutable desired revision."""
+        now = int(time.time())
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            active = self.connection.execute(
+                "SELECT revision FROM config_revisions WHERE active = 1 ORDER BY revision DESC LIMIT 1"
+            ).fetchone()
+            current_revision = int(active["revision"]) if active is not None else 0
+            if expected_revision is not None and expected_revision != current_revision:
+                raise RevisionConflictError(
+                    f"configuration changed: expected revision {expected_revision}, current revision {current_revision}"
+                )
+            maximum = self.connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) FROM config_revisions"
+            ).fetchone()
+            revision = int(maximum[0]) + 1
+            self.connection.execute("UPDATE config_revisions SET active = 0")
+            cursor = self.connection.execute(
+                """
+                INSERT INTO config_revisions(
+                    revision, payload_json, actor, reason, created_at, active
+                ) VALUES (?, ?, ?, ?, ?, 1)
+                """,
+                (revision, encoded, actor[:128], reason[:512], now),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO config_audit(revision_id, action, actor, details_json, created_at)
+                VALUES (?, 'activate', ?, ?, ?)
+                """,
+                (
+                    int(cursor.lastrowid),
+                    actor[:128],
+                    json.dumps({"reason": reason[:512]}, ensure_ascii=False),
+                    now,
+                ),
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return revision
 
     def metrics_prometheus(self) -> str:
         status = self.status()
@@ -1226,8 +1894,10 @@ class Database:
             "# TYPE argus_observations_total gauge",
             f"argus_observations_total {status['observations']}",
         ]
-        for state, count in status["outbox"].items():
+        for state in ("pending", "sending", "delivered", "dead", "cancelled"):
+            count = status["outbox"].get(state, 0)
             lines.append(f'argus_outbox{{status="{state}"}} {count}')
+        lines.append(f"argus_outbox_oldest_pending_age_seconds {status['outbox_metrics']['oldest_pending_age_seconds']}")
         lines.extend([
             "# TYPE argus_incidents gauge",
             f"argus_incidents{{status=\"open\"}} {status['incidents'].get('open', 0)}",
@@ -1243,13 +1913,34 @@ class Database:
             age = max(0, int(time.time()) - int(success)) if success else -1
             lines.append(f'argus_source_last_success_age_seconds{{source="{source_id}"}} {age}')
             lines.append(f'argus_source_consecutive_failures{{source="{source_id}"}} {source["consecutive_failures"]}')
+            lines.append(f'argus_source_polls_total{{source="{source_id}"}} {source.get("poll_count", 0)}')
+            lines.append(f'argus_source_failures_total{{source="{source_id}"}} {source.get("failure_count", 0)}')
+        runtime = status.get("engine") or {}
+        heartbeat = runtime.get("heartbeat_at") or 0
+        heartbeat_age = max(0, int(time.time()) - int(heartbeat)) if heartbeat else -1
+        lines.append(f"argus_engine_heartbeat_age_seconds {heartbeat_age}")
         return "\n".join(lines) + "\n"
 
-    def cleanup(self, cutoff: int) -> tuple[int, int]:
+    def cleanup(
+        self,
+        cutoff: int,
+        *,
+        incident_cutoff: int | None = None,
+        audit_cutoff: int | None = None,
+        dead_cutoff: int | None = None,
+    ) -> tuple[int, int]:
         with self.connection:
             deleted_alerts = self.connection.execute(
                 "DELETE FROM alerts WHERE status = 'delivered' AND delivered_at < ?", (cutoff,)
             ).rowcount
+            if dead_cutoff is not None:
+                deleted_alerts += self.connection.execute(
+                    """
+                    DELETE FROM alerts
+                    WHERE status IN ('dead', 'cancelled') AND COALESCE(dead_at, created_at) < ?
+                    """,
+                    (dead_cutoff,),
+                ).rowcount
             deleted_observations = self.connection.execute(
                 """
                 DELETE FROM observations
@@ -1260,15 +1951,38 @@ class Database:
                 """,
                 (cutoff,),
             ).rowcount
+            if incident_cutoff is not None:
+                self.connection.execute(
+                    """
+                    DELETE FROM incidents
+                    WHERE status IN ('recorded', 'recovered') AND updated_at < ?
+                      AND NOT EXISTS (SELECT 1 FROM alerts WHERE alerts.incident_id = incidents.id)
+                    """,
+                    (incident_cutoff,),
+                )
+            if audit_cutoff is not None:
+                self.connection.execute("DELETE FROM config_audit WHERE created_at < ?", (audit_cutoff,))
+                self.connection.execute("DELETE FROM reminder_audit WHERE created_at < ?", (audit_cutoff,))
+                self.connection.execute(
+                    "DELETE FROM admin_jobs WHERE completed_at IS NOT NULL AND completed_at < ?",
+                    (audit_cutoff,),
+                )
         return int(deleted_alerts), int(deleted_observations)
 
     def status(self) -> dict[str, Any]:
         sources = [dict(row) for row in self.connection.execute(
             """
-            SELECT source_id, initialized, last_attempt_at, last_success_at,
-                   consecutive_failures, outage_alerted, last_error,
-                   last_duration_ms, last_error_kind, last_http_status
-            FROM collector_state ORDER BY source_id
+            SELECT c.source_id, c.initialized, c.last_attempt_at, c.last_success_at,
+                   c.consecutive_failures, c.outage_alerted, c.last_error,
+                   c.last_duration_ms, c.last_error_kind, c.last_http_status,
+                   c.poll_count, c.success_count, c.failure_count,
+                   c.last_observation_count, c.last_alert_count, c.last_warning,
+                   r.kind, r.configured_enabled, r.runtime_status,
+                   r.expected_interval_seconds, r.config_revision,
+                   r.registered_at, r.heartbeat_at, r.updated_at AS runtime_updated_at
+            FROM collector_state AS c
+            LEFT JOIN source_runtime AS r ON r.source_id = c.source_id
+            ORDER BY c.source_id
             """
         )]
         outbox = {
@@ -1276,6 +1990,16 @@ class Database:
             for row in self.connection.execute(
                 "SELECT status, COUNT(*) AS count FROM alerts GROUP BY status"
             )
+        }
+        oldest = self.connection.execute(
+            "SELECT MIN(created_at) FROM alerts WHERE status IN ('pending', 'sending')"
+        ).fetchone()[0]
+        now = int(time.time())
+        outbox_metrics = {
+            "oldest_pending_age_seconds": max(0, now - int(oldest)) if oldest else 0,
+            "retrying": int(self.connection.execute(
+                "SELECT COUNT(*) FROM alerts WHERE status = 'pending' AND attempts > 0"
+            ).fetchone()[0]),
         }
         observations = int(self.connection.execute("SELECT COUNT(*) FROM observations").fetchone()[0])
         incidents = {
@@ -1293,12 +2017,21 @@ class Database:
         revisions = [dict(row) for row in self.connection.execute(
             "SELECT revision, created_at, active FROM config_revisions WHERE active = 1 ORDER BY revision DESC LIMIT 1"
         )]
+        engine_row = self.connection.execute("SELECT * FROM engine_runtime WHERE id = 1").fetchone()
+        engine = dict(engine_row) if engine_row is not None else None
+        if engine is not None:
+            heartbeat = engine.get("heartbeat_at")
+            engine["heartbeat_age_seconds"] = max(0, now - int(heartbeat)) if heartbeat else None
         return {
             "database_schema": SCHEMA_VERSION,
             "observations": observations,
             "outbox": outbox,
+            "outbox_metrics": outbox_metrics,
             "incidents": incidents,
             "reminders": reminders,
             "config_revision": revisions[0] if revisions else None,
+            "desired_revision": revisions[0]["revision"] if revisions else None,
+            "engine": engine,
+            "runtime": engine,
             "sources": sources,
         }

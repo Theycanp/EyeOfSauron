@@ -38,9 +38,19 @@ details; multiple alerts can refer to one incident while the outbox remains
 at-least-once. This prevents notification deduplication from erasing operational
 history or ordinary news from polluting the unresolved-health count.
 
-Configuration changes are revisioned and audited. The management API validates
-the complete managed set before writing an atomic current file, stores a private
-revision snapshot, and rolls back by creating a new revision.
+Configuration changes are revisioned and audited. SQLite is the authoritative
+configuration store: the management API validates the complete managed set and
+atomically activates an immutable revision with compare-and-swap protection.
+The legacy private JSON file is imported once when there is no active database
+revision; it is not rewritten in database-backed operation. Current settings
+are available through the management API, not that legacy file.
+Rollback creates and activates a new revision instead of mutating history.
+
+Argus compares its applied revision with the desired SQLite revision. A change
+causes a controlled exit with status 75; after its restart delay systemd starts a fresh
+process, which validates and applies the active revision before announcing
+readiness. This keeps configuration activation automatic without adding a
+second process manager or an in-process partial reload path.
 
 The management surface is split into a Python standard-library HTTP server and
 a static React/Vite client. React is compiled during development and the
@@ -97,11 +107,21 @@ rules as the reliable fallback.
 ## Configurable sources
 
 `kind = "rss"` is the generic HTTPS RSS/Atom adapter, so publisher-specific
-feeds are configuration rather than hard-coded integrations. `kind = "market"`
-uses a provider interface and stores a compact per-symbol cursor; it supports
+feeds are configuration rather than hard-coded integrations. The compatibility
+name `kind = "market"` identifies the Alpaca snapshot adapter (it is not a
+generic JSON market API) and stores a compact per-symbol cursor; it supports
 price moves, gaps, volume spikes and cooldowns. `kind = "imap"`, `"x"`, and
 `"youtube"` use UID, numeric user ID, and channel ID cursors respectively.
 All are disabled until explicitly configured.
+
+Provider metadata is centralized in an immutable capability registry. Each
+`ProviderSpec` declares provider-specific fields, environment credential
+references, URL policy, a side-effect-free connection-test strategy, and runtime
+support. Configuration loading and collector construction accept an extended
+registry, so a new provider can be composed without adding another core dispatch
+branch. The reviewed news source catalog is separate from runtime configuration:
+its templates are always disabled by default and require explicit confirmation.
+See `docs/PROVIDERS.md` for the extension contract and catalog policy.
 
 `kind = "host"` is an opt-in low-frequency local probe for disk/inode,
 memory, load and selected systemd units. It emits transitions (including

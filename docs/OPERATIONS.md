@@ -3,11 +3,12 @@
 ## Paths
 
 - Source project: `/home/joker/services/eyeofsauron`
-- Installed code: `/opt/eyeofsauron`
+- Active immutable release: `/opt/eyeofsauron/current`
 - Configuration: `/etc/argus/config.toml`
 - State database: `/var/lib/argus/state.db`
 - Service unit: `/etc/systemd/system/argus.service`
-- Managed sources/rules: `/var/lib/argus/managed-sources.json`
+- Managed sources/rules authority: revisioned records in `/var/lib/argus/state.db`
+- Legacy configuration migration input: `/var/lib/argus/managed-sources.json`
 - Management unit: `/etc/systemd/system/argus-admin.service`
 - ntfy credentials: `/etc/argus/ntfy.env`, root-owned and never printed
 - optional provider credentials: `/etc/argus/providers.env`, root-owned
@@ -19,7 +20,7 @@
 ```bash
 sudo systemctl status argus
 sudo journalctl -u argus -n 100 --no-pager
-sudo -u argus env PYTHONPATH=/opt/eyeofsauron/src \
+sudo -u argus env PYTHONPATH=/opt/eyeofsauron/current/src \
   /usr/bin/python3 -m argus --config /etc/argus/config.toml status
 ```
 
@@ -43,11 +44,13 @@ Open `http://127.0.0.1:18080/` on the client running the SSH tunnel. The API
 supports `GET /api/config`, `POST /api/source-bundles` (a source plus its
 notification rule in one revision), the individual `POST /api/sources` and
 `POST /api/rules` compatibility routes, and DELETE on the corresponding ID
-paths. POST bodies are validated against the same
-configuration parser as the service. Changes report `restart_required`; apply
-them with `sudo systemctl restart argus` after reviewing the managed
-configuration. The listener is loopback-only and must not be reverse proxied
-to the public ntfy endpoint.
+paths. POST bodies are validated against the same configuration parser as the
+service. SQLite stores the authoritative immutable revision; the old JSON file
+is a one-time migration input, not a live export. Argus notices a desired
+revision change, exits with status 75, and systemd starts a fresh process that
+loads it. The UI may briefly show “waiting for Argus” until the new process
+reports the revision as applied. The listener is loopback-only and must not be
+reverse proxied to the public ntfy endpoint.
 
 The same API also provides `POST /api/validate`, `POST /api/test-source`,
 `GET /api/revisions`, `POST /api/revisions/<id>/rollback`,
@@ -92,8 +95,9 @@ smartctl_exporter and blackbox_exporter for continuous metrics.
 
 Provider variables referenced by managed sources belong in
 `/etc/argus/providers.env` with mode `0640`, owner `root`, and group
-`argus`. Restart the main service after changing this file. Never paste
-the values into the web form, managed JSON, logs, or this document.
+`argus`. Environment-file changes are outside the revision store, so restart the
+main service after changing this file. Never paste the values into the web form,
+managed export, logs, or this document.
 
 ## Optional heartbeat and devices
 
@@ -118,20 +122,115 @@ to be sent again. A publish acknowledged by ntfy immediately before a process
 crash can still be repeated after its lease expires, by the documented
 at-least-once policy.
 
+The main unit uses `Type=notify`: Argus declares readiness only after database
+setup and runtime registration, then emits watchdog heartbeats. Exit status 75
+is reserved for controlled configuration activation and is explicitly treated
+as restartable by systemd. Repeated startup failures remain bounded by the unit's
+start-rate limit.
+
 ## Backup and restore
 
-Stop the service before a byte-for-byte database backup:
+Create backups with the SQLite Online Backup API. The resulting private bundle
+contains a standalone database, checksums, integrity results, row counts, schema
+version, and an optional managed-source snapshot.
 
 ```bash
-sudo systemctl stop argus
-sudo cp -a /var/lib/argus/state.db /var/lib/argus/state.db.backup
-sudo systemctl start argus
+sudo install -d -m 0700 -o root -g root /var/backups/eyeofsauron
+sudo env PYTHONPATH=/opt/eyeofsauron/current/src \
+  /usr/bin/python3 -m argus.backup backup \
+  --database /var/lib/argus/state.db \
+  --output /var/backups/eyeofsauron/manual-YYYYMMDDTHHMMSSZ \
+  --managed-config /var/lib/argus/managed-sources.json \
+  --source-revision manual
+sudo env PYTHONPATH=/opt/eyeofsauron/current/src \
+  /usr/bin/python3 -m argus.backup verify /var/backups/eyeofsauron/manual-YYYYMMDDTHHMMSSZ
 ```
 
-Configuration and source code contain no credentials. Preserve the private ntfy
-credential file separately as part of host secret management.
+The online backup includes committed WAL transactions and does not require a
+service outage. Take one before every release or configuration migration and at
+least daily once the service contains information that cannot be reconstructed.
+The initial operating objectives are RPO 24 hours and RTO 30 minutes.
 
-## Remove or roll back
+`argus-backup.timer` runs daily at 03:15 UTC with up to ten minutes of jitter;
+missed runs execute after boot. Enable it after confirming the first manual run:
+
+```bash
+sudo install -d -m 0700 /var/backups/eyeofsauron
+sudo systemctl start argus-backup.service
+sudo systemctl enable --now argus-backup.timer
+```
+
+Each run verifies its new online snapshot before retaining the latest 14 verified
+bundles under `/var/backups/eyeofsauron/daily`. Only matching daily bundle names
+inside that private directory are eligible for retention deletion. Symlinks,
+unverifiable bundles, manual backups and pre-release recovery points are preserved.
+The daily job shares the release lock, preventing a snapshot from overlapping a
+code/database replacement. A collision fails visibly instead of racing the upgrade.
+The service journal records verification failures; inspect timer and unit status
+alongside the latest backup timestamp. These local backups protect against bad
+changes, not complete loss of the host's storage.
+
+Restore only during a maintenance window:
+
+```bash
+sudo systemctl stop argus-admin argus
+sudo test ! -e /var/lib/argus/state.db-wal -a ! -e /var/lib/argus/state.db-shm
+sudo env PYTHONPATH=/opt/eyeofsauron/current/src \
+  /usr/bin/python3 -m argus.backup restore BACKUP_DIRECTORY \
+  --database /var/lib/argus/state.db --replace
+sudo chown argus:argus /var/lib/argus/state.db
+sudo chmod 0600 /var/lib/argus/state.db
+sudo systemctl start argus argus-admin
+```
+
+A restore refuses to run while WAL/SHM companions exist. With `--replace`, the
+old database is renamed rather than overwritten; keep it until the restored
+service passes the health gate. Restore `managed-sources.json` separately from
+the verified bundle only for a legacy database without configuration revisions.
+For schema 7 and later, restoring the database also restores the authoritative
+configuration. The old JSON file is not regenerated; editing or restoring it
+cannot override an existing SQLite revision. Export current settings using the
+authenticated management API.
+
+## Immutable releases and rollback
+
+Release archives are built only from a clean Git commit. Prepare and activate
+them under versioned, root-owned directories:
+
+```bash
+scripts/release/package-release.sh /tmp/eyeofsauron-RELEASE.tar.gz RELEASE
+sudo scripts/release/install-release.sh --archive /tmp/eyeofsauron-RELEASE.tar.gz \
+  --release-id RELEASE --checksum /tmp/eyeofsauron-RELEASE.tar.gz.sha256 \
+  --prepare-only
+sudo scripts/release/install-release.sh --archive /tmp/eyeofsauron-RELEASE.tar.gz \
+  --release-id RELEASE --checksum /tmp/eyeofsauron-RELEASE.tar.gz.sha256
+sudo scripts/release/rollback-release.sh PREVIOUS_RELEASE [PRE_RELEASE_BACKUP]
+```
+
+Activation stops both SQLite writers, creates and verifies a pre-release backup,
+atomically switches `/opt/eyeofsauron/current`, installs matching unit templates,
+and runs a bounded health gate. Any failed activation restores the previous
+database, managed configuration, release symlink, units, and services. A schema
+downgrade requires the matching pre-release bundle.
+
+Release operations hold a host-local lock to prevent simultaneous activation or
+rollback. The backup includes the exact installed service and timer unit files,
+so recovery retains local changes to those files. If database or unit restoration
+fails, recovery leaves both writers stopped and reports the recoverable backup
+path. The health gate requires a fresh engine heartbeat, the applied SQLite
+revision, active source workers and a bounded delivery backlog. Upstream outages
+and old successful polls remain visible as warnings: restarting healthy workers
+cannot repair an unavailable publisher.
+An active worker that has not attempted a poll for three configured intervals
+(at least 90 seconds) fails readiness even if the engine heartbeat is fresh.
+Newly registered workers receive the same grace period before their first poll.
+
+The current production installation predates the `current` symlink layout. Its
+one-time migration must be performed in an explicit maintenance window with a
+verified backup; the installer deliberately refuses to reinterpret a normal
+directory as a symlink.
+
+## Remove or disable
 
 ```bash
 sudo systemctl disable --now argus

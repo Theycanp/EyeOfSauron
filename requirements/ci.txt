@@ -1,0 +1,10 @@
+# Pinned top-level CI tools; Dependabot maintains these versions.
+bandit==1.9.4
+build==1.4.0
+coverage==7.13.5
+cyclonedx-bom==7.3.1
+mypy==1.19.1
+pip-audit==2.10.0
+ruff==0.16.6
+setuptools==84.0.0
+wheel==0.48.0

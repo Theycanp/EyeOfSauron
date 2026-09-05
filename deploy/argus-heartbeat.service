@@ -1,7 +1,10 @@
 [Unit]
 Description=EyeOfSauron outbound heartbeat
+Documentation=file:/opt/eyeofsauron/current/docs/OPERATIONS.md
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=15min
+StartLimitBurst=5
 
 [Service]
 Type=oneshot
@@ -9,11 +12,33 @@ User=argus
 Group=argus
 EnvironmentFile=/etc/argus/heartbeat.env
 ExecStart=/usr/bin/python3 -c "from argus.heartbeat import main; raise SystemExit(main(['--url-env','ARGUS_HEARTBEAT_URL','--token-env','ARGUS_HEARTBEAT_TOKEN']))"
-Environment=PYTHONPATH=/opt/eyeofsauron/src
+Environment=PYTHONPATH=/opt/eyeofsauron/current/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+TimeoutStartSec=30s
+UMask=0077
 NoNewPrivileges=true
 PrivateDevices=true
 PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
 ProtectSystem=strict
 ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
 RestrictAddressFamilies=AF_INET AF_INET6
 CapabilityBoundingSet=
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+MemoryHigh=64M
+MemoryMax=128M
+TasksMax=16

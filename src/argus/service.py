@@ -4,19 +4,42 @@ import asyncio
 import fcntl
 import logging
 import os
+import random
+import socket
 import time
+import uuid
+from dataclasses import replace
 from pathlib import Path
+from typing import Any, Mapping
 
-from .config import AppConfig
-from .database import Database
-from .models import FeedFetchResult
-from .notifier import Notifier
-from .rss import RssCollector
+from . import __version__
+from .adapters import build_collector
+from .config import AppConfig, parse_source_config
+from .persistence import RuntimeRepository
+from .models import FeedFetchResult, SourceState
+from .notifier import Notifier, delivery_error_details
 from .rules import RuleSet
 from .util import now_epoch, sanitize_error
 
 
 LOGGER = logging.getLogger("argus")
+
+
+def _sd_notify(message: str) -> None:
+    """Send a best-effort systemd readiness/watchdog datagram."""
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+            client.settimeout(1.0)
+            client.connect(address)
+            client.sendall(message.encode("utf-8"))
+    except OSError as exc:
+        LOGGER.debug("systemd_notify_failed error=%s", sanitize_error(exc))
+
 
 
 class AlreadyRunningError(RuntimeError):
@@ -57,10 +80,11 @@ class ArgusService:
     def __init__(
         self,
         config: AppConfig,
-        database: Database,
+        database: RuntimeRepository,
         collectors: dict[str, object],
         rules: RuleSet,
         notifier: Notifier | None,
+        config_revision: int | None = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -68,6 +92,11 @@ class ArgusService:
         self.rules = rules
         self.notifier = notifier
         self.stop_event = asyncio.Event()
+        self.config_revision = config_revision
+        self.instance_id = uuid.uuid4().hex
+        self._source_slots = asyncio.Semaphore(config.service.max_source_concurrency)
+        self._jitter = random.SystemRandom()
+        self.reload_requested = False
 
     async def poll_source_once(self, source_id: str) -> bool:
         collector = self.collectors[source_id]
@@ -75,11 +104,15 @@ class ArgusService:
         state = self.database.get_source_state(source_id)
         now = now_epoch()
         started = time.monotonic()
+        self.database.mark_source_runtime(
+            source_id, "degraded" if state.consecutive_failures else "active", now
+        )
         result: FeedFetchResult | None = None
         last_error: Exception | None = None
         for attempt in range(1, source_config.request_attempts + 1):
             try:
-                result = await asyncio.to_thread(collector.fetch, state)  # type: ignore[attr-defined]
+                async with self._source_slots:
+                    result = await asyncio.to_thread(collector.fetch, state)  # type: ignore[attr-defined]
                 break
             except asyncio.CancelledError:
                 raise
@@ -107,6 +140,7 @@ class ArgusService:
                 duration_ms=int((time.monotonic() - started) * 1000),
                 error_kind=type(last_error).__name__,
             )
+            self.database.mark_source_runtime(source_id, "degraded", now_epoch(), last_error)
             LOGGER.warning(
                 "source_poll_failed source=%s alert_queued=%s error=%s",
                 source_id,
@@ -123,6 +157,19 @@ class ArgusService:
             self.config.ntfy.default_topic,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
+
+        self.database.mark_source_runtime(
+            source_id,
+            "degraded" if result.warnings else "active",
+            now_epoch(),
+            "; ".join(result.warnings) if result.warnings else None,
+        )
+        if result.warnings:
+            LOGGER.warning(
+                "source_poll_degraded source=%s warnings=%s",
+                source_id,
+                ",".join(result.warnings),
+            )
 
         if report.baseline_created:
             LOGGER.info(
@@ -154,13 +201,22 @@ class ArgusService:
             raise
         except Exception as exc:
             delay = retry_delay(alert.attempts, self.config.service.max_delivery_retry_seconds)
-            self.database.mark_retry(alert.id, now_epoch() + delay, exc)
-            LOGGER.warning(
-                "notification_failed alert_id=%d attempts=%d retry_seconds=%d error=%s",
+            failed_at = now_epoch()
+            retryable, failure_kind = delivery_error_details(exc)
+            state = self.database.mark_delivery_failure(
                 alert.id,
-                alert.attempts,
-                delay,
-                sanitize_error(exc),
+                failed_at,
+                failed_at + delay,
+                exc,
+                retryable=retryable,
+                failure_kind=failure_kind,
+                max_attempts=self.config.service.max_delivery_attempts,
+                max_age_seconds=self.config.service.max_delivery_age_seconds,
+            )
+            log = LOGGER.error if state == "dead" else LOGGER.warning
+            log(
+                "notification_failed alert_id=%d attempts=%d state=%s retry_seconds=%d kind=%s error=%s",
+                alert.id, alert.attempts, state, delay, failure_kind, sanitize_error(exc),
             )
             return False
         self.database.mark_delivered(alert.id, now_epoch())
@@ -174,9 +230,31 @@ class ArgusService:
             LOGGER.info("reminders_queued count=%d", queued)
         return queued
 
-    async def _source_loop(self, source_id: str, interval: int) -> None:
+    async def _source_loop(
+        self, source_id: str, interval: int, initial_delay: float = 0.0
+    ) -> None:
+        if initial_delay > 0:
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=initial_delay)
+            except TimeoutError:
+                pass
         while not self.stop_event.is_set():
-            await self.poll_source_once(source_id)
+            try:
+                await self.poll_source_once(source_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.database.record_source_failure(
+                    source_id, exc, self.config.service.source_failure_alert_after,
+                    self.config.ntfy.default_topic, now_epoch(),
+                    error_kind=type(exc).__name__,
+                )
+                self.database.mark_source_runtime(source_id, "degraded", now_epoch(), exc)
+                LOGGER.error(
+                    "source_supervisor_caught source=%s error=%s",
+                    source_id,
+                    sanitize_error(exc),
+                )
             try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=interval)
             except TimeoutError:
@@ -202,8 +280,14 @@ class ArgusService:
 
     async def _maintenance_loop(self) -> None:
         while not self.stop_event.is_set():
-            cutoff = now_epoch() - self.config.service.retention_days * 86400
-            deleted_alerts, deleted_observations = self.database.cleanup(cutoff)
+            now = now_epoch()
+            cutoff = now - self.config.service.retention_days * 86400
+            deleted_alerts, deleted_observations = self.database.cleanup(
+                cutoff,
+                incident_cutoff=now - self.config.service.incident_retention_days * 86400,
+                audit_cutoff=now - self.config.service.audit_retention_days * 86400,
+                dead_cutoff=now - self.config.service.dead_letter_retention_days * 86400,
+            )
             if deleted_alerts or deleted_observations:
                 LOGGER.info(
                     "retention_cleanup alerts=%d observations=%d",
@@ -215,22 +299,152 @@ class ArgusService:
             except TimeoutError:
                 pass
 
-    async def run_forever(self) -> None:
-        LOGGER.info("service_started sources=%d", len(self.collectors))
+    async def _heartbeat_loop(self) -> None:
+        interval = self.config.service.heartbeat_interval_seconds
+        while not self.stop_event.is_set():
+            now = now_epoch()
+            state = "running" if len(self.collectors) == sum(s.enabled for s in self.config.sources) else "degraded"
+            self.database.heartbeat_engine(self.instance_id, now, state=state)
+            _sd_notify(f"WATCHDOG=1\nSTATUS=Argus running; heartbeat={now}")
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=interval)
+            except TimeoutError:
+                pass
+
+    async def _config_revision_loop(self) -> None:
+        """Request a controlled process restart when the desired revision changes."""
+        while not self.stop_event.is_set():
+            active = self.database.get_active_config_revision()
+            desired_revision = int(active["revision"]) if active is not None else None
+            if desired_revision != self.config_revision:
+                self.reload_requested = True
+                LOGGER.info(
+                    "configuration_reload_requested applied_revision=%s desired_revision=%s",
+                    self.config_revision,
+                    desired_revision,
+                )
+                _sd_notify(
+                    "RELOADING=1\n"
+                    f"STATUS=Argus is applying configuration revision {desired_revision}"
+                )
+                self.stop_event.set()
+                return
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=5.0)
+            except TimeoutError:
+                pass
+
+    async def _admin_job_loop(self) -> None:
+        while not self.stop_event.is_set():
+            job = self.database.claim_admin_job("test_source", now_epoch())
+            if job is None:
+                try:
+                    await asyncio.wait_for(self.stop_event.wait(), timeout=1.0)
+                except TimeoutError:
+                    pass
+                continue
+            job_id = str(job["id"])
+            try:
+                request = job.get("request")
+                if not isinstance(request, Mapping) or not isinstance(request.get("source"), Mapping):
+                    raise ValueError("test-source job requires a source object")
+                raw_source: dict[str, Any] = dict(request["source"])
+                raw_source["enabled"] = True
+                source = parse_source_config(raw_source)
+                settings = dict(source.settings)
+                if source.kind == "imap":
+                    settings["batch_size"] = 1
+                elif source.kind == "x":
+                    settings["max_pages_per_poll"] = 1
+                elif source.kind == "market":
+                    settings["symbols"] = settings["symbols"][:1]
+                source = replace(source, settings=settings, request_timeout_seconds=min(15, source.request_timeout_seconds))
+                collector = build_collector(source)
+                if collector is None:
+                    raise RuntimeError("source has no active collector")
+                started = time.monotonic()
+                result = await asyncio.to_thread(
+                    collector.fetch,
+                    SourceState(source.id, False, None, None, None, None, 0, False, None),
+                )
+                self.database.finish_admin_job(
+                    job_id,
+                    now_epoch(),
+                    result={
+                        "observations": len(result.observations),
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        "not_modified": result.not_modified,
+                        "warnings": list(result.warnings),
+                    },
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.database.finish_admin_job(job_id, now_epoch(), error=exc)
+                LOGGER.warning(
+                    "admin_job_failed job_id=%s kind=test_source error=%s",
+                    job_id,
+                    sanitize_error(exc),
+                )
+
+    async def run_forever(self) -> bool:
+        enabled_sources = [source for source in self.config.sources if source.enabled]
+        runtime_rows = [
+            (source.id, source.kind, source.enabled, source.poll_interval_seconds)
+            for source in self.config.sources
+        ]
+        self.database.sync_source_runtime(
+            runtime_rows,
+            set(self.collectors),
+            config_revision=self.config_revision,
+            now=now_epoch(),
+        )
+        self.database.register_engine(
+            self.instance_id,
+            started_at=now_epoch(),
+            applied_revision=self.config_revision,
+            code_version=__version__,
+            configured_sources=len(enabled_sources),
+            active_sources=len(self.collectors),
+        )
+        _sd_notify("READY=1\nSTATUS=Argus watcher engine is ready")
+        LOGGER.info(
+            "service_started sources=%d revision=%s instance=%s",
+            len(self.collectors),
+            self.config_revision,
+            self.instance_id,
+        )
+        terminal_error: BaseException | None = None
         try:
             async with asyncio.TaskGroup() as group:
                 for source in self.config.sources:
                     if source.id in self.collectors:
+                        jitter = self._jitter.uniform(
+                            0, self.config.service.source_start_jitter_seconds
+                        )
                         group.create_task(
-                            self._source_loop(source.id, source.poll_interval_seconds),
+                            self._source_loop(source.id, source.poll_interval_seconds, jitter),
                             name=f"source:{source.id}",
                         )
                 group.create_task(self._delivery_loop(), name="delivery")
                 group.create_task(self._reminder_loop(), name="reminders")
                 group.create_task(self._maintenance_loop(), name="maintenance")
+                group.create_task(self._heartbeat_loop(), name="heartbeat")
+                group.create_task(self._admin_job_loop(), name="admin-jobs")
+                group.create_task(self._config_revision_loop(), name="config-revision")
                 await self.stop_event.wait()
+        except BaseException as exc:
+            terminal_error = exc
+            raise
         finally:
+            _sd_notify("STOPPING=1\nSTATUS=Argus watcher engine is stopping")
+            self.database.stop_engine(
+                self.instance_id,
+                now_epoch(),
+                error=sanitize_error(terminal_error) if terminal_error is not None else None,
+            )
             LOGGER.info("service_stopped")
+        return self.reload_requested
 
     async def run_once(self, deliver: bool = False) -> None:
         await asyncio.gather(*(self.poll_source_once(source.id) for source in self.config.sources if source.id in self.collectors))

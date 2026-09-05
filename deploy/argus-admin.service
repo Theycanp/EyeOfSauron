@@ -1,21 +1,28 @@
 [Unit]
 Description=EyeOfSauron loopback-only management API
-Documentation=file:/opt/eyeofsauron/docs/OPERATIONS.md
+Documentation=file:/opt/eyeofsauron/current/docs/OPERATIONS.md
 After=network-online.target argus.service
 Wants=network-online.target
+StartLimitIntervalSec=5min
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=argus
 Group=argus
 WorkingDirectory=/var/lib/argus
-Environment=PYTHONPATH=/opt/eyeofsauron/src
+Environment=PYTHONPATH=/opt/eyeofsauron/current/src
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=/etc/argus/admin.env
 ExecStart=/usr/bin/python3 -m argus --config /etc/argus/config.toml admin
 Restart=on-failure
 RestartSec=10s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
 UMask=0077
+StateDirectory=argus
+StateDirectoryMode=0700
+OOMPolicy=stop
 
 NoNewPrivileges=true
 PrivateDevices=true
@@ -40,6 +47,11 @@ ProcSubset=pid
 RemoveIPC=true
 RestrictSUIDSGID=true
 SystemCallArchitectures=native
+
+MemoryHigh=128M
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=1024
 
 [Install]
 WantedBy=multi-user.target

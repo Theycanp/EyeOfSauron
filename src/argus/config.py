@@ -9,6 +9,14 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from .provider_validation import validate_provider_configuration
+from .providers import (
+    DEFAULT_PROVIDER_REGISTRY,
+    ProviderConfigError,
+    ProviderRegistry,
+)
+from .safe_regex import UnsafeRegexError, compile_safe_regex
+
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
 _ENV_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -29,6 +37,14 @@ class ServiceConfig:
     retention_days: int
     delivery_lease_seconds: int
     max_delivery_retry_seconds: int
+    max_delivery_attempts: int = 12
+    max_delivery_age_seconds: int = 604800
+    max_source_concurrency: int = 4
+    source_start_jitter_seconds: int = 15
+    heartbeat_interval_seconds: int = 15
+    incident_retention_days: int = 365
+    audit_retention_days: int = 730
+    dead_letter_retention_days: int = 365
     managed_sources_path: Path | None = None
 
 
@@ -39,6 +55,11 @@ class NtfyConfig:
     token_env: str
     default_topic: str
     timeout_seconds: int
+
+
+@dataclass(frozen=True, slots=True)
+class SecretRef:
+    environment_variable: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +78,7 @@ class SourceConfig:
     allowed_hosts: tuple[str, ...] = ()
     enabled: bool = True
     settings: Mapping[str, Any] = field(default_factory=dict)
+    credential_refs: Mapping[str, SecretRef] = field(default_factory=dict)
 
 
 # Kept as an alias for integrations written against the 0.1 RSS-only API.
@@ -166,6 +188,9 @@ def _parse_service(raw: Any) -> ServiceConfig:
     allowed = {
         "database_path", "lock_path", "log_level", "source_failure_alert_after",
         "retention_days", "delivery_lease_seconds", "max_delivery_retry_seconds",
+        "max_delivery_attempts", "max_delivery_age_seconds", "max_source_concurrency",
+        "source_start_jitter_seconds", "heartbeat_interval_seconds",
+        "incident_retention_days", "audit_retention_days", "dead_letter_retention_days",
         "managed_sources_path",
     }
     _reject_unknown(data, allowed, "service")
@@ -180,6 +205,14 @@ def _parse_service(raw: Any) -> ServiceConfig:
         retention_days=_bounded_int(data, "retention_days", "service", 1, 3650),
         delivery_lease_seconds=_bounded_int(data, "delivery_lease_seconds", "service", 10, 3600),
         max_delivery_retry_seconds=_bounded_int(data, "max_delivery_retry_seconds", "service", 30, 86400),
+        max_delivery_attempts=_bounded_int({"max_delivery_attempts": data.get("max_delivery_attempts", 12)}, "max_delivery_attempts", "service", 1, 1000),
+        max_delivery_age_seconds=_bounded_int({"max_delivery_age_seconds": data.get("max_delivery_age_seconds", 604800)}, "max_delivery_age_seconds", "service", 60, 31536000),
+        max_source_concurrency=_bounded_int({"max_source_concurrency": data.get("max_source_concurrency", 4)}, "max_source_concurrency", "service", 1, 64),
+        source_start_jitter_seconds=_bounded_int({"source_start_jitter_seconds": data.get("source_start_jitter_seconds", 15)}, "source_start_jitter_seconds", "service", 0, 3600),
+        heartbeat_interval_seconds=_bounded_int({"heartbeat_interval_seconds": data.get("heartbeat_interval_seconds", 15)}, "heartbeat_interval_seconds", "service", 5, 300),
+        incident_retention_days=_bounded_int({"incident_retention_days": data.get("incident_retention_days", 365)}, "incident_retention_days", "service", 1, 3650),
+        audit_retention_days=_bounded_int({"audit_retention_days": data.get("audit_retention_days", 730)}, "audit_retention_days", "service", 1, 3650),
+        dead_letter_retention_days=_bounded_int({"dead_letter_retention_days": data.get("dead_letter_retention_days", 365)}, "dead_letter_retention_days", "service", 1, 3650),
         managed_sources_path=(
             _absolute_path(data, "managed_sources_path", "service")
             if data.get("managed_sources_path") is not None else None
@@ -207,7 +240,14 @@ def _parse_ntfy(raw: Any) -> NtfyConfig:
     )
 
 
-def _parse_source(raw: Any, index: int) -> SourceConfig:
+
+
+def _parse_source(
+    raw: Any,
+    index: int,
+    *,
+    provider_registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
+) -> SourceConfig:
     location = f"sources[{index}]"
     data = _mapping(raw, location)
     allowed = {
@@ -218,18 +258,14 @@ def _parse_source(raw: Any, index: int) -> SourceConfig:
     _reject_unknown(data, allowed, location)
     source_id = _identifier(_required(data, "id", str, location), f"{location}.id")
     kind = _required(data, "kind", str, location)
-    supported_kinds = {"rss", "market", "imap", "x", "youtube", "mqtt", "heartbeat", "host"}
-    if kind not in supported_kinds:
-        raise ConfigError(f"{location}.kind is unsupported: {kind}")
+    try:
+        provider_registry.require(kind)
+    except ProviderConfigError as exc:
+        raise ConfigError(f"{location}.kind is unsupported: {kind}") from exc
     raw_hosts = data.get("allowed_hosts", [])
     allowed_hosts = tuple(host.lower() for host in _string_list(raw_hosts, f"{location}.allowed_hosts")) if raw_hosts else ()
     raw_url = data.get("url")
     url = _https_url(raw_url, f"{location}.url") if raw_url is not None else None
-    if kind == "rss":
-        if url is None:
-            raise ConfigError(f"missing {location}.url")
-        if urlsplit(url).hostname.lower() not in allowed_hosts:
-            raise ConfigError(f"{location}.url host must be present in allowed_hosts")
     settings = data.get("settings", {})
     if not isinstance(settings, Mapping):
         raise ConfigError(f"{location}.settings must be a table")
@@ -238,33 +274,27 @@ def _parse_source(raw: Any, index: int) -> SourceConfig:
     enabled = data.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError(f"{location}.enabled must be bool")
-    if enabled and kind == "market":
-        symbols = settings.get("symbols")
-        if not isinstance(symbols, list) or not symbols or not all(isinstance(item, str) and item.strip() for item in symbols):
-            raise ConfigError(f"{location}.settings.symbols must be a non-empty string array")
-        api_base = settings.get("api_base_url")
-        if not isinstance(api_base, str):
-            raise ConfigError(f"{location}.settings.api_base_url is required")
-        _https_url(api_base, f"{location}.settings.api_base_url")
-        for key in ("api_key_env", "api_secret_env"):
-            env_name = settings.get(key)
-            if not isinstance(env_name, str) or not _ENV_RE.fullmatch(env_name):
-                raise ConfigError(f"{location}.settings.{key} is invalid")
-    if enabled and kind == "x":
-        if not str(settings.get("user_id", "")).isdigit():
-            raise ConfigError(f"{location}.settings.user_id must be numeric")
-        token_env = settings.get("bearer_token_env")
-        if not isinstance(token_env, str) or not _ENV_RE.fullmatch(token_env):
-            raise ConfigError(f"{location}.settings.bearer_token_env is invalid")
-    if enabled and kind == "youtube" and not str(settings.get("channel_id", "")).strip():
-        raise ConfigError(f"{location}.settings.channel_id is required")
-    if enabled and kind == "imap":
-        if not str(settings.get("host", "")).strip():
-            raise ConfigError(f"{location}.settings.host is required")
-        for key in ("username_env", "password_env"):
-            env_name = settings.get(key)
-            if not isinstance(env_name, str) or not _ENV_RE.fullmatch(env_name):
-                raise ConfigError(f"{location}.settings.{key} is invalid")
+    max_response_bytes = _bounded_int(
+        data, "max_response_bytes", location, 1024, 10485760
+    )
+    try:
+        provider_validation = validate_provider_configuration(
+            kind=kind,
+            url=url,
+            allowed_hosts=allowed_hosts,
+            settings=settings,
+            enabled=enabled,
+            max_response_bytes=max_response_bytes,
+            location=f"{location}.settings",
+            registry=provider_registry,
+        )
+    except ProviderConfigError as exc:
+        raise ConfigError(str(exc)) from exc
+    normalized_settings = dict(provider_validation.settings)
+    credential_refs = {
+        key: SecretRef(environment_variable)
+        for key, environment_variable in provider_validation.credential_refs.items()
+    }
     publisher = _required(data, "publisher", str, location).strip()
     section = _required(data, "section", str, location).strip()
     dedupe_scope = _identifier(
@@ -284,10 +314,20 @@ def _parse_source(raw: Any, index: int) -> SourceConfig:
         request_timeout_seconds=_bounded_int(data, "request_timeout_seconds", location, 1, 120),
         request_attempts=_bounded_int(data, "request_attempts", location, 1, 5),
         retry_base_seconds=_bounded_int(data, "retry_base_seconds", location, 1, 30),
-        max_response_bytes=_bounded_int(data, "max_response_bytes", location, 1024, 10485760),
+        max_response_bytes=max_response_bytes,
         enabled=enabled,
-        settings=dict(settings),
+        settings=normalized_settings,
+        credential_refs=credential_refs,
     )
+
+
+def parse_source_config(
+    raw: Mapping[str, Any],
+    *,
+    provider_registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
+) -> SourceConfig:
+    """Validate one source for control-plane jobs and provider tooling."""
+    return _parse_source(raw, 0, provider_registry=provider_registry)
 
 
 def _parse_admin(raw: Any) -> AdminConfig:
@@ -305,6 +345,8 @@ def _parse_admin(raw: Any) -> AdminConfig:
     auth_env = data.get("auth_token_env")
     if auth_env is not None and (not isinstance(auth_env, str) or not _ENV_RE.fullmatch(auth_env)):
         raise ConfigError("admin.auth_token_env is invalid")
+    if enabled and auth_env is None:
+        raise ConfigError("admin.auth_token_env is required when admin.enabled is true")
     return AdminConfig(enabled, bind, port, auth_env)
 
 
@@ -341,9 +383,11 @@ def _parse_rule(raw: Any, index: int) -> WeightedTextRuleConfig:
         if len(expression) > 512:
             raise ConfigError(f"{pattern_location}.regex is too long")
         try:
-            re.compile(expression)
+            compile_safe_regex(expression)
         except re.error as exc:
             raise ConfigError(f"{pattern_location}.regex is invalid: {exc}") from exc
+        except UnsafeRegexError as exc:
+            raise ConfigError(f"{pattern_location}.regex is unsafe: {exc}") from exc
         patterns.append(PatternConfig(
             label=_required(pattern, "label", str, pattern_location).strip(),
             regex=expression,
@@ -364,7 +408,13 @@ def _parse_rule(raw: Any, index: int) -> WeightedTextRuleConfig:
     )
 
 
-def load_config(path: str | Path, *, include_managed: bool = True) -> AppConfig:
+def load_config(
+    path: str | Path,
+    *,
+    include_managed: bool = True,
+    provider_registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
+    managed_override: Mapping[str, Any] | None = None,
+) -> AppConfig:
     config_path = Path(path)
     try:
         with config_path.open("rb") as handle:
@@ -387,30 +437,42 @@ def load_config(path: str | Path, *, include_managed: bool = True) -> AppConfig:
     rule_rows = list(raw_rules)
     base_service = _parse_service(data.get("service"))
     managed_path = base_service.managed_sources_path
-    try:
-        managed_readable = bool(managed_path and managed_path.exists() and os.access(managed_path, os.R_OK))
-    except OSError:
-        managed_readable = False
-    if include_managed and managed_readable and managed_path is not None:
+    managed: Mapping[str, Any] | None = None
+    if include_managed and managed_override is not None:
+        managed = managed_override
+    elif include_managed:
         try:
-            managed = json.loads(base_service.managed_sources_path.read_text(encoding="utf-8"))
-        except PermissionError:
-            # A non-service operator may validate the base TOML without access
-            # to the service-owned managed file.
-            managed = None
-        except (OSError, ValueError) as exc:
-            raise ConfigError(f"cannot load managed configuration: {exc}") from exc
+            managed_readable = bool(
+                managed_path and managed_path.exists() and os.access(managed_path, os.R_OK)
+            )
+        except OSError:
+            managed_readable = False
+        if managed_readable and managed_path is not None:
+            try:
+                loaded = json.loads(managed_path.read_text(encoding="utf-8"))
+            except PermissionError:
+                # Operators may validate the base TOML without service-owned files.
+                loaded = None
+            except (OSError, ValueError) as exc:
+                raise ConfigError(f"cannot load managed configuration: {exc}") from exc
+            if loaded is not None and not isinstance(loaded, Mapping):
+                raise ConfigError("managed configuration must be an object")
+            managed = loaded
+    if managed is not None:
         if managed is not None and not isinstance(managed, Mapping):
             raise ConfigError("managed configuration must be an object")
-        if isinstance(managed, Mapping) and isinstance(managed.get("sources", []), list):
+        if isinstance(managed.get("sources", []), list):
             overrides = {item.get("id"): item for item in managed["sources"] if isinstance(item, Mapping)}
             source_rows = [overrides.pop(item.get("id"), item) if isinstance(item, Mapping) else item for item in source_rows]
             source_rows.extend(overrides.values())
-        if isinstance(managed, Mapping) and isinstance(managed.get("rules", []), list):
+        if isinstance(managed.get("rules", []), list):
             overrides = {item.get("id"): item for item in managed["rules"] if isinstance(item, Mapping)}
             rule_rows = [overrides.pop(item.get("id"), item) if isinstance(item, Mapping) else item for item in rule_rows]
             rule_rows.extend(overrides.values())
-    sources = tuple(_parse_source(source, index) for index, source in enumerate(source_rows))
+    sources = tuple(
+        _parse_source(source, index, provider_registry=provider_registry)
+        for index, source in enumerate(source_rows)
+    )
     rules = tuple(_parse_rule(rule, index) for index, rule in enumerate(rule_rows))
     source_ids = [source.id for source in sources]
     rule_ids = [rule.id for rule in rules]

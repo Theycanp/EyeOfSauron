@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodically verify EyeOfSauron health
+Documentation=file:/opt/eyeofsauron/current/docs/OPERATIONS.md
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=2min
+AccuracySec=15s
+RandomizedDelaySec=15s
+Persistent=true
+Unit=argus-watchdog.service
+
+[Install]
+WantedBy=timers.target

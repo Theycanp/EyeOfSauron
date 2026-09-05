@@ -54,6 +54,11 @@ class RuleTests(unittest.TestCase):
         second_alert = self.rules.evaluate(second, NOW)[0]
         self.assertEqual(first_alert.dedupe_key, second_alert.dedupe_key)
 
+    def test_unicode_titles_keep_distinct_incident_identity(self) -> None:
+        first = self.rules.evaluate(observation("cn-1", "Breaking: 中国央行紧急行动"), NOW)[0]
+        second = self.rules.evaluate(observation("cn-2", "Breaking: 日本央行紧急行动"), NOW)[0]
+        self.assertNotEqual(first.incident_key, second.incident_key)
+
 
 if __name__ == "__main__":
     unittest.main()

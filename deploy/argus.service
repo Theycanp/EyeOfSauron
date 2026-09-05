@@ -1,23 +1,32 @@
 [Unit]
 Description=EyeOfSauron event monitoring and ntfy delivery
-Documentation=file:/opt/eyeofsauron/docs/OPERATIONS.md
+Documentation=file:/opt/eyeofsauron/current/docs/OPERATIONS.md
 After=network-online.target ntfy.service
 Wants=network-online.target
+StartLimitIntervalSec=5min
+StartLimitBurst=5
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=argus
 Group=argus
 WorkingDirectory=/var/lib/argus
-Environment=PYTHONPATH=/opt/eyeofsauron/src
+Environment=PYTHONPATH=/opt/eyeofsauron/current/src
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=/etc/argus/ntfy.env
 EnvironmentFile=-/etc/argus/providers.env
 ExecStart=/usr/bin/python3 -m argus --config /etc/argus/config.toml run
 Restart=on-failure
+RestartForceExitStatus=75
 RestartSec=10s
+WatchdogSec=6min
+TimeoutStartSec=30s
 TimeoutStopSec=30s
 UMask=0077
+StateDirectory=argus
+StateDirectoryMode=0700
+OOMPolicy=stop
 
 NoNewPrivileges=true
 PrivateDevices=true
@@ -42,6 +51,11 @@ ProcSubset=pid
 RemoveIPC=true
 RestrictSUIDSGID=true
 SystemCallArchitectures=native
+
+MemoryHigh=256M
+MemoryMax=384M
+TasksMax=64
+LimitNOFILE=1024
 
 [Install]
 WantedBy=multi-user.target

@@ -4,12 +4,21 @@ import os
 import urllib.error
 import urllib.request
 import argparse
+import re
 from dataclasses import dataclass
 from typing import Mapping
+from urllib.parse import urlsplit, urlunsplit
+
+from . import __version__
 
 
 class HeartbeatError(RuntimeError):
     pass
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,18 +38,37 @@ class HeartbeatSender:
         self.timeout_seconds = config.timeout_seconds
         if not self.url:
             raise HeartbeatError(f"required environment variable {config.url_env} is missing")
-        if not self.url.startswith("https://"):
-            raise HeartbeatError("heartbeat URL must be HTTPS")
+        try:
+            parsed = urlsplit(self.url)
+            valid = (parsed.scheme == "https" and parsed.hostname and
+                     not parsed.username and not parsed.password and not parsed.fragment)
+            parsed.port
+        except ValueError:
+            valid = False
+        if not valid or any(ord(char) < 33 for char in self.url):
+            raise HeartbeatError("heartbeat URL must be HTTPS without credentials or fragment")
+        if not 1 <= self.timeout_seconds <= 60:
+            raise HeartbeatError("heartbeat timeout must be between 1 and 60 seconds")
+        if any(ord(char) < 32 or ord(char) == 127 for char in self.token):
+            raise HeartbeatError("heartbeat token contains invalid characters")
+        self._opener = urllib.request.build_opener(_NoRedirect())
 
     def ping(self, suffix: str = "") -> None:
-        url = self.url.rstrip("/") + ("/" + suffix.lstrip("/") if suffix else "")
+        if suffix and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", suffix):
+            raise HeartbeatError("heartbeat suffix must be a single path segment")
+        parsed = urlsplit(self.url)
+        path = parsed.path.rstrip("/") + ("/" + suffix if suffix else "")
+        url = urlunsplit(parsed._replace(path=path))
+        headers = {"User-Agent": f"Argus/{__version__}"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         request = urllib.request.Request(
             url,
-            headers={"Authorization": f"Bearer {self.token}"} if self.token else {"User-Agent": "Argus/0.6"},
+            headers=headers,
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with self._opener.open(request, timeout=self.timeout_seconds) as response:
                 response.read(1024)
                 if not 200 <= response.status < 300:
                     raise HeartbeatError(f"heartbeat returned HTTP {response.status}")

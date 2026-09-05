@@ -1,0 +1,42 @@
+[Unit]
+Description=EyeOfSauron bounded self-healing watchdog
+Documentation=file:/opt/eyeofsauron/current/docs/OPERATIONS.md
+After=argus.service argus-admin.service
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStart=/opt/eyeofsauron/current/scripts/operations/watchdog.sh
+RuntimeDirectory=argus-watchdog
+RuntimeDirectoryMode=0750
+UMask=0027
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/run/argus-watchdog /var/lib/argus
+CapabilityBoundingSet=CAP_SETGID CAP_SETUID
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+MemoryHigh=96M
+MemoryMax=160M
+TasksMax=32
+LimitNOFILE=256
