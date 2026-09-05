@@ -38,6 +38,16 @@ DAILY_SPEC.loader.exec_module(daily_backup)
 
 
 class DailyBackupTests(unittest.TestCase):
+    def test_watchdog_start_limit_allows_its_normal_timer_cadence(self):
+        import configparser
+        unit = configparser.ConfigParser(interpolation=None)
+        timer = configparser.ConfigParser(interpolation=None)
+        unit.read(ROOT / 'deploy/argus-watchdog.service')
+        timer.read(ROOT / 'deploy/argus-watchdog.timer')
+        interval = int(unit['Unit']['StartLimitIntervalSec'].removesuffix('min'))
+        cadence = int(timer['Timer']['OnUnitActiveSec'].removesuffix('min'))
+        self.assertLessEqual(interval, cadence)
+
     def test_health_status_can_arrive_on_inherited_stdin(self):
         with patch("sys.stdin", io.StringIO('{"engine": {}}')), patch("sys.stdout", io.StringIO()), \
              patch.object(check_status, "evaluate_status", return_value={"ok": True}) as evaluate:

@@ -2,7 +2,7 @@
 Description=EyeOfSauron bounded self-healing watchdog
 Documentation=file:/opt/eyeofsauron/current/docs/OPERATIONS.md
 After=argus.service argus-admin.service
-StartLimitIntervalSec=15min
+StartLimitIntervalSec=1min
 StartLimitBurst=3
 
 [Service]
