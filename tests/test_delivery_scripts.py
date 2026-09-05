@@ -38,6 +38,13 @@ DAILY_SPEC.loader.exec_module(daily_backup)
 
 
 class DailyBackupTests(unittest.TestCase):
+    def test_health_status_can_arrive_on_inherited_stdin(self):
+        with patch("sys.stdin", io.StringIO('{"engine": {}}')), patch("sys.stdout", io.StringIO()), \
+             patch.object(check_status, "evaluate_status", return_value={"ok": True}) as evaluate:
+            result = check_status.main(["--status-file", "-", "--config", "unused.toml"])
+        self.assertEqual(0, result)
+        self.assertEqual({"engine": {}}, evaluate.call_args.args[0])
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

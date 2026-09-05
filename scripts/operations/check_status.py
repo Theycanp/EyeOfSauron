@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 import time
 from contextlib import closing
 from pathlib import Path
@@ -162,7 +163,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-pending", type=int, default=1000)
     args = parser.parse_args(argv)
     try:
-        status = json.loads(args.status_file.read_text(encoding="utf-8"))
+        status = (json.load(sys.stdin) if str(args.status_file) == "-" else
+                  json.loads(args.status_file.read_text(encoding="utf-8")))
         if not isinstance(status, Mapping):
             raise ValueError("status payload is not an object")
         result = evaluate_status(

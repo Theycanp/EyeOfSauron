@@ -45,17 +45,18 @@ while :; do
   trap 'rm -f "$status_file"' EXIT
   if ! systemctl is-active --quiet argus; then
     last_error="argus.service is not active"
-  elif ! timeout --kill-after=5 20 runuser -u "$service_user" -- env \
+  elif ! timeout --kill-after=5 20 setpriv --reuid="$service_user" --regid="$service_user" --init-groups env \
       PYTHONPATH="$current_root/src" PYTHONDONTWRITEBYTECODE=1 \
       /usr/bin/python3 -m argus --config "$config_path" status --json >"$status_file"; then
     last_error="argus status command failed"
-  elif ! PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$current_root/src" timeout --kill-after=5 20 /usr/bin/python3 \
+  elif ! timeout --kill-after=5 20 setpriv --reuid="$service_user" --regid="$service_user" --init-groups env \
+      PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$current_root/src" /usr/bin/python3 \
       "$current_root/scripts/operations/check_status.py" \
-      --status-file "$status_file" \
+      --status-file - \
       --config "$config_path" \
       --source-age-multiplier "$source_age_multiplier" \
       --minimum-source-age "$minimum_source_age" \
-      --max-pending "$max_pending"; then
+      --max-pending "$max_pending" <"$status_file"; then
     last_error="persisted status failed the reliability gate"
   elif ((check_admin)) && ! systemctl is-active --quiet argus-admin; then
     last_error="argus-admin.service is not active"
