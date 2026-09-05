@@ -81,7 +81,7 @@ jobs:
             --output-format JSON \
             --output-file artifacts/python-sbom.cdx.json \
             "$SMOKE_PYTHON"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: backend-delivery-artifacts
           if-no-files-found: error
@@ -137,7 +137,7 @@ jobs:
           mkdir -p artifacts
           cd frontend
           npm sbom --omit=dev --sbom-format=cyclonedx > ../artifacts/frontend-sbom.cdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: frontend-sbom
           if-no-files-found: error
