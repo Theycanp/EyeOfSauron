@@ -57,7 +57,7 @@ class JsonMarketProvider:
             self.base_url + "/" + path.lstrip("/"),
             headers={
                 "Accept": "application/json",
-                "User-Agent": "SignalWatch/0.2 (market monitor)",
+                "User-Agent": "Argus/0.6 (market monitor)",
                 **({"APCA-API-KEY-ID": self.api_key} if self.api_key else {}),
                 **({"APCA-API-SECRET-KEY": self.api_secret} if self.api_secret else {}),
             },
@@ -177,7 +177,7 @@ class MarketCollector:
                     title=truncate(title, 1000),
                     summary=truncate(summary, 4000),
                     url=str(quote.get("url", "")) if isinstance(quote, Mapping) else "",
-                    attributes={"section": self.config.section, "symbol": symbol, "incident_key": f"symbol:{symbol}", "change_pct": round(change, 4), "gap_pct": round(gap, 4), "volume_ratio": round(volume_ratio, 4), "event_types": event_types},
+                    attributes={"section": self.config.section, "symbol": symbol, "incident_key": f"symbol:{symbol}", "stateful": True, "change_pct": round(change, 4), "gap_pct": round(gap, 4), "volume_ratio": round(volume_ratio, 4), "event_types": event_types},
                 ))
                 last_event = now_epoch
             elif recovered:
@@ -188,7 +188,7 @@ class MarketCollector:
                     title=f"{symbol} 市场异动已恢复",
                     summary=f"已恢复项目：{', '.join(recovered)}；当前相对昨收 {change:+.2f}%。",
                     url=str(quote.get("url", "")),
-                    attributes={"section": self.config.section, "symbol": symbol, "incident_key": f"symbol:{symbol}", "recovered": recovered},
+                    attributes={"section": self.config.section, "symbol": symbol, "incident_key": f"symbol:{symbol}", "stateful": True, "recovery": True, "recovered": recovered},
                 ))
             next_cursor[symbol] = {"price": price, "volume": volume, "timestamp": timestamp, "last_event": last_event, "active": sorted(active)}
         return FeedFetchResult(tuple(observations), None, None, not_modified=not observations, cursor=json.dumps(next_cursor, sort_keys=True))

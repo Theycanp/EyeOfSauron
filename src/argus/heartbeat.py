@@ -36,7 +36,7 @@ class HeartbeatSender:
         url = self.url.rstrip("/") + ("/" + suffix.lstrip("/") if suffix else "")
         request = urllib.request.Request(
             url,
-            headers={"Authorization": f"Bearer {self.token}"} if self.token else {"User-Agent": "SignalWatch/0.2"},
+            headers={"Authorization": f"Bearer {self.token}"} if self.token else {"User-Agent": "Argus/0.6"},
             method="POST",
         )
         try:
@@ -51,7 +51,7 @@ class HeartbeatSender:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="signalwatch-heartbeat")
+    parser = argparse.ArgumentParser(prog="argus-heartbeat")
     parser.add_argument("--url-env", required=True)
     parser.add_argument("--token-env")
     parser.add_argument("--suffix", default="")

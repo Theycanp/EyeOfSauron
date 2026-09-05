@@ -4,8 +4,8 @@ import json
 import unittest
 import urllib.error
 
-from signalwatch.models import OutboxMessage
-from signalwatch.notifier import NtfyNotifier, NotifyError
+from argus.models import OutboxMessage
+from argus.notifier import NtfyNotifier, NotifyError
 
 
 class _Response:
@@ -36,7 +36,7 @@ class _Opener:
 def _alert() -> OutboxMessage:
     return OutboxMessage(
         id=1,
-        topic="signalwatch",
+        topic="eos",
         title="Test",
         message="Message",
         priority=5,
@@ -54,7 +54,7 @@ class NotifierTests(unittest.TestCase):
         notifier.publish(_alert())
         assert opener.request is not None
         payload = json.loads(opener.request.data)
-        self.assertEqual("signalwatch", payload["topic"])
+        self.assertEqual("eos", payload["topic"])
         self.assertEqual(5, payload["priority"])
         self.assertEqual(["warning"], payload["tags"])
         self.assertEqual("Bearer private-token", opener.request.get_header("Authorization"))

@@ -16,7 +16,7 @@ from .rules import RuleSet
 from .util import now_epoch, sanitize_error
 
 
-LOGGER = logging.getLogger("signalwatch")
+LOGGER = logging.getLogger("argus")
 
 
 class AlreadyRunningError(RuntimeError):
@@ -36,7 +36,7 @@ class ProcessLock:
         except BlockingIOError as exc:
             os.close(self.fd)
             self.fd = None
-            raise AlreadyRunningError("another SignalWatch process holds the service lock") from exc
+            raise AlreadyRunningError("another Argus process holds the service lock") from exc
         os.ftruncate(self.fd, 0)
         os.write(self.fd, f"{os.getpid()}\n".encode("ascii"))
         return self
@@ -53,7 +53,7 @@ def retry_delay(attempts: int, maximum: int) -> int:
     return min(maximum, 5 * (2**exponent))
 
 
-class SignalWatchService:
+class ArgusService:
     def __init__(
         self,
         config: AppConfig,
@@ -167,6 +167,13 @@ class SignalWatchService:
         LOGGER.info("notification_delivered alert_id=%d topic=%s attempts=%d", alert.id, alert.topic, alert.attempts)
         return True
 
+    def process_reminders_once(self) -> int:
+        now = now_epoch()
+        queued = self.database.enqueue_due_reminders(now, self.config.ntfy.default_topic)
+        if queued:
+            LOGGER.info("reminders_queued count=%d", queued)
+        return queued
+
     async def _source_loop(self, source_id: str, interval: int) -> None:
         while not self.stop_event.is_set():
             await self.poll_source_once(source_id)
@@ -180,6 +187,14 @@ class SignalWatchService:
             delivered = await self.deliver_one()
             if delivered:
                 continue
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=1.0)
+            except TimeoutError:
+                pass
+
+    async def _reminder_loop(self) -> None:
+        while not self.stop_event.is_set():
+            self.process_reminders_once()
             try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=1.0)
             except TimeoutError:
@@ -211,6 +226,7 @@ class SignalWatchService:
                             name=f"source:{source.id}",
                         )
                 group.create_task(self._delivery_loop(), name="delivery")
+                group.create_task(self._reminder_loop(), name="reminders")
                 group.create_task(self._maintenance_loop(), name="maintenance")
                 await self.stop_event.wait()
         finally:
@@ -218,6 +234,7 @@ class SignalWatchService:
 
     async def run_once(self, deliver: bool = False) -> None:
         await asyncio.gather(*(self.poll_source_once(source.id) for source in self.config.sources if source.id in self.collectors))
+        self.process_reminders_once()
         if deliver:
             while await self.deliver_one():
                 pass

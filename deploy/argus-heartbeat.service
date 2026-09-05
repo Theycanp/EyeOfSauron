@@ -1,0 +1,19 @@
+[Unit]
+Description=EyeOfSauron outbound heartbeat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=argus
+Group=argus
+EnvironmentFile=/etc/argus/heartbeat.env
+ExecStart=/usr/bin/python3 -c "from argus.heartbeat import main; raise SystemExit(main(['--url-env','ARGUS_HEARTBEAT_URL','--token-env','ARGUS_HEARTBEAT_TOKEN']))"
+Environment=PYTHONPATH=/opt/eyeofsauron/src
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=

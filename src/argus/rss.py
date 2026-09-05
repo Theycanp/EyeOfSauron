@@ -152,7 +152,7 @@ class RssCollector:
     def fetch(self, state: SourceState) -> FeedFetchResult:
         headers = {
             "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9",
-            "User-Agent": "SignalWatch/0.1 (personal feed monitor)",
+            "User-Agent": "Argus/0.6 (personal feed monitor)",
         }
         if state.etag:
             headers["If-None-Match"] = state.etag

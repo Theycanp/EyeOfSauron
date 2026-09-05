@@ -149,7 +149,7 @@ class XCollector:
         if state.cursor:
             query["since_id"] = state.cursor
         url = f"{self.base_url}/users/{self.user_id}/tweets?{urllib.parse.urlencode(query)}"
-        request = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}", "Accept": "application/json", "User-Agent": "SignalWatch/0.2"})
+        request = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}", "Accept": "application/json", "User-Agent": "Argus/0.6"})
         try:
             with self._opener.open(request, timeout=self.config.request_timeout_seconds) as response:
                 payload = response.read(self.config.max_response_bytes + 1)

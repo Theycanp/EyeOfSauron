@@ -7,16 +7,16 @@ from dataclasses import replace
 from email.message import Message
 from unittest.mock import patch
 
-from signalwatch.config import load_config
-from signalwatch.models import SourceState
-from signalwatch.rss import FeedError, RssCollector, parse_feed
+from argus.config import load_config
+from argus.models import SourceState
+from argus.rss import FeedError, RssCollector, parse_feed
 
 from helpers import PROJECT_ROOT
 
 
 class RssTests(unittest.TestCase):
     def setUp(self) -> None:
-        config = load_config(PROJECT_ROOT / "config" / "signalwatch.production.toml")
+        config = load_config(PROJECT_ROOT / "config" / "argus.production.toml")
         self.source = config.sources[0]
         self.payload = (PROJECT_ROOT / "tests" / "fixtures" / "bloomberg.rss").read_bytes()
 

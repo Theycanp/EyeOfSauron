@@ -15,12 +15,12 @@ from .database import Database
 from .notifier import NtfyNotifier, NotifyError
 from .rss import RssCollector
 from .rules import RuleSet
-from .service import AlreadyRunningError, ProcessLock, SignalWatchService
+from .service import AlreadyRunningError, ProcessLock, ArgusService
 from .util import now_epoch
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="signalwatch")
+    parser = argparse.ArgumentParser(prog="argus")
     parser.add_argument("--config", required=True, help="absolute path to TOML configuration")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check-config", help="validate configuration without reading secrets")
@@ -41,14 +41,14 @@ def _configure_logging(level: str) -> None:
     )
 
 
-def _build_service(config, database: Database) -> SignalWatchService:  # type: ignore[no-untyped-def]
+def _build_service(config, database: Database) -> ArgusService:  # type: ignore[no-untyped-def]
     collectors = {}
     for source in config.sources:
         try:
             collector = build_collector(source)
         except AdapterError as exc:
             if source.kind in {"imap", "x", "youtube", "mqtt", "heartbeat"}:
-                logging.getLogger("signalwatch").warning(
+                logging.getLogger("argus").warning(
                     "source_disabled source=%s reason=credentials_or_settings_unavailable",
                     source.id,
                 )
@@ -58,7 +58,7 @@ def _build_service(config, database: Database) -> SignalWatchService:  # type: i
             collectors[source.id] = collector
     rules = RuleSet.from_config(config.rules, config.ntfy.default_topic)
     notifier = NtfyNotifier.from_config(config.ntfy) if config.ntfy.enabled else None
-    return SignalWatchService(config, database, collectors, rules, notifier)
+    return ArgusService(config, database, collectors, rules, notifier)
 
 
 def _print_status(status: dict, as_json: bool) -> None:
@@ -74,6 +74,12 @@ def _print_status(status: dict, as_json: bool) -> None:
         f"sending={outbox.get('sending', 0)} "
         f"delivered={outbox.get('delivered', 0)}"
     )
+    reminders = status.get("reminders", {})
+    print(
+        "reminders: "
+        f"enabled={reminders.get('enabled', 0)} "
+        f"disabled={reminders.get('disabled', 0)}"
+    )
     for source in status["sources"]:
         print(
             f"source {source['source_id']}: initialized={bool(source['initialized'])} "
@@ -82,7 +88,7 @@ def _print_status(status: dict, as_json: bool) -> None:
         )
 
 
-async def _run_service(service: SignalWatchService) -> None:
+async def _run_service(service: ArgusService) -> None:
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signum, service.request_stop)
@@ -136,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             database.close()
     except (ConfigError, NotifyError, AdapterError, AlreadyRunningError, OSError, RuntimeError) as exc:
-        print(f"signalwatch: {exc}", file=sys.stderr)
+        print(f"argus: {exc}", file=sys.stderr)
         return 2
 
 

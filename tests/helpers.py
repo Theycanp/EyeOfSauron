@@ -4,15 +4,15 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from signalwatch.config import AppConfig, load_config
-from signalwatch.models import Observation
+from argus.config import AppConfig, load_config
+from argus.models import Observation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def production_config(tmp_path: Path) -> AppConfig:
-    config = load_config(PROJECT_ROOT / "config" / "signalwatch.production.toml")
+    config = load_config(PROJECT_ROOT / "config" / "argus.production.toml")
     return replace(
         config,
         service=replace(

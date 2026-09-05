@@ -31,6 +31,7 @@ class AlertCandidate:
     confidence: float = 0.5
     evidence: tuple[str, ...] = ()
     incident_key: str | None = None
+    incident_kind: str = "event"
     recovery: bool = False
 
 
@@ -83,6 +84,7 @@ class OutboxMessage:
 class Incident:
     id: int
     incident_key: str
+    kind: str
     status: str
     first_seen_at: int
     last_seen_at: int

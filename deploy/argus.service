@@ -1,20 +1,22 @@
 [Unit]
-Description=SignalWatch loopback-only management API
-Documentation=file:/opt/signalwatch/docs/OPERATIONS.md
-After=network-online.target signalwatch.service
+Description=EyeOfSauron event monitoring and ntfy delivery
+Documentation=file:/opt/eyeofsauron/docs/OPERATIONS.md
+After=network-online.target ntfy.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=signalwatch
-Group=signalwatch
-WorkingDirectory=/var/lib/signalwatch
-Environment=PYTHONPATH=/opt/signalwatch/src
+User=argus
+Group=argus
+WorkingDirectory=/var/lib/argus
+Environment=PYTHONPATH=/opt/eyeofsauron/src
 Environment=PYTHONDONTWRITEBYTECODE=1
-EnvironmentFile=/etc/signalwatch/admin.env
-ExecStart=/usr/bin/python3 -m signalwatch --config /etc/signalwatch/config.toml admin
+EnvironmentFile=/etc/argus/ntfy.env
+EnvironmentFile=-/etc/argus/providers.env
+ExecStart=/usr/bin/python3 -m argus --config /etc/argus/config.toml run
 Restart=on-failure
 RestartSec=10s
+TimeoutStopSec=30s
 UMask=0077
 
 NoNewPrivileges=true
@@ -28,7 +30,7 @@ ProtectKernelLogs=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/signalwatch
+ReadWritePaths=/var/lib/argus
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true

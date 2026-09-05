@@ -14,10 +14,11 @@ from .models import (
     SourceState,
 )
 from .rules import RuleSet
+from .reminders import ReminderError, ReminderSpec, next_daily_occurrence
 from .util import sanitize_error, to_epoch
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 6
 
 
 class Database:
@@ -58,7 +59,8 @@ class Database:
                 CREATE TABLE incidents (
                     id INTEGER PRIMARY KEY,
                     incident_key TEXT NOT NULL UNIQUE,
-                    status TEXT NOT NULL CHECK (status IN ('open', 'recovered')),
+                    kind TEXT NOT NULL CHECK (kind IN ('event', 'stateful')),
+                    status TEXT NOT NULL CHECK (status IN ('recorded', 'open', 'recovered')),
                     first_seen_at INTEGER NOT NULL,
                     last_seen_at INTEGER NOT NULL,
                     recovered_at INTEGER,
@@ -69,10 +71,47 @@ class Database:
                     updated_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE reminders (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    schedule_kind TEXT NOT NULL CHECK (schedule_kind IN ('once', 'daily')),
+                    run_at INTEGER,
+                    daily_time TEXT,
+                    timezone TEXT NOT NULL,
+                    next_run_at INTEGER,
+                    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                    priority INTEGER NOT NULL CHECK (priority BETWEEN 1 AND 5),
+                    tags_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    last_enqueued_at INTEGER,
+                    last_delivered_at INTEGER,
+                    completed_at INTEGER,
+                    CHECK (
+                        (schedule_kind = 'once' AND run_at IS NOT NULL AND daily_time IS NULL)
+                        OR (schedule_kind = 'daily' AND run_at IS NULL AND daily_time IS NOT NULL)
+                    )
+                );
+
+                CREATE INDEX reminders_due_idx ON reminders(enabled, next_run_at);
+
+                CREATE TABLE reminder_audit (
+                    id INTEGER PRIMARY KEY,
+                    reminder_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX reminder_audit_time_idx ON reminder_audit(created_at, id);
+
                 CREATE TABLE alerts (
                     id INTEGER PRIMARY KEY,
                     observation_id INTEGER REFERENCES observations(id),
                     incident_id INTEGER REFERENCES incidents(id),
+                    reminder_id TEXT REFERENCES reminders(id) ON DELETE SET NULL,
                     rule_id TEXT NOT NULL,
                     dedupe_key TEXT NOT NULL UNIQUE,
                     topic TEXT NOT NULL,
@@ -95,6 +134,7 @@ class Database:
 
                 CREATE INDEX alerts_due_idx
                     ON alerts(status, next_attempt_at, lease_until, priority, created_at);
+                CREATE INDEX alerts_reminder_idx ON alerts(reminder_id, created_at);
 
                 CREATE INDEX incidents_status_idx ON incidents(status, last_seen_at);
 
@@ -135,7 +175,7 @@ class Database:
                 );
 
                 CREATE INDEX config_audit_time_idx ON config_audit(created_at, id);
-                PRAGMA user_version=3;
+                PRAGMA user_version=6;
                 COMMIT;
                 """
             )
@@ -222,6 +262,165 @@ class Database:
             except Exception:
                 self.connection.rollback()
                 raise
+            version = 3
+        if version < 4:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 4:
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS reminders (
+                            id TEXT PRIMARY KEY,
+                            title TEXT NOT NULL,
+                            message TEXT NOT NULL,
+                            schedule_kind TEXT NOT NULL CHECK (schedule_kind IN ('once', 'daily')),
+                            run_at INTEGER,
+                            daily_time TEXT,
+                            timezone TEXT NOT NULL,
+                            next_run_at INTEGER,
+                            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                            priority INTEGER NOT NULL CHECK (priority BETWEEN 1 AND 5),
+                            tags_json TEXT NOT NULL,
+                            created_at INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL,
+                            last_enqueued_at INTEGER,
+                            last_delivered_at INTEGER,
+                            completed_at INTEGER,
+                            CHECK (
+                                (schedule_kind = 'once' AND run_at IS NOT NULL AND daily_time IS NULL)
+                                OR (schedule_kind = 'daily' AND run_at IS NULL AND daily_time IS NOT NULL)
+                            )
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS reminders_due_idx ON reminders(enabled, next_run_at)"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS reminder_audit (
+                            id INTEGER PRIMARY KEY,
+                            reminder_id TEXT NOT NULL,
+                            action TEXT NOT NULL,
+                            actor TEXT NOT NULL,
+                            details_json TEXT NOT NULL DEFAULT '{}',
+                            created_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS reminder_audit_time_idx ON reminder_audit(created_at, id)"
+                    )
+                    alert_columns = {str(row[1]) for row in self.connection.execute("PRAGMA table_info(alerts)")}
+                    if "reminder_id" not in alert_columns:
+                        self.connection.execute(
+                            "ALTER TABLE alerts ADD COLUMN reminder_id TEXT REFERENCES reminders(id) ON DELETE SET NULL"
+                        )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS alerts_reminder_idx ON alerts(reminder_id, created_at)"
+                    )
+                    self.connection.execute("PRAGMA user_version=4")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 4
+        if version < 5:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 5:
+                    # Rows created before schema 2 can return ALTER TABLE defaults
+                    # logically while still missing the fields in their record body.
+                    # Rewriting materializes those defaults so integrity_check is clean.
+                    self.connection.execute(
+                        """
+                        UPDATE alerts
+                        SET confidence = COALESCE(confidence, 0.5),
+                            evidence_json = COALESCE(evidence_json, '[]')
+                        """
+                    )
+                    self.connection.execute("PRAGMA user_version=5")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 5
+        if version < 6:
+            # SQLite cannot widen an existing CHECK constraint in place. Rebuild
+            # only the incidents table while preserving IDs referenced by alerts.
+            self.connection.commit()
+            self.connection.execute("PRAGMA foreign_keys=OFF")
+            try:
+                self.connection.execute("BEGIN IMMEDIATE")
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 6:
+                    self.connection.execute(
+                        """
+                        CREATE TABLE incidents_v6 (
+                            id INTEGER PRIMARY KEY,
+                            incident_key TEXT NOT NULL UNIQUE,
+                            kind TEXT NOT NULL CHECK (kind IN ('event', 'stateful')),
+                            status TEXT NOT NULL CHECK (status IN ('recorded', 'open', 'recovered')),
+                            first_seen_at INTEGER NOT NULL,
+                            last_seen_at INTEGER NOT NULL,
+                            recovered_at INTEGER,
+                            confidence REAL NOT NULL DEFAULT 0.5,
+                            evidence_json TEXT NOT NULL DEFAULT '[]',
+                            source_ids_json TEXT NOT NULL DEFAULT '[]',
+                            observation_count INTEGER NOT NULL DEFAULT 0,
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        WITH classified AS (
+                            SELECT i.*,
+                                CASE WHEN EXISTS (
+                                    SELECT 1
+                                    FROM alerts AS a
+                                    LEFT JOIN observations AS o ON o.id = a.observation_id
+                                    WHERE a.incident_id = i.id
+                                      AND (
+                                          a.rule_id IN ('system.source_failure', 'system.source_recovery')
+                                          OR
+                                          instr(COALESCE(o.attributes_json, ''), '"check"') > 0
+                                          OR instr(COALESCE(o.attributes_json, ''), '"symbol"') > 0
+                                          OR instr(COALESCE(o.attributes_json, ''), '"stateful"') > 0
+                                      )
+                                ) THEN 'stateful' ELSE 'event' END AS migrated_kind
+                            FROM incidents AS i
+                        )
+                        INSERT INTO incidents_v6(
+                            id, incident_key, kind, status, first_seen_at, last_seen_at,
+                            recovered_at, confidence, evidence_json, source_ids_json,
+                            observation_count, updated_at
+                        )
+                        SELECT id, incident_key, migrated_kind,
+                            CASE WHEN migrated_kind = 'event' THEN 'recorded' ELSE status END,
+                            first_seen_at, last_seen_at,
+                            CASE WHEN migrated_kind = 'event' THEN NULL ELSE recovered_at END,
+                            confidence, evidence_json, source_ids_json,
+                            observation_count, updated_at
+                        FROM classified
+                        """
+                    )
+                    self.connection.execute("DROP TABLE incidents")
+                    self.connection.execute("ALTER TABLE incidents_v6 RENAME TO incidents")
+                    self.connection.execute(
+                        "CREATE INDEX incidents_status_idx ON incidents(status, last_seen_at)"
+                    )
+                    self.connection.execute("PRAGMA user_version=6")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            finally:
+                self.connection.execute("PRAGMA foreign_keys=ON")
+            if self.connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise RuntimeError("database foreign key check failed after schema 6 migration")
 
     def close(self) -> None:
         self.connection.close()
@@ -253,6 +452,7 @@ class Database:
         candidate: AlertCandidate,
         observation_id: int | None,
         now: int,
+        reminder_id: str | None = None,
     ) -> bool:
         incident_id: int | None = None
         if candidate.incident_key:
@@ -270,14 +470,15 @@ class Database:
         cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO alerts(
-                observation_id, incident_id, rule_id, dedupe_key, topic, title, message,
+                observation_id, incident_id, reminder_id, rule_id, dedupe_key, topic, title, message,
                 priority, confidence, evidence_json, incident_key, tags_json, click_url,
                 status, next_attempt_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
             (
                 observation_id,
                 incident_id,
+                reminder_id,
                 candidate.rule_id,
                 candidate.dedupe_key,
                 candidate.topic,
@@ -301,8 +502,15 @@ class Database:
         observation_id: int | None,
         now: int,
     ) -> int:
-        """Create or update the durable incident represented by a candidate."""
+        """Create or update the durable event or stateful incident."""
         assert candidate.incident_key
+        if candidate.incident_kind not in {"event", "stateful"}:
+            raise ValueError(f"unsupported incident kind: {candidate.incident_kind}")
+        status = (
+            "recorded"
+            if candidate.incident_kind == "event"
+            else "recovered" if candidate.recovery else "open"
+        )
         row = self.connection.execute(
             "SELECT * FROM incidents WHERE incident_key = ?",
             (candidate.incident_key,),
@@ -318,16 +526,17 @@ class Database:
             self.connection.execute(
                 """
                 INSERT INTO incidents(
-                    incident_key, status, first_seen_at, last_seen_at, recovered_at,
+                    incident_key, kind, status, first_seen_at, last_seen_at, recovered_at,
                     confidence, evidence_json, source_ids_json, observation_count, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate.incident_key,
-                    "recovered" if candidate.recovery else "open",
+                    candidate.incident_kind,
+                    status,
                     now,
                     now,
-                    now if candidate.recovery else None,
+                    now if status == "recovered" else None,
                     candidate.confidence,
                     json.dumps(list(candidate.evidence), ensure_ascii=False),
                     json.dumps(source_ids, ensure_ascii=False),
@@ -351,16 +560,16 @@ class Database:
             ).fetchone()
             if source_row:
                 source_ids.add(str(source_row["source_id"]))
-        status = "recovered" if candidate.recovery else "open"
-        recovered_at = now if candidate.recovery else None
+        recovered_at = now if status == "recovered" else None
         self.connection.execute(
             """
-            UPDATE incidents SET status = ?, last_seen_at = ?, recovered_at = ?,
+            UPDATE incidents SET kind = ?, status = ?, last_seen_at = ?, recovered_at = ?,
                 confidence = MAX(confidence, ?), evidence_json = ?, source_ids_json = ?,
                 observation_count = observation_count + ?, updated_at = ?
             WHERE id = ?
             """,
             (
+                candidate.incident_kind,
                 status,
                 now,
                 recovered_at,
@@ -424,12 +633,15 @@ class Database:
                 recovery = AlertCandidate(
                     rule_id="system.source_recovery",
                     dedupe_key=f"source-recovery:{source_id}:{outage_identity}",
-                    title="SignalWatch 数据源已恢复",
+                    title="Argus 数据源已恢复",
                     message=f"数据源 {source_id} 已恢复正常采集。",
                     priority=2,
                     tags=("white_check_mark",),
                     click_url="",
                     topic=default_topic,
+                    incident_key=f"system:source:{source_id}",
+                    incident_kind="stateful",
+                    recovery=True,
                 )
                 recovery_queued = self._insert_alert(recovery, None, now)
                 queued += int(recovery_queued)
@@ -488,7 +700,7 @@ class Database:
                 candidate = AlertCandidate(
                     rule_id="system.source_failure",
                     dedupe_key=f"source-failure:{source_id}:{outage_started}",
-                    title="SignalWatch 数据源异常",
+                    title="Argus 数据源异常",
                     message=(
                         f"数据源 {source_id} 已连续采集失败 {failures} 次。"
                         "服务会继续自动重试，详细原因请查看本机日志。"
@@ -497,6 +709,8 @@ class Database:
                     tags=("warning",),
                     click_url="",
                     topic=default_topic,
+                    incident_key=f"system:source:{source_id}",
+                    incident_kind="stateful",
                 )
                 alert_inserted = self._insert_alert(candidate, None, now)
             self.connection.execute(
@@ -534,7 +748,7 @@ class Database:
         candidate = AlertCandidate(
             rule_id="system.test",
             dedupe_key=f"system-test:{now}",
-            title="SignalWatch 测试通知",
+            title="Argus 测试通知",
             message="采集、规则、SQLite outbox 与 ntfy 通知链路已就绪。",
             priority=3,
             tags=("test_tube", "white_check_mark"),
@@ -543,6 +757,286 @@ class Database:
         )
         with self.connection:
             return self._insert_alert(candidate, None, now)
+
+    def _record_reminder_audit(
+        self,
+        reminder_id: str,
+        action: str,
+        actor: str,
+        now: int,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO reminder_audit(reminder_id, action, actor, details_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                reminder_id,
+                action[:64],
+                actor[:128],
+                json.dumps(dict(details or {}), ensure_ascii=False, sort_keys=True),
+                now,
+            ),
+        )
+
+    @staticmethod
+    def _decode_reminder(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        try:
+            item["tags"] = json.loads(item.pop("tags_json"))
+        except (TypeError, ValueError):
+            item["tags"] = []
+        item["enabled"] = bool(item["enabled"])
+        return item
+
+    def get_reminder(self, reminder_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT r.*,
+                (SELECT status FROM alerts a WHERE a.reminder_id = r.id ORDER BY a.id DESC LIMIT 1)
+                    AS last_delivery_status,
+                (SELECT last_error FROM alerts a WHERE a.reminder_id = r.id ORDER BY a.id DESC LIMIT 1)
+                    AS last_delivery_error
+            FROM reminders r WHERE r.id = ?
+            """,
+            (reminder_id,),
+        ).fetchone()
+        return self._decode_reminder(row) if row is not None else None
+
+    def list_reminders(self, limit: int = 500) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 1000))
+        rows = self.connection.execute(
+            """
+            SELECT r.*,
+                (SELECT status FROM alerts a WHERE a.reminder_id = r.id ORDER BY a.id DESC LIMIT 1)
+                    AS last_delivery_status,
+                (SELECT last_error FROM alerts a WHERE a.reminder_id = r.id ORDER BY a.id DESC LIMIT 1)
+                    AS last_delivery_error
+            FROM reminders r
+            ORDER BY (r.next_run_at IS NULL), r.next_run_at, r.updated_at DESC, r.id
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [self._decode_reminder(row) for row in rows]
+
+    def upsert_reminder(self, reminder: ReminderSpec, actor: str, now: int) -> dict[str, Any]:
+        next_run_at: int | None = None
+        if reminder.enabled:
+            if reminder.schedule_kind == "once":
+                next_run_at = reminder.run_at
+            else:
+                assert reminder.daily_time is not None
+                next_run_at = next_daily_occurrence(reminder.daily_time, reminder.timezone, now)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.connection.execute(
+                "SELECT id FROM reminders WHERE id = ?", (reminder.id,)
+            ).fetchone()
+            cancelled = 0
+            if existing is not None:
+                cancelled = self.connection.execute(
+                    "DELETE FROM alerts WHERE reminder_id = ? AND status = 'pending'",
+                    (reminder.id,),
+                ).rowcount
+                self.connection.execute(
+                    """
+                    UPDATE reminders SET title = ?, message = ?, schedule_kind = ?,
+                        run_at = ?, daily_time = ?, timezone = ?, next_run_at = ?, enabled = ?,
+                        priority = ?, tags_json = ?, updated_at = ?, completed_at = NULL
+                    WHERE id = ?
+                    """,
+                    (
+                        reminder.title,
+                        reminder.message,
+                        reminder.schedule_kind,
+                        reminder.run_at,
+                        reminder.daily_time,
+                        reminder.timezone,
+                        next_run_at,
+                        int(reminder.enabled),
+                        reminder.priority,
+                        json.dumps(reminder.tags, ensure_ascii=False),
+                        now,
+                        reminder.id,
+                    ),
+                )
+                action = "update"
+            else:
+                self.connection.execute(
+                    """
+                    INSERT INTO reminders(
+                        id, title, message, schedule_kind, run_at, daily_time, timezone,
+                        next_run_at, enabled, priority, tags_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        reminder.id,
+                        reminder.title,
+                        reminder.message,
+                        reminder.schedule_kind,
+                        reminder.run_at,
+                        reminder.daily_time,
+                        reminder.timezone,
+                        next_run_at,
+                        int(reminder.enabled),
+                        reminder.priority,
+                        json.dumps(reminder.tags, ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
+                action = "create"
+            self._record_reminder_audit(
+                reminder.id,
+                action,
+                actor,
+                now,
+                {"cancelled_pending": int(cancelled)},
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        result = self.get_reminder(reminder.id)
+        assert result is not None
+        return result
+
+    def set_reminder_enabled(
+        self,
+        reminder_id: str,
+        enabled: bool,
+        actor: str,
+        now: int,
+    ) -> dict[str, Any]:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT * FROM reminders WHERE id = ?", (reminder_id,)
+            ).fetchone()
+            if row is None:
+                raise ReminderError("reminder not found")
+            next_run_at: int | None = None
+            if enabled:
+                if row["schedule_kind"] == "once":
+                    if int(row["run_at"]) <= now:
+                        raise ReminderError("one-time reminder time has passed; edit it before enabling")
+                    next_run_at = int(row["run_at"])
+                else:
+                    next_run_at = next_daily_occurrence(
+                        str(row["daily_time"]), str(row["timezone"]), now
+                    )
+            cancelled = 0
+            if not enabled:
+                cancelled = self.connection.execute(
+                    "DELETE FROM alerts WHERE reminder_id = ? AND status = 'pending'",
+                    (reminder_id,),
+                ).rowcount
+            self.connection.execute(
+                """
+                UPDATE reminders SET enabled = ?, next_run_at = ?, updated_at = ?,
+                    completed_at = CASE WHEN ? THEN NULL ELSE completed_at END
+                WHERE id = ?
+                """,
+                (int(enabled), next_run_at, now, int(enabled), reminder_id),
+            )
+            self._record_reminder_audit(
+                reminder_id,
+                "enable" if enabled else "disable",
+                actor,
+                now,
+                {"cancelled_pending": int(cancelled)},
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        result = self.get_reminder(reminder_id)
+        assert result is not None
+        return result
+
+    def delete_reminder(self, reminder_id: str, actor: str, now: int) -> bool:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            exists = self.connection.execute(
+                "SELECT 1 FROM reminders WHERE id = ?", (reminder_id,)
+            ).fetchone()
+            if exists is None:
+                self.connection.commit()
+                return False
+            cancelled = self.connection.execute(
+                "DELETE FROM alerts WHERE reminder_id = ? AND status = 'pending'",
+                (reminder_id,),
+            ).rowcount
+            self._record_reminder_audit(
+                reminder_id,
+                "delete",
+                actor,
+                now,
+                {"cancelled_pending": int(cancelled)},
+            )
+            self.connection.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
+            self.connection.commit()
+            return True
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def enqueue_due_reminders(self, now: int, topic: str, limit: int = 100) -> int:
+        limit = max(1, min(int(limit), 1000))
+        queued = 0
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = list(self.connection.execute(
+                """
+                SELECT * FROM reminders
+                WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+                ORDER BY next_run_at, id
+                LIMIT ?
+                """,
+                (now, limit),
+            ))
+            for row in rows:
+                scheduled_for = int(row["next_run_at"])
+                candidate = AlertCandidate(
+                    rule_id="reminder.manual",
+                    dedupe_key=f"reminder:{row['id']}:{scheduled_for}",
+                    title=str(row["title"]),
+                    message=str(row["message"]),
+                    priority=int(row["priority"]),
+                    tags=tuple(json.loads(row["tags_json"])),
+                    click_url="",
+                    topic=topic,
+                    confidence=1.0,
+                    evidence=(f"scheduled_for:{scheduled_for}",),
+                )
+                queued += int(self._insert_alert(candidate, None, now, reminder_id=str(row["id"])))
+                if row["schedule_kind"] == "once":
+                    self.connection.execute(
+                        """
+                        UPDATE reminders SET enabled = 0, next_run_at = NULL,
+                            last_enqueued_at = ?, completed_at = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now, now, now, row["id"]),
+                    )
+                else:
+                    next_run_at = next_daily_occurrence(
+                        str(row["daily_time"]), str(row["timezone"]), now
+                    )
+                    self.connection.execute(
+                        """
+                        UPDATE reminders SET next_run_at = ?, last_enqueued_at = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (next_run_at, now, now, row["id"]),
+                    )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return queued
 
     def claim_due_alert(self, now: int, lease_seconds: int) -> OutboxMessage | None:
         self.connection.execute("BEGIN IMMEDIATE")
@@ -596,7 +1090,11 @@ class Database:
 
     def mark_delivered(self, alert_id: int, now: int) -> None:
         with self.connection:
-            self.connection.execute(
+            row = self.connection.execute(
+                "SELECT reminder_id FROM alerts WHERE id = ? AND status = 'sending'",
+                (alert_id,),
+            ).fetchone()
+            updated = self.connection.execute(
                 """
                 UPDATE alerts
                 SET status = 'delivered', delivered_at = ?, lease_until = NULL, last_error = NULL
@@ -604,6 +1102,11 @@ class Database:
                 """,
                 (now, alert_id),
             )
+            if updated.rowcount == 1 and row is not None and row["reminder_id"]:
+                self.connection.execute(
+                    "UPDATE reminders SET last_delivered_at = ? WHERE id = ?",
+                    (now, row["reminder_id"]),
+                )
 
     def mark_retry(self, alert_id: int, next_attempt_at: int, error: BaseException | str) -> None:
         with self.connection:
@@ -618,12 +1121,21 @@ class Database:
 
     def list_incidents(self, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
-        query = "SELECT * FROM incidents"
+        query = """
+            SELECT i.*,
+                (SELECT a.title FROM alerts AS a WHERE a.incident_id = i.id
+                 ORDER BY a.created_at DESC, a.id DESC LIMIT 1) AS latest_title,
+                (SELECT a.message FROM alerts AS a WHERE a.incident_id = i.id
+                 ORDER BY a.created_at DESC, a.id DESC LIMIT 1) AS latest_message,
+                (SELECT a.click_url FROM alerts AS a WHERE a.incident_id = i.id
+                 ORDER BY a.created_at DESC, a.id DESC LIMIT 1) AS latest_click_url
+            FROM incidents AS i
+        """
         params: list[Any] = []
         if status:
-            query += " WHERE status = ?"
+            query += " WHERE i.status = ?"
             params.append(status)
-        query += " ORDER BY last_seen_at DESC, id DESC LIMIT ?"
+        query += " ORDER BY i.last_seen_at DESC, i.id DESC LIMIT ?"
         params.append(limit)
         rows = []
         for row in self.connection.execute(query, params):
@@ -710,23 +1222,27 @@ class Database:
     def metrics_prometheus(self) -> str:
         status = self.status()
         lines = [
-            "# HELP signalwatch_observations_total Stored normalized observations.",
-            "# TYPE signalwatch_observations_total gauge",
-            f"signalwatch_observations_total {status['observations']}",
+            "# HELP argus_observations_total Stored normalized observations.",
+            "# TYPE argus_observations_total gauge",
+            f"argus_observations_total {status['observations']}",
         ]
         for state, count in status["outbox"].items():
-            lines.append(f'signalwatch_outbox{{status="{state}"}} {count}')
+            lines.append(f'argus_outbox{{status="{state}"}} {count}')
         lines.extend([
-            "# TYPE signalwatch_incidents gauge",
-            f"signalwatch_incidents{{status=\"open\"}} {status['incidents'].get('open', 0)}",
-            f"signalwatch_incidents{{status=\"recovered\"}} {status['incidents'].get('recovered', 0)}",
+            "# TYPE argus_incidents gauge",
+            f"argus_incidents{{status=\"open\"}} {status['incidents'].get('open', 0)}",
+            f"argus_incidents{{status=\"recovered\"}} {status['incidents'].get('recovered', 0)}",
+            f"argus_incidents{{status=\"recorded\"}} {status['incidents'].get('recorded', 0)}",
+            "# TYPE argus_reminders gauge",
+            f"argus_reminders{{status=\"enabled\"}} {status['reminders'].get('enabled', 0)}",
+            f"argus_reminders{{status=\"disabled\"}} {status['reminders'].get('disabled', 0)}",
         ])
         for source in status["sources"]:
             source_id = str(source["source_id"]).replace('"', '')
             success = source.get("last_success_at") or 0
             age = max(0, int(time.time()) - int(success)) if success else -1
-            lines.append(f'signalwatch_source_last_success_age_seconds{{source="{source_id}"}} {age}')
-            lines.append(f'signalwatch_source_consecutive_failures{{source="{source_id}"}} {source["consecutive_failures"]}')
+            lines.append(f'argus_source_last_success_age_seconds{{source="{source_id}"}} {age}')
+            lines.append(f'argus_source_consecutive_failures{{source="{source_id}"}} {source["consecutive_failures"]}')
         return "\n".join(lines) + "\n"
 
     def cleanup(self, cutoff: int) -> tuple[int, int]:
@@ -766,6 +1282,14 @@ class Database:
             str(row["status"]): int(row["count"])
             for row in self.connection.execute("SELECT status, COUNT(*) AS count FROM incidents GROUP BY status")
         }
+        reminders = {
+            "enabled": int(self.connection.execute(
+                "SELECT COUNT(*) FROM reminders WHERE enabled = 1"
+            ).fetchone()[0]),
+            "disabled": int(self.connection.execute(
+                "SELECT COUNT(*) FROM reminders WHERE enabled = 0"
+            ).fetchone()[0]),
+        }
         revisions = [dict(row) for row in self.connection.execute(
             "SELECT revision, created_at, active FROM config_revisions WHERE active = 1 ORDER BY revision DESC LIMIT 1"
         )]
@@ -774,6 +1298,7 @@ class Database:
             "observations": observations,
             "outbox": outbox,
             "incidents": incidents,
+            "reminders": reminders,
             "config_revision": revisions[0] if revisions else None,
             "sources": sources,
         }

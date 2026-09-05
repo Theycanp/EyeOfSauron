@@ -76,7 +76,7 @@ class NtfyNotifier:
             headers={
                 "Authorization": f"Bearer {self.token}",
                 "Content-Type": "application/json; charset=utf-8",
-                "User-Agent": "SignalWatch/0.1",
+                "User-Agent": "Argus/0.6",
             },
             method="POST",
         )

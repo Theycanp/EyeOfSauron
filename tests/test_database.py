@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from signalwatch.database import Database
-from signalwatch.models import FeedFetchResult
-from signalwatch.rules import RuleSet
+from argus.database import Database
+from argus.models import AlertCandidate, FeedFetchResult
+from argus.rules import RuleSet
 
 from helpers import observation, production_config
 
@@ -59,8 +59,10 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(1, self.database.status()["outbox"]["pending"])
         incidents = self.database.list_incidents()
         self.assertEqual(1, len(incidents))
-        self.assertEqual("open", incidents[0]["status"])
+        self.assertEqual("event", incidents[0]["kind"])
+        self.assertEqual("recorded", incidents[0]["status"])
         self.assertEqual(["bloomberg_markets"], incidents[0]["source_ids"])
+        self.assertEqual(0, self.database.status()["incidents"].get("open", 0))
 
     def test_guid_is_deduplicated_across_sections(self) -> None:
         self._success("bloomberg_markets")
@@ -82,7 +84,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(1, self.database.status()["outbox"]["pending"])
 
     def test_outbox_lease_retry_and_delivery(self) -> None:
-        self.assertTrue(self.database.enqueue_test_alert("signalwatch", NOW))
+        self.assertTrue(self.database.enqueue_test_alert("eos", NOW))
         claimed = self.database.claim_due_alert(NOW, lease_seconds=60)
         self.assertIsNotNone(claimed)
         assert claimed is not None
@@ -97,7 +99,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(1, self.database.status()["outbox"]["delivered"])
 
     def test_expired_sending_lease_is_reclaimed(self) -> None:
-        self.database.enqueue_test_alert("signalwatch", NOW)
+        self.database.enqueue_test_alert("eos", NOW)
         first = self.database.claim_due_alert(NOW, lease_seconds=20)
         self.assertIsNotNone(first)
         self.assertIsNone(self.database.claim_due_alert(NOW + 19, lease_seconds=20))
@@ -112,19 +114,55 @@ class DatabaseTests(unittest.TestCase):
                 "bloomberg_markets",
                 "network unavailable",
                 threshold=3,
-                default_topic="signalwatch",
+                default_topic="eos",
                 now=NOW + attempt,
             )
             self.assertEqual(attempt == 3, queued)
+        incident = self.database.list_incidents()[0]
+        self.assertEqual("stateful", incident["kind"])
+        self.assertEqual("open", incident["status"])
+        self.assertEqual("Argus 数据源异常", incident["latest_title"])
         report = self.database.record_source_success(
             "bloomberg_markets",
             FeedFetchResult((), None, None, not_modified=True),
             self.rules,
             NOW + 10,
-            "signalwatch",
+            "eos",
         )
         self.assertTrue(report.recovery_queued)
         self.assertEqual(2, self.database.status()["outbox"]["pending"])
+        incident = self.database.list_incidents()[0]
+        self.assertEqual("recovered", incident["status"])
+        self.assertEqual(NOW + 10, incident["recovered_at"])
+        self.assertEqual("Argus 数据源已恢复", incident["latest_title"])
+
+    def test_stateful_incident_can_reopen_after_recovery(self) -> None:
+        def candidate(dedupe_key: str, recovery: bool = False) -> AlertCandidate:
+            return AlertCandidate(
+                rule_id="host.health",
+                dedupe_key=dedupe_key,
+                title="Host recovered" if recovery else "Host unhealthy",
+                message="state transition",
+                priority=4,
+                tags=("warning",),
+                click_url="",
+                topic="eos",
+                incident_key="host:disk:/",
+                incident_kind="stateful",
+                recovery=recovery,
+            )
+
+        with self.database.connection:
+            self.assertTrue(self.database._insert_alert(candidate("host-open-1"), None, NOW))
+        self.assertEqual("open", self.database.list_incidents()[0]["status"])
+        with self.database.connection:
+            self.assertTrue(self.database._insert_alert(candidate("host-recovered", True), None, NOW + 1))
+        self.assertEqual("recovered", self.database.list_incidents()[0]["status"])
+        with self.database.connection:
+            self.assertTrue(self.database._insert_alert(candidate("host-open-2"), None, NOW + 1900))
+        incident = self.database.list_incidents()[0]
+        self.assertEqual("open", incident["status"])
+        self.assertIsNone(incident["recovered_at"])
 
     def test_config_revision_history_and_activation(self) -> None:
         payload = {"sources": [], "rules": []}
@@ -139,8 +177,8 @@ class DatabaseTests(unittest.TestCase):
     def test_prometheus_metrics_include_source_and_incident_counts(self) -> None:
         self._success("bloomberg_markets", observation("baseline", "Ordinary market article"))
         metrics = self.database.metrics_prometheus()
-        self.assertIn("signalwatch_observations_total 1", metrics)
-        self.assertIn('signalwatch_source_consecutive_failures{source="bloomberg_markets"} 0', metrics)
+        self.assertIn("argus_observations_total 1", metrics)
+        self.assertIn('argus_source_consecutive_failures{source="bloomberg_markets"} 0', metrics)
 
 
 if __name__ == "__main__":

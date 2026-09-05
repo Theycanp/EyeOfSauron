@@ -1,26 +1,26 @@
 schema_version = 2
 
 [service]
-database_path = "/tmp/signalwatch-development.db"
-lock_path = "/tmp/signalwatch-development.lock"
+database_path = "/tmp/argus-development.db"
+lock_path = "/tmp/argus-development.lock"
 log_level = "INFO"
 source_failure_alert_after = 3
 retention_days = 90
 delivery_lease_seconds = 60
 max_delivery_retry_seconds = 3600
-managed_sources_path = "/tmp/signalwatch-managed-sources.json"
+managed_sources_path = "/tmp/argus-managed-sources.json"
 
 [admin]
 enabled = true
 bind = "127.0.0.1"
 port = 18080
-auth_token_env = "SIGNALWATCH_ADMIN_TOKEN"
+auth_token_env = "ARGUS_ADMIN_TOKEN"
 
 [ntfy]
 enabled = false
 base_url_env = "NTFY_BASE_URL"
 token_env = "NTFY_TOKEN"
-default_topic = "signalwatch"
+default_topic = "eos"
 timeout_seconds = 15
 
 [[sources]]
@@ -83,7 +83,7 @@ max_response_bytes = 2097152
 # environment variables. Store only *_env names here, never credentials.
 
 # Host checks are opt-in. For continuous CPU/temperature/network telemetry use
-# Prometheus exporters and forward only evaluated incidents to SignalWatch.
+# Prometheus exporters and forward only evaluated incidents to EyeOfSauron.
 # [[sources]]
 # id = "host_health"
 # kind = "host"
@@ -97,8 +97,8 @@ max_response_bytes = 2097152
 # retry_base_seconds = 1
 # max_response_bytes = 65536
 # [sources.settings]
-# paths = ["/", "/var/lib/signalwatch"]
-# units = ["signalwatch.service", "ntfy.service", "nginx.service"]
+# paths = ["/", "/var/lib/argus"]
+# units = ["argus.service", "ntfy.service", "nginx.service"]
 # disk_used_percent = 90
 # inode_used_percent = 90
 # memory_used_percent = 90

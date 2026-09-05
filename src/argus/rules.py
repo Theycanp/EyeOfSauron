@@ -61,6 +61,7 @@ class WeightedTextRule:
         incident_key = hashlib.sha256(
             f"{self.config.id}\x1f{normalized}".encode("utf-8")
         ).hexdigest()
+        stateful = bool(attributes.get("stateful") or attributes.get("recovery"))
         section = str(observation.attributes.get("section", "")).strip()
         source_label = observation.publisher if not section else f"{observation.publisher} · {section}"
         summary = truncate(observation.summary, 700)
@@ -78,7 +79,8 @@ class WeightedTextRule:
             confidence=max(0.0, min(1.0, score / max(self.config.threshold * 2, 1.0))),
             evidence=tuple(dict.fromkeys(reasons)),
             incident_key=incident_key,
-            recovery=bool(attributes.get("recovery")),
+            incident_kind="stateful" if stateful else "event",
+            recovery=stateful and bool(attributes.get("recovery")),
         )
 
 

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from signalwatch.config import load_config
-from signalwatch.rules import RuleSet
+from argus.config import load_config
+from argus.rules import RuleSet
 
 from helpers import PROJECT_ROOT, observation
 
@@ -13,7 +13,7 @@ NOW = 1788363000
 
 class RuleTests(unittest.TestCase):
     def setUp(self) -> None:
-        config = load_config(PROJECT_ROOT / "config" / "signalwatch.production.toml")
+        config = load_config(PROJECT_ROOT / "config" / "argus.production.toml")
         self.rules = RuleSet.from_config(config.rules, config.ntfy.default_topic)
 
     def test_major_central_bank_action_matches(self) -> None:
@@ -25,7 +25,7 @@ class RuleTests(unittest.TestCase):
         alerts = self.rules.evaluate(item, NOW)
         self.assertEqual(1, len(alerts))
         self.assertEqual(5, alerts[0].priority)
-        self.assertEqual("signalwatch", alerts[0].topic)
+        self.assertEqual("eos", alerts[0].topic)
 
     def test_routine_market_wrap_does_not_match(self) -> None:
         item = observation("wrap", "Stocks Rise as Buyers Return: Markets Wrap")

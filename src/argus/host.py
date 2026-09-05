@@ -147,14 +147,14 @@ class HostHealthCollector:
                 source_id=self.config.id, publisher=self.config.publisher,
                 dedupe_scope=self.config.dedupe_scope, external_id=f"{identity}:{int(now.timestamp())}",
                 published_at=now, title=f"主机异常：{identity}", summary=message, url="",
-                attributes={"section": self.config.section, "check": identity},
+                attributes={"section": self.config.section, "check": identity, "stateful": True},
             ))
         for identity in sorted(previous_active - set(active)):
             observations.append(Observation(
                 source_id=self.config.id, publisher=self.config.publisher,
                 dedupe_scope=self.config.dedupe_scope, external_id=f"{identity}:recovery:{int(now.timestamp())}",
                 published_at=now, title=f"主机异常已恢复：{identity}", summary="检查项已回到阈值以内。", url="",
-                attributes={"section": self.config.section, "check": identity, "recovery": True},
+                attributes={"section": self.config.section, "check": identity, "stateful": True, "recovery": True},
             ))
         cursor = json.dumps({"active": sorted(active), "updated_at": int(now.timestamp())}, sort_keys=True)
         return FeedFetchResult(tuple(observations), None, None, not observations, cursor=cursor)

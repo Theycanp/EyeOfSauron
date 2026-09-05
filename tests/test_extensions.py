@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import sqlite3
 import tempfile
 import unittest
@@ -9,17 +10,17 @@ import threading
 from http.server import HTTPServer
 from pathlib import Path
 
-from signalwatch.adapters import build_collector
-from signalwatch.admin import AdminError, ManagedConfigStore, make_handler
-from signalwatch.database import Database
-from signalwatch.market import MarketCollector
-from signalwatch.host import HostHealthCollector
+from argus.adapters import build_collector
+from argus.admin import AdminError, ManagedConfigStore, make_handler
+from argus.database import Database
+from argus.market import MarketCollector
+from argus.host import HostHealthCollector
 from unittest.mock import patch
-from signalwatch.models import SourceState
-from signalwatch.mqtt import CommandPolicy, CommandRequest, MqttError, SensorNormalizer
+from argus.models import SourceState
+from argus.mqtt import CommandPolicy, CommandRequest, MqttError, SensorNormalizer
 
 from helpers import PROJECT_ROOT
-from signalwatch.config import load_config
+from argus.config import load_config
 
 
 class _Provider:
@@ -32,7 +33,7 @@ class _Provider:
 
 class ExtensionTests(unittest.TestCase):
     def test_market_collector_baselines_then_reports_move(self) -> None:
-        config = load_config(PROJECT_ROOT / "config" / "signalwatch.example.toml")
+        config = load_config(PROJECT_ROOT / "config" / "argus.example.toml")
         source = config.sources[0]
         source = source.__class__(
             id="stocks", kind="market", publisher="Test", section="Watchlist", dedupe_scope="market",
@@ -76,29 +77,141 @@ class ExtensionTests(unittest.TestCase):
     def test_admin_revision_and_metrics_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            config = load_config(PROJECT_ROOT / "config" / "signalwatch.example.toml")
-            database = Database(root / "state.db")
+            config = load_config(PROJECT_ROOT / "config" / "argus.example.toml")
             store = ManagedConfigStore(root / "managed.json", {source.id for source in config.sources}, {rule.id for rule in config.rules})
-            server = HTTPServer(("127.0.0.1", 0), make_handler(store, database, "token"))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            ready: queue.Queue[tuple[HTTPServer, int]] = queue.Queue()
+
+            def run_server() -> None:
+                database = Database(root / "state.db")
+                server = HTTPServer(("127.0.0.1", 0), make_handler(store, database, "token"))
+                ready.put((server, server.server_port))
+                try:
+                    server.serve_forever()
+                finally:
+                    server.server_close()
+                    database.close()
+
+            thread = threading.Thread(target=run_server, daemon=True)
             thread.start()
+            server, server_port = ready.get(timeout=5)
             try:
-                url = f"http://127.0.0.1:{server.server_port}/api/health"
+                url = f"http://127.0.0.1:{server_port}/api/health"
                 request = urllib.request.Request(url, headers={"Authorization": "Bearer token"})
                 with urllib.request.urlopen(request) as response:
                     self.assertEqual(200, response.status)
                 request = urllib.request.Request(
-                    f"http://127.0.0.1:{server.server_port}/api/validate",
+                    f"http://127.0.0.1:{server_port}/api/validate",
                     data=json.dumps({"sources": [], "rules": []}).encode(),
                     headers={"Authorization": "Bearer token", "Content-Type": "application/json"},
                     method="POST",
                 )
                 with urllib.request.urlopen(request) as response:
                     self.assertTrue(json.loads(response.read())["valid"])
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server_port}/api/reminders",
+                    data=json.dumps({
+                        "title": "后台 API 测试",
+                        "message": "提醒接口可用。",
+                        "schedule_kind": "after",
+                        "delay_seconds": 600,
+                        "timezone": "Asia/Shanghai",
+                        "enabled": True,
+                        "priority": 3,
+                        "tags": ["alarm_clock"],
+                    }).encode(),
+                    headers={"Authorization": "Bearer token", "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request) as response:
+                    saved = json.loads(response.read())["saved"]
+                    self.assertTrue(saved["enabled"])
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server_port}/api/reminders",
+                    headers={"Authorization": "Bearer token"},
+                )
+                with urllib.request.urlopen(request) as response:
+                    reminders = json.loads(response.read())["reminders"]
+                    self.assertEqual("后台 API 测试", reminders[0]["title"])
             finally:
                 server.shutdown()
-                server.server_close()
-                database.close()
+                thread.join(timeout=5)
+
+    def test_admin_source_bundle_and_static_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = load_config(PROJECT_ROOT / "config" / "argus.example.toml")
+            store = ManagedConfigStore(
+                root / "managed.json",
+                {source.id for source in config.sources},
+                {rule.id for rule in config.rules},
+            )
+            ready: queue.Queue[tuple[HTTPServer, int]] = queue.Queue()
+
+            def run_server() -> None:
+                database = Database(root / "state.db")
+                server = HTTPServer(("127.0.0.1", 0), make_handler(store, database, "token"))
+                ready.put((server, server.server_port))
+                try:
+                    server.serve_forever()
+                finally:
+                    server.server_close()
+                    database.close()
+
+            thread = threading.Thread(target=run_server, daemon=True)
+            thread.start()
+            server, server_port = ready.get(timeout=5)
+            headers = {"Authorization": "Bearer token", "Content-Type": "application/json"}
+            source = {
+                "id": "bundle_feed",
+                "kind": "rss",
+                "publisher": "Bundle Feed",
+                "section": "News",
+                "dedupe_scope": "bundle_feed",
+                "url": "https://example.com/feed.xml",
+                "allowed_hosts": ["example.com"],
+                "enabled": False,
+                "poll_interval_seconds": 300,
+                "request_timeout_seconds": 20,
+                "request_attempts": 3,
+                "retry_base_seconds": 2,
+                "max_response_bytes": 2097152,
+                "settings": {},
+            }
+            rule = {
+                "id": "bundle_feed_notify",
+                "kind": "weighted_text",
+                "source_ids": ["bundle_feed"],
+                "threshold": 1,
+                "max_item_age_seconds": 86400,
+                "notification_title": "Bundle Feed 更新",
+                "priority": 3,
+                "tags": ["bell"],
+                "patterns": [{"label": "全部更新", "regex": ".", "title_weight": 2, "summary_weight": 1}],
+            }
+            try:
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server_port}/api/source-bundles",
+                    data=json.dumps({"source": source, "rule": rule}).encode(),
+                    headers=headers,
+                    method="POST",
+                )
+                with urllib.request.urlopen(request) as response:
+                    payload = json.loads(response.read())
+                    self.assertEqual("bundle_feed", payload["saved"]["source"]["id"])
+                    self.assertEqual("bundle_feed_notify", payload["saved"]["rule"]["id"])
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server_port}/api/source-bundles/bundle_feed",
+                    headers={"Authorization": "Bearer token"},
+                    method="DELETE",
+                )
+                with urllib.request.urlopen(request) as response:
+                    self.assertTrue(json.loads(response.read())["removed"])
+                with urllib.request.urlopen(f"http://127.0.0.1:{server_port}/") as response:
+                    self.assertIn("text/html", response.headers["Content-Type"])
+                    self.assertIn("EyeOfSauron", response.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
 
     def test_sensor_normalizer_and_command_policy(self) -> None:
         event = SensorNormalizer().parse("home/cat_feeder/state", b'{"value":"ok","unit":"state"}', observed_at=10)
@@ -110,7 +223,7 @@ class ExtensionTests(unittest.TestCase):
             policy.validate(CommandRequest("cat_feeder", "power", {}, "bad", 100), now=10)
 
     def test_host_collector_has_cursor_and_recovery_contract(self) -> None:
-        source = load_config(PROJECT_ROOT / "config" / "signalwatch.example.toml").sources[0]
+        source = load_config(PROJECT_ROOT / "config" / "argus.example.toml").sources[0]
         source = source.__class__(
             id="host_health", kind="host", publisher="bk", section="Host", dedupe_scope="host",
             poll_interval_seconds=300, request_timeout_seconds=5, request_attempts=1,
@@ -122,21 +235,21 @@ class ExtensionTests(unittest.TestCase):
         self.assertTrue(result.observations)
 
     def test_host_collector_detects_unexpected_and_missing_listen_ports(self) -> None:
-        source = load_config(PROJECT_ROOT / "config" / "signalwatch.example.toml").sources[0]
+        source = load_config(PROJECT_ROOT / "config" / "argus.example.toml").sources[0]
         source = source.__class__(
             id="host_ports", kind="host", publisher="bk", section="Host", dedupe_scope="host",
             poll_interval_seconds=300, request_timeout_seconds=5, request_attempts=1,
             retry_base_seconds=1, max_response_bytes=1024, enabled=True,
             settings={"paths": ["/tmp"], "units": [], "allowed_listen_ports": [22], "required_listen_ports": [22, 443]},
         )
-        with patch("signalwatch.host._listen_ports", return_value={("tcp", 22), ("tcp", 8080)}):
+        with patch("argus.host._listen_ports", return_value={("tcp", 22), ("tcp", 8080)}):
             result = HostHealthCollector(source).fetch(SourceState("host_ports", True, None, None, None, None, 0, False, None))
         titles = {item.title for item in result.observations}
         self.assertTrue(any("8080" in title for title in titles))
         self.assertTrue(any("443" in title for title in titles))
 
     def test_disabled_source_factory_returns_none(self) -> None:
-        config = load_config(PROJECT_ROOT / "config" / "signalwatch.example.toml")
+        config = load_config(PROJECT_ROOT / "config" / "argus.example.toml")
         source = config.sources[0]
         source = source.__class__(
             id=source.id, kind=source.kind, publisher=source.publisher, section=source.section,
@@ -152,7 +265,20 @@ class ExtensionTests(unittest.TestCase):
             path = Path(directory) / "legacy.db"
             connection = sqlite3.connect(path)
             connection.executescript("""
-                CREATE TABLE observations (id INTEGER PRIMARY KEY);
+                CREATE TABLE observations (
+                    id INTEGER PRIMARY KEY,
+                    source_id TEXT NOT NULL,
+                    publisher TEXT NOT NULL,
+                    dedupe_scope TEXT NOT NULL,
+                    external_id TEXT NOT NULL,
+                    published_at INTEGER NOT NULL,
+                    fetched_at INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    attributes_json TEXT NOT NULL,
+                    UNIQUE (dedupe_scope, external_id)
+                );
                 CREATE TABLE alerts (
                     id INTEGER PRIMARY KEY, observation_id INTEGER, rule_id TEXT, dedupe_key TEXT,
                     topic TEXT, title TEXT, message TEXT, priority INTEGER, tags_json TEXT,
@@ -166,14 +292,28 @@ class ExtensionTests(unittest.TestCase):
                     outage_started_at INTEGER, last_error TEXT
                 );
                 INSERT INTO collector_state(source_id, initialized) VALUES ('legacy', 1);
+                INSERT INTO alerts(
+                    observation_id, rule_id, dedupe_key, topic, title, message, priority,
+                    tags_json, click_url, status, attempts, next_attempt_at, lease_until,
+                    last_error, created_at, delivered_at
+                ) VALUES (
+                    NULL, 'legacy.rule', 'legacy-alert', 'argus', 'Legacy alert',
+                    'Created before confidence existed', 3, '[]', '', 'delivered', 1,
+                    1, NULL, NULL, 1, 1
+                );
                 PRAGMA user_version=1;
             """)
             connection.close()
             database = Database(path)
-            self.assertEqual(3, database.status()["database_schema"])
+            self.assertEqual(6, database.status()["database_schema"])
             self.assertTrue(database.get_source_state("legacy").initialized)
             columns = {row[1] for row in database.connection.execute("PRAGMA table_info(alerts)")}
             self.assertIn("confidence", columns)
+            self.assertIn("reminder_id", columns)
+            self.assertEqual(0.5, database.connection.execute(
+                "SELECT confidence FROM alerts WHERE dedupe_key = 'legacy-alert'"
+            ).fetchone()[0])
+            self.assertEqual("ok", database.connection.execute("PRAGMA integrity_check").fetchone()[0])
             database.close()
 
 

@@ -1,27 +1,27 @@
 schema_version = 2
 
 [service]
-database_path = "/var/lib/signalwatch/state.db"
-lock_path = "/var/lib/signalwatch/service.lock"
+database_path = "/var/lib/argus/state.db"
+lock_path = "/var/lib/argus/service.lock"
 log_level = "INFO"
 source_failure_alert_after = 3
 retention_days = 90
 delivery_lease_seconds = 60
 max_delivery_retry_seconds = 3600
-managed_sources_path = "/var/lib/signalwatch/managed-sources.json"
+managed_sources_path = "/var/lib/argus/managed-sources.json"
 
 [ntfy]
 enabled = true
 base_url_env = "NTFY_BASE_URL"
 token_env = "NTFY_TOKEN"
-default_topic = "signalwatch"
+default_topic = "eos"
 timeout_seconds = 15
 
 [admin]
 enabled = true
 bind = "127.0.0.1"
 port = 18080
-auth_token_env = "SIGNALWATCH_ADMIN_TOKEN"
+auth_token_env = "ARGUS_ADMIN_TOKEN"
 
 [[sources]]
 id = "bloomberg_markets"

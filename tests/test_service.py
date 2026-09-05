@@ -6,10 +6,12 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from signalwatch.database import Database
-from signalwatch.models import FeedFetchResult
-from signalwatch.rules import RuleSet
-from signalwatch.service import SignalWatchService, retry_delay
+from argus.database import Database
+from argus.models import FeedFetchResult
+from argus.rules import RuleSet
+from argus.reminders import parse_reminder
+from argus.service import ArgusService, retry_delay
+from unittest.mock import patch
 
 from helpers import observation, production_config
 
@@ -67,7 +69,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     def _service(self, collector, notifier):  # type: ignore[no-untyped-def]
-        return SignalWatchService(
+        return ArgusService(
             self.config,
             self.database,
             {self.source.id: collector},
@@ -87,10 +89,10 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await service.poll_source_once(self.source.id))
         self.assertTrue(await service.deliver_one())
         self.assertEqual(1, len(notifier.sent))
-        self.assertEqual("signalwatch", notifier.sent[0].topic)
+        self.assertEqual("eos", notifier.sent[0].topic)
 
     async def test_notification_failure_returns_alert_to_pending(self) -> None:
-        self.database.enqueue_test_alert("signalwatch", 1)
+        self.database.enqueue_test_alert("eos", 1)
         service = self._service(_Collector(FeedFetchResult((), None, None)), _Notifier(fail=True))
         self.assertFalse(await service.deliver_one())
         self.assertEqual(1, self.database.status()["outbox"]["pending"])
@@ -107,6 +109,29 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(3, collector.calls)
         state = self.database.get_source_state(self.source.id)
         self.assertEqual(0, state.consecutive_failures)
+
+    async def test_due_reminder_uses_existing_delivery_worker(self) -> None:
+        due = int(time.time()) + 60
+        reminder = parse_reminder(
+            {
+                "title": "测试提醒",
+                "message": "这是调度器生成的消息。",
+                "schedule_kind": "once",
+                "run_at": due,
+                "timezone": "UTC",
+                "enabled": True,
+                "priority": 3,
+                "tags": ["alarm_clock"],
+            },
+            due - 60,
+        )
+        self.database.upsert_reminder(reminder, "tester", due - 60)
+        notifier = _Notifier()
+        service = self._service(_Collector(FeedFetchResult((), None, None)), notifier)
+        with patch("argus.service.now_epoch", return_value=due):
+            self.assertEqual(1, service.process_reminders_once())
+            self.assertTrue(await service.deliver_one())
+        self.assertEqual("测试提醒", notifier.sent[0].title)
 
     def test_retry_delay_is_bounded(self) -> None:
         self.assertEqual(5, retry_delay(1, 3600))

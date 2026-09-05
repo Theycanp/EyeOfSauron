@@ -1,12 +1,22 @@
 [project]
-name = "signalwatch"
-version = "0.3.0"
-description = "Reliable, extensible event monitoring and ntfy delivery service"
+name = "eyeofsauron"
+version = "0.6.0"
+description = "EyeOfSauron personal intelligence monitoring, powered by the Argus watcher engine"
 requires-python = ">=3.12"
 dependencies = []
 
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+argus = ["admin_web/**/*"]
+
 [project.scripts]
-signalwatch = "signalwatch.cli:main"
+argus = "argus.cli:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -5,9 +5,9 @@
   port; remote access is through an SSH tunnel.
 - The operating-system account is unprivileged and has no interactive shell.
 - The ntfy account is separate from the administrator and has write-only access
-  to the `signalwatch` topic.
+  to the `eos` topic.
 - Tokens are stored only in root-owned environment files under
-  `/etc/signalwatch`, outside the source tree, with group-read permission for
+  `/etc/argus`, outside the source tree, with group-read permission for
   the service account. Managed configuration stores environment variable names,
   never secret values.
 - HTTP credentials are never included in exception strings, application logs,

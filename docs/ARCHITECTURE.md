@@ -1,9 +1,10 @@
-# SignalWatch architecture
+# EyeOfSauron architecture
 
 ## Scope
 
-SignalWatch is an event system, not a scraper dedicated to one website. Inputs
-produce immutable `Observation` records. Rules turn observations into
+EyeOfSauron (EOS) is an event system, not a scraper dedicated to one website.
+Argus is its always-on watcher engine. Inputs produce immutable `Observation`
+records. Rules turn observations into
 `AlertCandidate` records. SQLite stores source cursors, deduplication state,
 rule output, and the notification outbox. Notifiers deliver outbox entries.
 
@@ -27,14 +28,24 @@ collectors -> normalized observations -> rules -> incidents -> SQLite outbox -> 
 These contracts allow future adapters for market APIs, X, host events, webhooks,
 and MQTT without changing delivery reliability.
 
-Incidents are durable records separate from notification attempts. An incident
-collects source IDs, evidence, confidence, timestamps, and recovery state;
-multiple alerts can refer to one incident while the outbox remains at-least-once.
-This prevents notification deduplication from erasing operational history.
+Incidents are durable records separate from notification attempts. An `event`
+is a one-off fact such as a breaking-news match and is immediately `recorded`;
+it never pretends to need recovery. A `stateful` incident represents a condition
+that can clear, such as source, host, or market health, and moves from `open` to
+`recovered` when the same stable incident identity reports recovery. Incidents
+collect source IDs, evidence, confidence, timestamps, and the latest alert
+details; multiple alerts can refer to one incident while the outbox remains
+at-least-once. This prevents notification deduplication from erasing operational
+history or ordinary news from polluting the unresolved-health count.
 
 Configuration changes are revisioned and audited. The management API validates
 the complete managed set before writing an atomic current file, stores a private
 revision snapshot, and rolls back by creating a new revision.
+
+The management surface is split into a Python standard-library HTTP server and
+a static React/Vite client. React is compiled during development and the
+resulting HTML/CSS/JavaScript is served by the same loopback-only process, so
+the production host does not run Node or expose another port.
 
 ## Delivery semantics
 
@@ -47,6 +58,28 @@ over silently losing a critical alert.
 No external message queue is needed at current volume. The database and in-process
 async tasks form the queue boundary. A future transport can implement the same
 contracts with NATS JetStream if workers are ever split across hosts.
+
+## Durable reminders
+
+Manual reminders are first-class SQLite records rather than cron entries or
+browser timers. The management backend accepts a future timestamp, a relative
+delay, or a daily wall-clock time. Relative delays are immediately converted to
+absolute one-time timestamps, so restarting the process never restarts a
+countdown. Daily reminders retain an IANA timezone and calculate each next
+occurrence with the standard timezone database.
+
+When a reminder becomes due, advancing its schedule and inserting its outbox
+entry happen in one transaction. The occurrence identity includes the stored
+scheduled timestamp, making repeated scheduler scans idempotent. A one-time
+reminder missed during downtime is queued when service returns. Multiple missed
+daily occurrences are coalesced into one notification and the next occurrence
+is scheduled after the current time. Ambiguous fall-back times use the first
+occurrence; nonexistent spring-forward times move to the first valid minute.
+
+Editing, disabling, or deleting a reminder cancels pending outbox rows belonging
+to it. A notification already claimed by the delivery worker may have left the
+host and cannot be recalled. Actual delivery remains at-least-once and therefore
+retains the same rare post-publish crash duplicate boundary as other alerts.
 
 ## Bloomberg stage
 
@@ -77,7 +110,7 @@ network rates and certificate age, use Prometheus exporters and forward only
 alert events.
 
 Continuous host metrics should be collected by Prometheus exporters and sent as
-already-evaluated incidents. SignalWatch also includes outbound heartbeat,
+already-evaluated incidents. EyeOfSauron also includes outbound heartbeat,
 MQTT sensor normalization, and an allowlisted command policy for future
 devices; neither opens an inbound public control port nor persists high-rate
 telemetry in SQLite.
