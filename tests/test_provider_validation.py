@@ -108,3 +108,13 @@ class ProviderValidationTests(unittest.TestCase):
                 self.validate(kind, {})
             self.validate(kind, {}, enabled=False)
         self.assertEqual({}, self.validate("market", {}, enabled=False).credential_refs)
+
+    def test_optional_rss_content_age_requires_bounded_integer(self) -> None:
+        options = dict(url="https://example.com/feed", allowed_hosts=("example.com",))
+        self.assertEqual(0, self.validate("rss", {}, **options).settings["max_content_age_seconds"])
+        for value in (0, 86400, 31536000):
+            self.assertEqual(value, self.validate("rss", {"max_content_age_seconds": value}, **options).settings["max_content_age_seconds"])
+        for value in (-1, True, "86400", 31536001):
+            for enabled in (False, True):
+                with self.subTest(value=value, enabled=enabled), self.assertRaises(ProviderConfigError):
+                    self.validate("rss", {"max_content_age_seconds": value}, enabled=enabled, **options)

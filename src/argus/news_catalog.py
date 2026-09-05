@@ -36,6 +36,7 @@ class NewsFeedTemplate:
     section: str
     url: str
     allowed_hosts: tuple[str, ...]
+    max_content_age_seconds: int = 0
 
     def __post_init__(self) -> None:
         if not _CATALOG_ID.fullmatch(self.id):
@@ -49,6 +50,7 @@ class NewsFeedTemplate:
             "section": self.section,
             "url": self.url,
             "allowed_hosts": list(self.allowed_hosts),
+            "max_content_age_seconds": self.max_content_age_seconds,
         }
 
 
@@ -160,6 +162,7 @@ class NewsSourceCatalog:
                 "catalog_entry": entry.id,
                 "catalog_feed": feed.id,
                 "content_policy": entry.content_policy,
+                "max_content_age_seconds": feed.max_content_age_seconds,
             },
         }
 
@@ -233,7 +236,15 @@ def _feed(
     url: str,
     *allowed_hosts: str,
 ) -> NewsFeedTemplate:
-    return NewsFeedTemplate(feed_id, label, section, url, tuple(allowed_hosts))
+    hostname = urlsplit(url).hostname
+    max_age = 0
+    if hostname in {"feeds.bloomberg.com", "www.ft.com"}:
+        max_age = 3 * 86400
+    elif hostname == "feeds.a.dj.com":
+        max_age = 7 * 86400
+    elif hostname == "www.economist.com":
+        max_age = 14 * 86400
+    return NewsFeedTemplate(feed_id, label, section, url, tuple(allowed_hosts), max_age)
 
 
 NEWS_SOURCE_CATALOG = NewsSourceCatalog((
@@ -264,7 +275,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
             _feed("business", "US Business", "Business", "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml", "feeds.a.dj.com", "www.wsj.com"),
         ),
         "https://feeds.a.dj.com/rss/RSSWorldNews.xml",
-        "Official WSJ feed endpoints; Argus stores feed metadata and links, not paywalled article bodies.",
+        "2026-09-05 check: public feeds respond but their newest items are dated 2025-01-27. Not usable for current alerts; keep disabled until a current authorized feed is supplied.",
     ),
     NewsSourceEntry(
         "economist",

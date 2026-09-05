@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { ManagedRule, ManagedSource } from '../../shared/types'
-import { createSourceDraft, editSourceDraft, serializeSimpleRule, serializeSource } from './providers'
+import type { ManagedRule, ManagedSource, NewsCatalogEntry, NewsCatalogFeed } from '../../shared/types'
+import { catalogSourceDraft, createSourceDraft, editSourceDraft, serializeSimpleRule, serializeSource } from './providers'
 
 describe('source provider registry', () => {
   it('opens a typed quick-add draft without another type-selection state', () => {
@@ -53,5 +53,18 @@ describe('source provider registry', () => {
     const draft = editSourceDraft(source, { id: 'shared', kind: 'weighted_text', source_ids: ['news', 'other_news'] })
     draft.notificationMode = 'simple'
     expect(() => serializeSimpleRule(draft, serializeSource(draft))).toThrow('多个来源共享')
+  })
+
+  it('preserves catalog freshness defaults through creation and visual editing', () => {
+    const feed: NewsCatalogFeed = { id: 'markets', label: 'Markets', section: 'News', url: 'https://example.com/feed.xml', allowed_hosts: ['example.com'], max_content_age_seconds: 172800 }
+    const entry = { id: 'news', publisher: 'News', content_policy: 'feed_metadata_and_original_link_only' } as NewsCatalogEntry
+    const source = serializeSource(catalogSourceDraft(entry, feed, []))
+    expect(source.settings?.max_content_age_seconds).toBe(172800)
+    const edited = editSourceDraft(source, null)
+    edited.publisher = 'Renamed'
+    expect(serializeSource(edited).settings?.max_content_age_seconds).toBe(172800)
+    edited.maxContentAgeSeconds = 0
+    expect(serializeSource(edited).settings?.max_content_age_seconds).toBe(0)
+    expect(serializeSource(catalogSourceDraft(entry, { ...feed, max_content_age_seconds: undefined }, [])).settings?.max_content_age_seconds).toBe(0)
   })
 })

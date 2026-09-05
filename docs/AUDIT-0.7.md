@@ -27,6 +27,9 @@ PostgreSQL backend.
   enforces byte limits. Feed hosts and redirects are checked; authenticated
   outbound requests do not forward credentials through redirects. Error
   redaction covers URL userinfo and authorization values.
+- Live verification distinguishes a reachable feed from current content. WSJ
+  public feeds were found frozen in January 2025 and disabled; optional RSS
+  publication-age checks also reject this condition during source tests.
 - Releases are immutable and checksummed. Upgrade failure restores matching
   database state and actual installed units. Daily verified backups retain the
   latest 14 daily bundles without pruning manual or unverifiable backups.

@@ -143,6 +143,8 @@ class NewsCatalogTests(unittest.TestCase):
         parsed = parse_source_config(disabled)
         self.assertFalse(parsed.enabled)
         self.assertEqual("feeds.a.dj.com", parsed.allowed_hosts[0])
+        self.assertEqual(7 * 86400, parsed.settings["max_content_age_seconds"])
+        self.assertIn("2025-01-27", NEWS_SOURCE_CATALOG.require("wall_street_journal").notes)
         with self.assertRaisesRegex(NewsCatalogError, "explicit user confirmation"):
             NEWS_SOURCE_CATALOG.source_template(
                 "wall_street_journal",

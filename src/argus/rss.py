@@ -51,16 +51,16 @@ def _plain_text(value: str | None, limit: int) -> str:
     return truncate(result, limit)
 
 
-def _parse_datetime(value: str | None) -> datetime:
+def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
-        return datetime.now(UTC)
+        return None
     try:
         parsed = parsedate_to_datetime(value)
     except (TypeError, ValueError, OverflowError):
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
-            return datetime.now(UTC)
+            return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
@@ -107,7 +107,8 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
                 continue
             summary = _plain_text(item.findtext("description"), 4000)
             link = _safe_link(item.findtext("link"), source.allowed_hosts)
-            published_at = _parse_datetime(item.findtext("pubDate"))
+            parsed_date = _parse_datetime(item.findtext("pubDate"))
+            published_at = parsed_date or datetime.now(UTC)
             guid = item.findtext("guid") or ""
             creator = item.findtext("{http://purl.org/dc/elements/1.1/}creator") or ""
             observations.append(Observation(
@@ -119,7 +120,8 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
                 title=title,
                 summary=summary,
                 url=link,
-                attributes={"section": source.section, "creator": truncate(creator, 500)},
+                attributes={"section": source.section, "creator": truncate(creator, 500),
+                            "published_at_inferred": parsed_date is None},
             ))
     else:
         namespace = "{http://www.w3.org/2005/Atom}"
@@ -137,9 +139,10 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
                     link_value = link_node.attrib.get("href", "")
                     break
             link = _safe_link(link_value, source.allowed_hosts)
-            published_at = _parse_datetime(
+            parsed_date = _parse_datetime(
                 entry.findtext(f"{namespace}published") or entry.findtext(f"{namespace}updated")
             )
+            published_at = parsed_date or datetime.now(UTC)
             guid = entry.findtext(f"{namespace}id") or ""
             observations.append(Observation(
                 source_id=source.id,
@@ -150,7 +153,7 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
                 title=title,
                 summary=summary,
                 url=link,
-                attributes={"section": source.section},
+                attributes={"section": source.section, "published_at_inferred": parsed_date is None},
             ))
 
     if not observations:
@@ -203,13 +206,14 @@ class RssCollector:
         self._resolver = resolver
 
     def fetch(self, state: SourceState) -> FeedFetchResult:
+        max_content_age = int(self.config.settings.get("max_content_age_seconds", 0))
         headers = {
             "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9",
             "User-Agent": "Argus/0.7 (personal feed monitor)",
         }
-        if state.etag:
+        if state.etag and not max_content_age:
             headers["If-None-Match"] = state.etag
-        if state.last_modified:
+        if state.last_modified and not max_content_age:
             headers["If-Modified-Since"] = state.last_modified
         current_url = str(self.config.url)
         response = None
@@ -223,6 +227,8 @@ class RssCollector:
                 break
             except urllib.error.HTTPError as exc:
                 if exc.code == 304:
+                    if max_content_age:
+                        raise FeedError("feed freshness cannot be verified from HTTP 304") from exc
                     return FeedFetchResult(
                         observations=(),
                         etag=exc.headers.get("ETag") or state.etag,
@@ -257,8 +263,22 @@ class RssCollector:
             payload = response.read(self.config.max_response_bytes + 1)
             if len(payload) > self.config.max_response_bytes:
                 raise FeedError("feed response exceeded configured size limit")
+            observations = parse_feed(payload, self.config)
+            if max_content_age:
+                published_dates = [
+                    item.published_at for item in observations
+                    if not item.attributes.get("published_at_inferred")
+                ]
+                if not published_dates:
+                    raise FeedError("feed freshness cannot be verified without publication timestamps")
+                age = int((datetime.now(UTC) - max(published_dates)).total_seconds())
+                if age > max_content_age:
+                    raise FeedError(
+                        f"feed content is stale: newest entry is {age} seconds old "
+                        f"(limit {max_content_age} seconds)"
+                    )
             return FeedFetchResult(
-                observations=parse_feed(payload, self.config),
+                observations=observations,
                 etag=response.headers.get("ETag"),
                 last_modified=response.headers.get("Last-Modified"),
             )

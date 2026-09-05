@@ -92,6 +92,20 @@ activation, review the catalog evidence URL, confirm the exact feed URL and host
 allowlist, run the provider's connection test, and inspect a sample of normalized
 observations. A failed test must leave the source disabled.
 
+The 2026-09-05 production content check found that the public WSJ feeds return
+HTTP 200 but stop at 2025-01-27. Those endpoints remain documented for diagnosis,
+not endorsed as working real-time news sources. The configured WSJ sources are
+disabled until a current authorized feed is available. Bloomberg, FT and The
+Economist had current entries; sparse official monetary-policy announcements
+must not be judged on a daily-news publication schedule.
+
+RSS `settings.max_content_age_seconds` optionally rejects a feed whose newest
+entry is older than its publishing policy (`0` disables this check). When
+enabled, conditional caching is bypassed so repeated 304 responses cannot hide
+stale content. Catalog news templates carry conservative publisher-specific
+limits; infrequent central-bank and regulator announcements leave it disabled.
+The connection test checks content freshness as well as transport/parsing.
+
 The catalog distinguishes three integration modes:
 
 - `verified_rss`: a reviewed feed template is available.

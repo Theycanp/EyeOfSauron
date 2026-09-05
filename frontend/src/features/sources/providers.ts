@@ -34,6 +34,7 @@ export interface SourceDraft {
   section: string
   enabled: boolean
   target: string
+  maxContentAgeSeconds: number
   keywords: string
   excludes: string
   notificationMode: NotificationMode
@@ -69,6 +70,7 @@ export function createSourceDraft(kind: SourceKind | null, entryMode: SourceEntr
     section: kind ? providerRegistry[kind].defaultSection : '',
     enabled: false,
     target: '',
+    maxContentAgeSeconds: 0,
     keywords: '',
     excludes: '',
     notificationMode: 'simple',
@@ -117,7 +119,10 @@ export function editSourceDraft(source: ManagedSource, rule: ManagedRule | null)
   draft.originalSource = structuredClone(source)
   draft.originalRule = rule ? structuredClone(rule) : null
   draft.notificationMode = 'preserve'
-  if (source.kind === 'rss') draft.target = source.url || ''
+  if (source.kind === 'rss') {
+    draft.target = source.url || ''
+    draft.maxContentAgeSeconds = settingNumber(settings, 'max_content_age_seconds', 0)
+  }
   if (source.kind === 'youtube') draft.target = setting(settings, 'channel_id')
   if (source.kind === 'x') {
     draft.target = setting(settings, 'user_id')
@@ -180,6 +185,7 @@ export function serializeSource(draft: SourceDraft): ManagedSource {
     const reference = draft.originalSource || draft.templateSource
     source.url = target
     source.allowed_hosts = reference?.url === target && reference.allowed_hosts?.length ? [...reference.allowed_hosts] : [url.hostname]
+    settings.max_content_age_seconds = Number(draft.maxContentAgeSeconds)
   } else if (draft.kind === 'youtube') {
     settings.channel_id = target
   } else if (draft.kind === 'x') {
@@ -276,6 +282,7 @@ export function catalogSourceDraft(entry: NewsCatalogEntry, feed: NewsCatalogFee
     settings: {
       catalog_entry: entry.id,
       catalog_feed: feed.id,
+      max_content_age_seconds: feed.max_content_age_seconds ?? 0,
       content_policy: entry.content_policy,
     },
   }
@@ -285,6 +292,7 @@ export function catalogSourceDraft(entry: NewsCatalogEntry, feed: NewsCatalogFee
     publisher: entry.publisher,
     section: feed.section,
     target: feed.url,
+    maxContentAgeSeconds: feed.max_content_age_seconds ?? 0,
     enabled: false,
     templateSource: template,
   }

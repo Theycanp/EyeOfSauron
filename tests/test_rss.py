@@ -4,8 +4,9 @@ import io
 import unittest
 import urllib.error
 from dataclasses import replace
+from datetime import UTC, datetime
 from email.message import Message
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from argus.config import load_config
 from argus.models import SourceState
@@ -157,6 +158,65 @@ class RssTests(unittest.TestCase):
         with self.assertRaisesRegex(FeedError, "allowlist"):
             RssCollector(self.source, opener=opener, resolver=resolver).fetch(self._state())
         self.assertEqual(1, opener.open.call_count)
+
+    def _content_age_fetch(self, payload, max_age, opener=None):
+        headers = Message()
+        headers["Content-Type"] = "text/xml"
+        source = replace(self.source, settings={"max_content_age_seconds": max_age})
+
+        class Response(io.BytesIO):
+            def __init__(self):
+                super().__init__(payload)
+                self.headers = headers
+
+            def geturl(self):
+                return source.url
+
+        opener = opener or Mock()
+        opener.open.return_value = Response()
+        resolver = lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))]
+        with patch("argus.rss.datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 9, 5, 15, tzinfo=UTC)
+            result = RssCollector(source, opener=opener, resolver=resolver).fetch(
+                self._state('W/"cached"', "yesterday")
+            )
+        return result, opener
+
+    def test_content_age_policy_rejects_stopped_feed_despite_http_success(self) -> None:
+        with self.assertRaisesRegex(FeedError, "content is stale"):
+            self._content_age_fetch(self.payload, 86400)
+        result, _ = self._content_age_fetch(self.payload, 0)
+        self.assertEqual(2, len(result.observations))
+
+    def test_content_age_policy_uses_newest_entry_and_bypasses_conditional_cache(self) -> None:
+        result, opener = self._content_age_fetch(self.payload, 3 * 86400)
+        self.assertEqual(2, len(result.observations))
+        request = opener.open.call_args.args[0]
+        self.assertIsNone(request.get_header("If-none-match"))
+        self.assertIsNone(request.get_header("If-modified-since"))
+
+    def test_content_age_policy_cannot_accept_unsolicited_304(self) -> None:
+        opener = Mock()
+        opener.open.side_effect = urllib.error.HTTPError(self.source.url, 304, "Not Modified", Message(), None)
+        with self.assertRaisesRegex(FeedError, "freshness cannot be verified from HTTP 304"):
+            self._content_age_fetch(self.payload, 86400, opener)
+
+    def test_undated_entries_cannot_mask_archived_feed(self) -> None:
+        undated = b"<item><title>Undated item</title></item>"
+        stale_with_undated = self.payload.replace(b"</channel>", undated + b"</channel>")
+        with self.assertRaisesRegex(FeedError, "content is stale"):
+            self._content_age_fetch(stale_with_undated, 86400)
+        for date in (b"", b"<pubDate>invalid</pubDate>"):
+            payload = b"<rss><channel><item><title>Test</title>" + date + b"</item></channel></rss>"
+            with self.subTest(date=date), self.assertRaisesRegex(FeedError, "without publication timestamps"):
+                self._content_age_fetch(payload, 86400)
+
+    def test_atom_updated_timestamp_is_used_for_content_age(self) -> None:
+        payload = b'<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>x</id><title>Test</title><updated>2026-09-05T14:00:00Z</updated></entry></feed>'
+        result, _ = self._content_age_fetch(payload, 3600)
+        self.assertFalse(result.observations[0].attributes["published_at_inferred"])
+        with self.assertRaisesRegex(FeedError, "content is stale"):
+            self._content_age_fetch(payload, 3599)
 
 
 if __name__ == "__main__":

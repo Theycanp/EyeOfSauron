@@ -279,6 +279,10 @@ def validate_provider_configuration(
             f"{source_location}.kind {kind} is experimental and has no runtime collector; keep it disabled"
         )
     normalized: dict[str, Any] = dict(settings)
+    if kind == "rss":
+        normalized["max_content_age_seconds"] = _setting_int(
+            settings, "max_content_age_seconds", 0, location, 0, 31536000
+        )
     if enabled:
         _validate_declared_settings(spec, settings, location)
         if kind == "market":

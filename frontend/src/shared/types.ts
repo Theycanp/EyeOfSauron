@@ -123,6 +123,7 @@ export interface NewsCatalogFeed extends JsonRecord {
   section: string
   url: string
   allowed_hosts: string[]
+  max_content_age_seconds?: number
 }
 
 export interface NewsCatalogEntry extends JsonRecord {
