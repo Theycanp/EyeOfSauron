@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -146,6 +147,8 @@ class ArchiveSafetyTests(unittest.TestCase):
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
                 )
             shutil.copyfile(ROOT / "pyproject.toml", root / "pyproject.toml")
+            for name in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES"):
+                shutil.copyfile(ROOT / name, root / name)
             config = root / "test.toml"
             config.write_text(
                 (ROOT / "config/argus.example.toml").read_text()
@@ -155,6 +158,7 @@ class ArchiveSafetyTests(unittest.TestCase):
                 "format_version": 1, "artifact_kind": "server-release",
                 "product": "EyeOfSauron", "component": "Argus", "version": __version__,
                 "database_schema": SCHEMA_VERSION, "commit": "a" * 40,
+                "license": tomllib.loads((root / "pyproject.toml").read_text())["project"]["license"],
             }))
             before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
             for _ in range(2):
@@ -165,6 +169,16 @@ class ArchiveSafetyTests(unittest.TestCase):
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             after = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
             self.assertEqual(before, after)
+            manifest_path = root / "RELEASE.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["license"] = "MIT"
+            manifest_path.write_text(json.dumps(manifest))
+            result = subprocess.run(
+                ["bash", str(root / "scripts/release/preflight.sh"), str(root), str(config)],
+                text=True, capture_output=True, timeout=30,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("RELEASE.json license", result.stderr)
 
 
 class HealthGateTests(unittest.TestCase):

@@ -5,6 +5,12 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+### Changed
+
+- Adopt Apache-2.0 for the project, synchronize Python/frontend metadata and
+  release manifests, and include project and bundled third-party notices.
+  Previously published MIT snapshots, including v0.7.0, retain their MIT grants.
+
 ## [0.7.0] - 2026-09-05
 
 ### Added

@@ -81,3 +81,14 @@ PYTHONPATH=src python3 -m argus --config config/argus.example.toml check-config
 See `docs/ARCHITECTURE.md` for design decisions, `docs/PROVIDERS.md` for the
 provider capability contract and reviewed news catalog, and `docs/OPERATIONS.md`
 for deployment and recovery commands.
+
+## License
+
+EyeOfSauron, including the Argus engine and administration UI, is licensed under
+the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for project attribution
+and [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) for bundled dependency licenses.
+Third-party code and monitored content retain their own licenses and terms.
+
+This change applies from the Apache-2.0 licensing commit onward. Snapshots
+previously published under MIT, including tag `v0.7.0`, retain their original
+MIT grants; historical tags and release artifacts are not relicensed.

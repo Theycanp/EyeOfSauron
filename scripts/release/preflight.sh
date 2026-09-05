@@ -13,6 +13,9 @@ release_root=$(realpath "$release_root")
 required=(
   RELEASE.json
   pyproject.toml
+  LICENSE
+  NOTICE
+  THIRD_PARTY_NOTICES
   src/argus/__init__.py
   src/argus/admin_web/index.html
   deploy/argus.service
@@ -64,6 +67,7 @@ expected = {
     "component": "Argus",
     "version": __version__,
     "database_schema": SCHEMA_VERSION,
+    "license": project["license"],
 }
 for key, value in expected.items():
     if manifest.get(key) != value:

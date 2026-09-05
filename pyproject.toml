@@ -3,8 +3,8 @@ name = "eyeofsauron"
 version = "0.7.0"
 description = "EyeOfSauron personal intelligence monitoring, powered by the Argus watcher engine"
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES"]
 requires-python = ">=3.12"
 dependencies = []
 keywords = ["monitoring", "alerts", "ntfy", "rss", "personal-intelligence"]

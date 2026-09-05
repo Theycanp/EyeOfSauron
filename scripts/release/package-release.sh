@@ -38,6 +38,7 @@ git -C "$repo_root" archive HEAD | tar -x -C "$stage"
 PYTHONPATH="$stage/src" /usr/bin/python3 - "$stage" "$release_id" "$commit" "$commit_epoch" <<'PY'
 import json
 import sys
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -45,6 +46,7 @@ from argus.database import SCHEMA_VERSION
 from argus import __version__
 
 root = Path(sys.argv[1])
+project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 payload = {
     "format_version": 1,
     "artifact_kind": "server-release",
@@ -53,7 +55,7 @@ payload = {
     "release_id": sys.argv[2],
     "version": __version__,
     "commit": sys.argv[3],
-    "license": "MIT",
+    "license": project["license"],
     "python_requires": ">=3.12",
     "database_schema": SCHEMA_VERSION,
     "created_at": datetime.fromtimestamp(int(sys.argv[4]), UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),

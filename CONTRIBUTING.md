@@ -82,3 +82,10 @@ verification performed. Update `CHANGELOG.md` for externally observable changes.
 Report vulnerabilities using the private process in `SECURITY.md`, not a public
 issue. Releases follow `docs/RELEASES.md`; do not deploy directly from a dirty
 working tree.
+
+## Contribution licensing
+
+Unless explicitly stated otherwise, contributions intentionally submitted for
+inclusion are under Apache-2.0, as described in Section 5 of [LICENSE](LICENSE).
+Only submit material you have the right to contribute, and preserve applicable
+third-party copyright and license notices. No copyright assignment is required.
