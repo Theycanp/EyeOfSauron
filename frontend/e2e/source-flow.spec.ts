@@ -115,7 +115,7 @@ test('catalog creates a disabled draft and saves with its opening revision', asy
   })
   await login(page)
   await openSources(page)
-  await page.locator('summary').filter({ hasText: '新闻目录' }).click()
+  await expect(page.getByRole('heading', { name: /新闻目录/ })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'The Wall Street Journal' })).toBeVisible()
   await expect(page.locator('body')).toHaveJSProperty('scrollWidth', await page.locator('body').evaluate((node) => node.clientWidth))
   await page.screenshot({ path: testInfo.outputPath('sources.png'), fullPage: true })
