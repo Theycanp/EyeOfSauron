@@ -5,6 +5,13 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-07
+
+### Fixed
+
+- Keep daily digest SQLite work on the event-loop thread so scheduled
+  generation does not fail from cross-thread connection use.
+
 ## [0.10.0] - 2026-09-07
 
 ### Added

@@ -316,9 +316,10 @@ class ArgusService:
         assert self.digest_scheduler is not None
         while not self.stop_event.is_set():
             try:
-                published = await asyncio.to_thread(
-                    self.digest_scheduler.process_once, now_epoch()
-                )
+                # The Database connection belongs to the event-loop thread.
+                # Digest generation is infrequent and must keep its SQLite
+                # transaction on that thread instead of crossing into a worker.
+                published = self.digest_scheduler.process_once(now_epoch())
                 if published is not None:
                     LOGGER.debug(
                         "digest_checked key=%s version=%d", published.digest_key, published.version
