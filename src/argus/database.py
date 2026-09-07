@@ -2630,13 +2630,14 @@ class Database:
                 current_weight=previous_weight,
                 updated_at=previous_at,
             )
-            with self.connection:
-                self.connection.execute(
-                    "INSERT INTO source_quality_state(source_id, automatic_weight, calculated_at) "
-                    "VALUES (?, ?, ?) ON CONFLICT(source_id) DO UPDATE SET "
-                    "automatic_weight = excluded.automatic_weight, calculated_at = excluded.calculated_at",
-                    (source_id, automatic.weight, calculated_at),
-                )
+            if state is None or automatic.weight != previous_weight:
+                with self.connection:
+                    self.connection.execute(
+                        "INSERT INTO source_quality_state(source_id, automatic_weight, calculated_at) "
+                        "VALUES (?, ?, ?) ON CONFLICT(source_id) DO UPDATE SET "
+                        "automatic_weight = excluded.automatic_weight, calculated_at = excluded.calculated_at",
+                        (source_id, automatic.weight, calculated_at),
+                    )
             item = {
                 "source_id": profile.source_id,
                 "weight": profile.weight,

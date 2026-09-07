@@ -123,7 +123,7 @@ def calculate_quality(
         target = max(policy.minimum_weight, min(policy.maximum_weight, target))
         previous = max(policy.minimum_weight, min(policy.maximum_weight, current_weight))
         elapsed_days = max(0.0, (now - updated_at) / 86400.0) if updated_at is not None else 30.0
-        allowed = policy.maximum_change_per_30_days * max(1.0, elapsed_days / 30.0)
+        allowed = policy.maximum_change_per_30_days * min(1.0, elapsed_days / 30.0)
         weight = max(previous - allowed, min(previous + allowed, target))
 
     return SourceQualityProfile(

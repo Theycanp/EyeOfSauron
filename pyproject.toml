@@ -1,6 +1,6 @@
 [project]
 name = "eyeofsauron"
-version = "0.9.0"
+version = "0.9.1"
 description = "EyeOfSauron personal intelligence monitoring, powered by the Argus watcher engine"
 readme = "README.md"
 license = "Apache-2.0"
