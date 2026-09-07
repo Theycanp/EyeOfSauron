@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0
+
+- Include immediate observations in daily digests while retaining their real-time notification path.
+- Add long-horizon, decayed source-quality scoring with conservative eligibility thresholds, manual overrides, feedback, and audit history.
+- Add the authenticated admin quality-management page and API; quality weights affect digest ranking only.
+- Upgrade the SQLite schema to 12 with an isolated persistence boundary for quality data.
+
 All notable changes to EyeOfSauron are documented here. The project follows
 Semantic Versioning and the Keep a Changelog structure.
 

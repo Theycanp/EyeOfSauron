@@ -12,6 +12,7 @@ import type {
   PromptResponse,
   ReminderResponse,
   RevisionResponse,
+  SourceQualityResponse,
   SourceTestResult,
 } from './types'
 
@@ -134,6 +135,16 @@ export class AdminApi {
   incidents(): Promise<IncidentResponse> { return this.request('/api/incidents') }
   newsCatalog(): Promise<NewsCatalogResponse> { return this.request('/api/news-catalog') }
   prompts(): Promise<PromptResponse> { return this.request('/api/prompts') }
+  sourceQuality(): Promise<SourceQualityResponse> { return this.request('/api/source-quality') }
+  sourceQualityFeedback(sourceId: string, body: { signal: -1 | 0 | 1; reason: string; observation_id?: number }): Promise<MutationResponse> {
+    return this.request(`/api/source-quality/${encodeURIComponent(sourceId)}/feedback`, { method: 'POST', body: JSON.stringify(body) })
+  }
+  setSourceQualityOverride(sourceId: string, body: { weight: number; reason: string }): Promise<MutationResponse> {
+    return this.request(`/api/source-quality/${encodeURIComponent(sourceId)}/override`, { method: 'POST', body: JSON.stringify(body) })
+  }
+  clearSourceQualityOverride(sourceId: string): Promise<MutationResponse> {
+    return this.request(`/api/source-quality/${encodeURIComponent(sourceId)}/override`, { method: 'DELETE' })
+  }
   digests(status: 'published' | 'draft' | 'superseded' | 'all' = 'published'): Promise<DigestListResponse> {
     return this.request(`/api/digests?${new URLSearchParams({ status, limit: '30' })}`)
   }

@@ -282,6 +282,31 @@ export interface DigestItem extends JsonRecord {
   source_ids?: string[]
   observation_ids?: number[]
   links?: string[]
+  handling?: 'digest' | 'immediate'
+}
+
+export interface SourceQualityProfile extends JsonRecord {
+  source_id: string
+  weight: number
+  automatic_weight?: number
+  score: number
+  effective_samples: number
+  positive_count: number
+  negative_count: number
+  neutral_count: number
+  first_feedback_at?: number | null
+  last_feedback_at?: number | null
+  evidence_span_days: number
+  eligible: boolean
+  manual_override?: number | null
+  override_reason?: string | null
+  updated_at?: number | null
+  policy?: JsonRecord
+}
+
+export interface SourceQualityResponse {
+  profiles?: SourceQualityProfile[]
+  logic?: JsonRecord
 }
 
 export interface DigestCoverage extends JsonRecord {
@@ -354,7 +379,7 @@ export interface ResourceState<T> {
   loading: boolean
 }
 
-export type AdminResourceName = 'config' | 'reminders' | 'revisions' | 'incidents' | 'newsCatalog' | 'prompts'
+export type AdminResourceName = 'config' | 'reminders' | 'revisions' | 'incidents' | 'newsCatalog' | 'prompts' | 'sourceQuality'
 
 export interface AdminResources {
   config: ResourceState<ConfigResponse>
@@ -363,6 +388,7 @@ export interface AdminResources {
   incidents: ResourceState<IncidentResponse>
   newsCatalog: ResourceState<NewsCatalogResponse>
   prompts: ResourceState<PromptResponse>
+  sourceQuality: ResourceState<SourceQualityResponse>
 }
 
 export interface HealthSummary {

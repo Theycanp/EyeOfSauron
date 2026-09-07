@@ -570,6 +570,7 @@ def _digest_payload(digest: DigestDocument, *, details: bool) -> dict[str, Any]:
             "source_ids": list(item.source_ids),
             "observation_ids": list(item.observation_ids),
             "links": list(item.links),
+            "handling": item.handling,
         }
         for item in digest.items
     ]
@@ -762,6 +763,23 @@ def make_handler(
             if path == "/api/prompts":
                 self._json(HTTPStatus.OK, {"prompts": _public(database.list_prompts())})
                 return
+            if path == "/api/source-quality":
+                self._json(HTTPStatus.OK, {
+                    "profiles": database.list_source_quality(),
+                    "logic": {
+                        "half_life_days": 90,
+                        "min_effective_samples": 30,
+                        "min_span_days": 90,
+                        "weight_range": [0.70, 1.15],
+                        "max_change_per_30_days": 0.05,
+                        "scope": "digest_ranking_only",
+                    },
+                })
+                return
+            if path.startswith("/api/source-quality/") and path.endswith("/audit"):
+                source_id = urllib.parse.unquote(path[len("/api/source-quality/") : -len("/audit")]).strip("/")
+                self._json(HTTPStatus.OK, {"source_id": source_id, "audit": database.list_source_quality_audit(source_id)})
+                return
             if path == "/api/digests":
                 status_filter = query.get("status", ["published"])[0]
                 try:
@@ -908,6 +926,32 @@ def make_handler(
                     database.save_prompt(prompt_id, version, system_text, actor, int(time.time()))
                     self._json(HTTPStatus.OK, {"saved": _public(database.get_prompt(prompt_id, version)), "restart_required": False})
                     return
+                if path.startswith("/api/source-quality/"):
+                    suffix = path[len("/api/source-quality/") :]
+                    if suffix.endswith("/feedback"):
+                        source_id = urllib.parse.unquote(suffix[: -len("/feedback")]).strip("/")
+                        observation_id = data.get("observation_id")
+                        feedback_id = database.record_source_quality_feedback(
+                            source_id,
+                            int(data.get("signal")),
+                            str(data.get("reason", "")),
+                            actor,
+                            int(time.time()),
+                            int(observation_id) if observation_id is not None else None,
+                        )
+                        self._json(HTTPStatus.CREATED, {"id": feedback_id, "profile": database.list_source_quality(source_ids=[source_id])[0]})
+                        return
+                    if suffix.endswith("/override"):
+                        source_id = urllib.parse.unquote(suffix[: -len("/override")]).strip("/")
+                        database.set_source_quality_override(
+                            source_id,
+                            float(data.get("weight")),
+                            str(data.get("reason", "")),
+                            actor,
+                            int(time.time()),
+                        )
+                        self._json(HTTPStatus.OK, {"profile": database.list_source_quality(source_ids=[source_id])[0]})
+                        return
                 if path == "/api/analysis":
                     revision = store.set_analysis(
                         data,
@@ -1046,7 +1090,7 @@ def make_handler(
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found", "code": "not_found"})
             except RevisionConflictError as exc:
                 self._json(HTTPStatus.CONFLICT, {"error": str(exc), "code": "revision_conflict"})
-            except (AdminError, ConfigError, ReminderError, ValueError, TypeError) as exc:
+            except (AdminError, ConfigError, ReminderError, KeyError, ValueError, TypeError) as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), "code": "invalid_request"})
             except (OSError, RuntimeError) as exc:
                 LOGGER.error("admin_request_failed request_id=%s error=%s", self.request_id, sanitize_error(exc))
@@ -1078,6 +1122,12 @@ def make_handler(
                     identifier = urllib.parse.unquote(path[len("/api/reminders/"):].strip())
                     removed = database.delete_reminder(identifier, self._actor(), int(time.time()))
                     self._json(HTTPStatus.OK, {"removed": removed, "restart_required": False})
+                    return
+                if path.startswith("/api/source-quality/") and path.endswith("/override"):
+                    source_id = urllib.parse.unquote(path[len("/api/source-quality/") : -len("/override")]).strip("/")
+                    changed = database.clear_source_quality_override(source_id, self._actor(), int(time.time()))
+                    profiles = database.list_source_quality(source_ids=[source_id])
+                    self._json(HTTPStatus.OK, {"changed": changed, "profile": profiles[0] if profiles else None})
                     return
                 if path.startswith("/api/source-bundles/"):
                     identifier = urllib.parse.unquote(path[len("/api/source-bundles/"):].strip())

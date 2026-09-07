@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AdminApi, ApiError } from '../shared/api'
-import type { AdminResourceName, AdminResources, ConfigResponse, IncidentResponse, NewsCatalogResponse, PromptResponse, ReminderResponse, ResourceState, RevisionResponse } from '../shared/types'
+import type { AdminResourceName, AdminResources, ConfigResponse, IncidentResponse, NewsCatalogResponse, PromptResponse, ReminderResponse, ResourceState, RevisionResponse, SourceQualityResponse } from '../shared/types'
 
 function resource<T>(): ResourceState<T> {
   return { data: null, error: null, updatedAt: null, loading: false }
@@ -14,11 +14,12 @@ function newResources(): AdminResources {
     incidents: resource<IncidentResponse>(),
     newsCatalog: resource<NewsCatalogResponse>(),
     prompts: resource<PromptResponse>(),
+    sourceQuality: resource<SourceQualityResponse>(),
   }
 }
 
 
-const resourceNames: AdminResourceName[] = ['config', 'reminders', 'revisions', 'incidents', 'newsCatalog', 'prompts']
+const resourceNames: AdminResourceName[] = ['config', 'reminders', 'revisions', 'incidents', 'newsCatalog', 'prompts', 'sourceQuality']
 
 type ResourceResult<T> = { ok: true; data: T; updatedAt: number } | { ok: false; error: string; unauthorized: boolean }
 
@@ -49,16 +50,18 @@ export function useAdminData(token: string, onUnauthorized: () => void) {
       incidents: { ...current.incidents, loading: true },
       newsCatalog: { ...current.newsCatalog, loading: true },
       prompts: { ...current.prompts, loading: true },
+      sourceQuality: { ...current.sourceQuality, loading: true },
     }))
-    const [configResult, reminderResult, revisionResult, incidentResult, newsCatalogResult, promptsResult] = await Promise.all([
+    const [configResult, reminderResult, revisionResult, incidentResult, newsCatalogResult, promptsResult, sourceQualityResult] = await Promise.all([
       capture(() => api.config()),
       capture(() => api.reminders()),
       capture(() => api.revisions()),
       capture(() => api.incidents()),
       capture(() => api.newsCatalog()),
       capture(() => api.prompts()),
+      capture(() => api.sourceQuality()),
     ])
-    const results = [configResult, reminderResult, revisionResult, incidentResult, newsCatalogResult, promptsResult]
+    const results = [configResult, reminderResult, revisionResult, incidentResult, newsCatalogResult, promptsResult, sourceQualityResult]
     if (sequence !== refreshSequence.current) return false
     if (results.some((result) => !result.ok && result.unauthorized)) {
       setResources(newResources())
@@ -73,6 +76,7 @@ export function useAdminData(token: string, onUnauthorized: () => void) {
       incidents: mergeResource(current.incidents, incidentResult),
       newsCatalog: mergeResource(current.newsCatalog, newsCatalogResult),
       prompts: mergeResource(current.prompts, promptsResult),
+      sourceQuality: mergeResource(current.sourceQuality, sourceQualityResult),
     }))
     setRefreshing(false)
     return results.some((result) => result.ok)

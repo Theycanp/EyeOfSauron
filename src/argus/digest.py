@@ -44,6 +44,7 @@ class DigestCluster:
     source_ids: tuple[str, ...]
     observation_ids: tuple[int, ...]
     links: tuple[str, ...]
+    handling: str = "digest"
 
     def __post_init__(self) -> None:
         if not self.cluster_key or len(self.cluster_key) > 128:
@@ -58,6 +59,8 @@ class DigestCluster:
             raise ValueError("digest cluster confidence is out of range")
         if self.published_at < 0 or any(identifier < 1 for identifier in self.observation_ids):
             raise ValueError("digest cluster observation identity is invalid")
+        if self.handling not in {"digest", "immediate"}:
+            raise ValueError("digest cluster handling is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +142,13 @@ class DigestInputRepository(Protocol):
         source_ids: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]: ...
 
+    def list_source_quality(
+        self,
+        *,
+        source_ids: Sequence[str] | None = None,
+        now: int | None = None,
+    ) -> list[dict[str, Any]]: ...
+
 
 @runtime_checkable
 class DigestReaderRepository(Protocol):
@@ -209,7 +219,11 @@ def _similarity(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
     return max(jaccard, sequence * 0.9)
 
 
-def _observation_score(item: Mapping[str, Any], region_weights: Mapping[str, int]) -> float:
+def _observation_score(
+    item: Mapping[str, Any],
+    region_weights: Mapping[str, int],
+    source_quality_weights: Mapping[str, float] | None = None,
+) -> float:
     importance = _bounded_int(item.get("importance"), 3)
     urgency = _bounded_int(item.get("urgency"), 2)
     relevance = _bounded_int(item.get("relevance"), 3)
@@ -217,15 +231,20 @@ def _observation_score(item: Mapping[str, Any], region_weights: Mapping[str, int
     region = str(item.get("region", "GLOBAL")).upper()
     regional_interest = _bounded_int(region_weights.get(region, region_weights.get("OTHER", 3)), 3)
     source_bonus = 0.35 if item.get("source_tier") == "primary" else 0.0
-    return round(
+    base = round(
         importance * 0.35
         + urgency * 0.15
         + relevance * 0.25
         + confidence * 0.5
         + regional_interest * 0.15
         + source_bonus,
-        4,
     )
+    quality = 1.0
+    if source_quality_weights is not None:
+        raw_quality = source_quality_weights.get(str(item.get("source_id", "")), 1.0)
+        if isinstance(raw_quality, (int, float)) and not isinstance(raw_quality, bool):
+            quality = max(0.70, min(1.15, float(raw_quality)))
+    return round(base * quality, 4)
 
 
 def _bounded_int(value: Any, default: int) -> int:
@@ -253,6 +272,7 @@ def cluster_observations(
     region_weights: Mapping[str, int] | None = None,
     similarity_threshold: float = 0.62,
     max_items: int = 50,
+    source_quality_weights: Mapping[str, float] | None = None,
 ) -> tuple[DigestCluster, ...]:
     """Cluster related reports and return ranked, deterministic digest items."""
     if not 0.5 <= similarity_threshold <= 1.0:
@@ -263,7 +283,7 @@ def cluster_observations(
     ordered = sorted(
         observations,
         key=lambda item: (
-            -_observation_score(item, weights),
+            -_observation_score(item, weights, source_quality_weights),
             -int(item.get("published_at", 0)),
             int(item.get("id", 0)),
         ),
@@ -297,7 +317,11 @@ def cluster_observations(
             sorted({int(item["id"]) for item in group if item.get("id") is not None})
         )
         corroboration = min(0.75, 0.25 * math.log2(max(1, len(source_ids))))
-        score = round(max(_observation_score(item, weights) for item in group) + corroboration, 4)
+        score = round(
+            max(_observation_score(item, weights, source_quality_weights) for item in group)
+            + corroboration,
+            4,
+        )
         summaries = [str(item.get("summary", "")).strip() for item in group]
         summary = next(
             (value for value in summaries if value), str(representative.get("title", ""))
@@ -321,6 +345,11 @@ def cluster_observations(
                 observation_ids=observation_ids,
                 links=tuple(
                     dict.fromkeys(str(item.get("url", "")) for item in group if item.get("url"))
+                ),
+                handling=(
+                    "immediate"
+                    if any(str(item.get("handling", "digest")) == "immediate" for item in group)
+                    else "digest"
                 ),
             )
         )
@@ -363,6 +392,7 @@ class DigestBuilder:
         region_weights: Mapping[str, int] | None = None,
         observation_limit: int = 5000,
         item_limit: int = 50,
+        source_quality_weights: Mapping[str, float] | None = None,
     ) -> None:
         if not 1 <= observation_limit <= 5000:
             raise ValueError("digest observation limit is out of range")
@@ -370,6 +400,7 @@ class DigestBuilder:
         self.region_weights = dict(region_weights or {})
         self.observation_limit = observation_limit
         self.item_limit = item_limit
+        self.source_quality_weights = dict(source_quality_weights or {})
 
     def build(
         self,
@@ -385,13 +416,19 @@ class DigestBuilder:
         observations = self.repository.list_observations(
             period_start,
             period_end,
-            handling="digest",
+            handling=None,
             limit=self.observation_limit,
         )
+        observations = [
+            item
+            for item in observations
+            if str(item.get("handling", "digest")) in {"digest", "immediate"}
+        ]
         clusters = cluster_observations(
             observations,
             region_weights=self.region_weights,
             max_items=self.item_limit,
+            source_quality_weights=self.source_quality_weights,
         )
         coverage = source_coverage_from_rows(
             self.repository.list_source_coverage(
@@ -455,6 +492,7 @@ class DigestScheduler:
         topic: str,
         source_ids: Sequence[str] | None = None,
         region_weights: Mapping[str, int] | None = None,
+        source_quality_weights: Mapping[str, float] | None = None,
     ) -> None:
         if not isinstance(repository, DigestRepository) or not isinstance(
             repository, DigestNotificationRepository
@@ -467,6 +505,7 @@ class DigestScheduler:
         self.builder = DigestBuilder(
             repository,
             region_weights=region_weights,
+            source_quality_weights=source_quality_weights,
             observation_limit=config.observation_limit,
             item_limit=config.item_limit,
         )
@@ -484,6 +523,15 @@ class DigestScheduler:
         digest_key = f"daily:{local_date.isoformat()}"
         published = self.repository.get_digest(digest_key, published_only=True)
         if published is None:
+            quality_rows = self.repository.list_source_quality(
+                source_ids=self.source_ids or None,
+                now=now,
+            )
+            self.builder.source_quality_weights = {
+                str(row["source_id"]): float(row["weight"])
+                for row in quality_rows
+                if isinstance(row, Mapping) and row.get("source_id")
+            }
             draft = self.builder.build_and_save(
                 digest_key=digest_key,
                 period_start=previous_at,

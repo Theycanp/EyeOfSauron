@@ -95,7 +95,7 @@ class AnalysisPersistenceTests(unittest.TestCase):
         target_connection.close()
         migrated = Database(copied)
         try:
-            self.assertEqual(11, migrated.status()["database_schema"])
+            self.assertEqual(12, migrated.status()["database_schema"])
         finally:
             migrated.close()
 

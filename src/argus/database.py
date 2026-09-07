@@ -23,11 +23,12 @@ from .models import (
 )
 from .rules import RuleSet
 from .reminders import ReminderError, ReminderSpec, next_daily_occurrence
+from .source_quality import SourceQualityPolicy, calculate_quality
 from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def read_active_config(path: Path) -> dict[str, Any] | None:
@@ -883,6 +884,85 @@ class Database:
                 self.connection.rollback()
                 raise
             version = 11
+
+        if version < 12:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 12:
+                    digest_columns = {
+                        str(row[1])
+                        for row in self.connection.execute("PRAGMA table_info(digest_items)")
+                    }
+                    if "handling" not in digest_columns:
+                        self.connection.execute(
+                            "ALTER TABLE digest_items ADD COLUMN handling TEXT NOT NULL DEFAULT 'digest' "
+                            "CHECK (handling IN ('digest', 'immediate'))"
+                        )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS source_quality_feedback (
+                            id INTEGER PRIMARY KEY,
+                            source_id TEXT NOT NULL,
+                            observation_id INTEGER REFERENCES observations(id) ON DELETE SET NULL,
+                            signal INTEGER NOT NULL CHECK (signal IN (-1, 0, 1)),
+                            reason TEXT NOT NULL,
+                            actor TEXT NOT NULL,
+                            created_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS source_quality_feedback_source_time_idx "
+                        "ON source_quality_feedback(source_id, created_at, id)"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS source_quality_overrides (
+                            source_id TEXT PRIMARY KEY,
+                            weight REAL NOT NULL CHECK (weight BETWEEN 0.70 AND 1.15),
+                            reason TEXT NOT NULL,
+                            actor TEXT NOT NULL,
+                            created_at INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS source_quality_state (
+                            source_id TEXT PRIMARY KEY,
+                            automatic_weight REAL NOT NULL CHECK (
+                                automatic_weight BETWEEN 0.70 AND 1.15
+                            ),
+                            calculated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS source_quality_audit (
+                            id INTEGER PRIMARY KEY,
+                            source_id TEXT NOT NULL,
+                            action TEXT NOT NULL CHECK (
+                                action IN ('feedback', 'override_set', 'override_cleared')
+                            ),
+                            actor TEXT NOT NULL,
+                            details_json TEXT NOT NULL,
+                            created_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS source_quality_audit_source_time_idx "
+                        "ON source_quality_audit(source_id, created_at DESC, id DESC)"
+                    )
+                    self.connection.execute("PRAGMA user_version=12")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 12
 
     def close(self) -> None:
         self.connection.close()
@@ -2476,6 +2556,220 @@ class Database:
             )
         return result
 
+    @staticmethod
+    def _validate_source_quality_source_id(source_id: str) -> str:
+        normalized = source_id.strip()
+        if not normalized or len(normalized) > 128:
+            raise ValueError("source quality source ID is invalid")
+        return normalized
+
+    def _known_source_id(self, source_id: str) -> bool:
+        return self.connection.execute(
+            "SELECT 1 FROM source_runtime WHERE source_id = ? "
+            "UNION SELECT 1 FROM collector_state WHERE source_id = ? "
+            "UNION SELECT 1 FROM observations WHERE source_id = ? LIMIT 1",
+            (source_id, source_id, source_id),
+        ).fetchone() is not None
+
+    def list_source_quality(
+        self,
+        *,
+        source_ids: Sequence[str] | None = None,
+        now: int | None = None,
+    ) -> list[dict[str, Any]]:
+        calculated_at = int(time.time()) if now is None else int(now)
+        if calculated_at < 0:
+            raise ValueError("source quality calculation time is invalid")
+        if source_ids is None:
+            rows = self.connection.execute(
+                "SELECT source_id FROM source_runtime UNION SELECT source_id FROM collector_state "
+                "UNION SELECT source_id FROM source_quality_feedback "
+                "UNION SELECT source_id FROM source_quality_overrides ORDER BY source_id"
+            )
+            identifiers = [str(row["source_id"]) for row in rows]
+        else:
+            identifiers = list(dict.fromkeys(
+                self._validate_source_quality_source_id(str(item)) for item in source_ids
+            ))
+        if len(identifiers) > 1000:
+            raise ValueError("source quality source limit is out of range")
+
+        policy = SourceQualityPolicy()
+        profiles: list[dict[str, Any]] = []
+        for source_id in identifiers:
+            feedback = [dict(row) for row in self.connection.execute(
+                "SELECT signal, created_at FROM source_quality_feedback "
+                "WHERE source_id = ? ORDER BY created_at, id",
+                (source_id,),
+            )]
+            override = self.connection.execute(
+                "SELECT weight, reason, actor, created_at, updated_at "
+                "FROM source_quality_overrides WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+            state = self.connection.execute(
+                "SELECT automatic_weight, calculated_at FROM source_quality_state WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+            previous_weight = float(state["automatic_weight"]) if state is not None else 1.0
+            previous_at = int(state["calculated_at"]) if state is not None else None
+            profile = calculate_quality(
+                source_id,
+                feedback,
+                now=calculated_at,
+                policy=policy,
+                current_weight=previous_weight,
+                manual_override=float(override["weight"]) if override is not None else None,
+                updated_at=previous_at,
+            )
+            automatic = calculate_quality(
+                source_id,
+                feedback,
+                now=calculated_at,
+                policy=policy,
+                current_weight=previous_weight,
+                updated_at=previous_at,
+            )
+            with self.connection:
+                self.connection.execute(
+                    "INSERT INTO source_quality_state(source_id, automatic_weight, calculated_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT(source_id) DO UPDATE SET "
+                    "automatic_weight = excluded.automatic_weight, calculated_at = excluded.calculated_at",
+                    (source_id, automatic.weight, calculated_at),
+                )
+            item = {
+                "source_id": profile.source_id,
+                "weight": profile.weight,
+                "automatic_weight": automatic.weight,
+                "score": profile.score,
+                "effective_samples": profile.effective_samples,
+                "positive_count": profile.positive_count,
+                "negative_count": profile.negative_count,
+                "neutral_count": profile.neutral_count,
+                "first_feedback_at": profile.first_feedback_at,
+                "last_feedback_at": profile.last_feedback_at,
+                "evidence_span_days": profile.evidence_span_days,
+                "eligible": automatic.eligible,
+                "manual_override": profile.manual_override,
+                "updated_at": calculated_at,
+                "override_reason": str(override["reason"]) if override is not None else None,
+                "override_actor": str(override["actor"]) if override is not None else None,
+                "override_updated_at": int(override["updated_at"]) if override is not None else None,
+                "policy": {
+                    "half_life_days": policy.half_life_days,
+                    "min_effective_samples": policy.min_effective_samples,
+                    "min_span_days": policy.min_span_days,
+                    "prior_positive": policy.prior_positive,
+                    "prior_negative": policy.prior_negative,
+                    "minimum_weight": policy.minimum_weight,
+                    "maximum_weight": policy.maximum_weight,
+                    "maximum_change_per_30_days": policy.maximum_change_per_30_days,
+                    "scope": "digest_ranking_only",
+                },
+            }
+            profiles.append(item)
+        return profiles
+
+    def record_source_quality_feedback(
+        self,
+        source_id: str,
+        signal: int,
+        reason: str,
+        actor: str,
+        now: int,
+        observation_id: int | None = None,
+    ) -> int:
+        source_id = self._validate_source_quality_source_id(source_id)
+        if signal not in {-1, 0, 1} or now < 0:
+            raise ValueError("source quality feedback is invalid")
+        reason = reason.strip()
+        actor = actor.strip()
+        if not reason or len(reason) > 1000 or not actor or len(actor) > 128:
+            raise ValueError("source quality feedback metadata is invalid")
+        if not self._known_source_id(source_id):
+            raise KeyError(f"unknown source: {source_id}")
+        if observation_id is not None and self.connection.execute(
+            "SELECT 1 FROM observations WHERE id = ? AND source_id = ?",
+            (observation_id, source_id),
+        ).fetchone() is None:
+            raise ValueError("feedback observation does not belong to the source")
+        with self.unit_of_work():
+            cursor = self.connection.execute(
+                "INSERT INTO source_quality_feedback(source_id, observation_id, signal, reason, actor, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (source_id, observation_id, signal, reason, actor, now),
+            )
+            self.connection.execute(
+                "INSERT INTO source_quality_audit(source_id, action, actor, details_json, created_at) "
+                "VALUES (?, 'feedback', ?, ?, ?)",
+                (source_id, actor, json.dumps({"signal": signal, "reason": reason, "observation_id": observation_id}, ensure_ascii=False), now),
+            )
+        return int(cursor.lastrowid)
+
+    def set_source_quality_override(
+        self, source_id: str, weight: float, reason: str, actor: str, now: int
+    ) -> None:
+        source_id = self._validate_source_quality_source_id(source_id)
+        if isinstance(weight, bool) or not 0.70 <= float(weight) <= 1.15 or now < 0:
+            raise ValueError("source quality override weight is invalid")
+        reason = reason.strip()
+        actor = actor.strip()
+        if not reason or len(reason) > 1000 or not actor or len(actor) > 128:
+            raise ValueError("source quality override metadata is invalid")
+        if not self._known_source_id(source_id):
+            raise KeyError(f"unknown source: {source_id}")
+        with self.unit_of_work():
+            self.connection.execute(
+                "INSERT INTO source_quality_overrides(source_id, weight, reason, actor, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(source_id) DO UPDATE SET "
+                "weight = excluded.weight, reason = excluded.reason, actor = excluded.actor, "
+                "updated_at = excluded.updated_at",
+                (source_id, float(weight), reason, actor, now, now),
+            )
+            self.connection.execute(
+                "INSERT INTO source_quality_audit(source_id, action, actor, details_json, created_at) "
+                "VALUES (?, 'override_set', ?, ?, ?)",
+                (source_id, actor, json.dumps({"weight": float(weight), "reason": reason}, ensure_ascii=False), now),
+            )
+
+    def clear_source_quality_override(self, source_id: str, actor: str, now: int) -> bool:
+        source_id = self._validate_source_quality_source_id(source_id)
+        actor = actor.strip()
+        if not actor or len(actor) > 128 or now < 0:
+            raise ValueError("source quality override request is invalid")
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT weight, reason FROM source_quality_overrides WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            self.connection.execute(
+                "DELETE FROM source_quality_overrides WHERE source_id = ?", (source_id,)
+            )
+            self.connection.execute(
+                "INSERT INTO source_quality_audit(source_id, action, actor, details_json, created_at) "
+                "VALUES (?, 'override_cleared', ?, ?, ?)",
+                (source_id, actor, json.dumps({"previous_weight": float(row["weight"]), "previous_reason": str(row["reason"])}, ensure_ascii=False), now),
+            )
+        return True
+
+    def list_source_quality_audit(self, source_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        source_id = self._validate_source_quality_source_id(source_id)
+        if not 1 <= limit <= 500:
+            raise ValueError("source quality audit limit is out of range")
+        result = []
+        for row in self.connection.execute(
+            "SELECT id, source_id, action, actor, details_json, created_at "
+            "FROM source_quality_audit WHERE source_id = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (source_id, limit),
+        ):
+            item = dict(row)
+            item["details"] = json.loads(item.pop("details_json"))
+            result.append(item)
+        return result
+
     def save_digest(self, digest: DigestDocument) -> DigestDocument:
         """Allocate and store the next immutable version of a digest."""
         if digest.version != 0 or digest.status != "draft" or digest.published_at is not None:
@@ -2524,8 +2818,8 @@ class Database:
                         digest_id, position, cluster_key, title, summary, score,
                         importance, urgency, relevance, confidence, published_at,
                         regions_json, topics_json, source_ids_json,
-                        observation_ids_json, links_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        observation_ids_json, links_json, handling
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         digest_id,
@@ -2544,6 +2838,7 @@ class Database:
                         json.dumps(item.source_ids, ensure_ascii=False),
                         json.dumps(item.observation_ids),
                         json.dumps(item.links, ensure_ascii=False),
+                        item.handling,
                     ),
                 )
             for item in digest.coverage:
@@ -2684,6 +2979,7 @@ class Database:
                         source_ids=tuple(json.loads(item["source_ids_json"])),
                         observation_ids=tuple(int(value) for value in json.loads(item["observation_ids_json"])),
                         links=tuple(json.loads(item["links_json"])),
+                        handling=str(item["handling"]),
                     )
                 )
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
