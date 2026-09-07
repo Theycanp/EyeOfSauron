@@ -12,7 +12,8 @@
 - Management unit: `/etc/systemd/system/argus-admin.service`
 - ntfy credentials: `/etc/argus/ntfy.env`, root-owned and never printed
 - optional provider credentials: `/etc/argus/providers.env`, root-owned
-- admin credential: `/etc/argus/admin.env`, root-owned and never logged
+- loopback-only emergency admin credential: `/etc/argus/admin.env`, root-owned
+  and never logged or accepted through the public proxy
 - admin UI build: `src/argus/admin_web/` (static React/Vite output)
 
 ## Commands
@@ -30,18 +31,43 @@ its token cannot subscribe or access other topics.
 
 ## Management backend
 
-Install the unit from `deploy/argus-admin.service`, then check that
-`[admin]` is enabled in `/etc/argus/config.toml`:
+Install the unit from `deploy/argus-admin.service`, then check that `[admin]` is
+enabled in `/etc/argus/config.toml`. Keep the application listener on loopback:
 
 ```bash
 sudo install -m 0644 deploy/argus-admin.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now argus-admin
-ssh -N -L 18080:127.0.0.1:18080 joker@bk
 ```
 
-Open `http://127.0.0.1:18080/` on the client running the SSH tunnel. The API
-supports `GET /api/config`, `POST /api/source-bundles` (a source plus its
+Create or reset the initial administrator from a local root shell. The helper
+reads the password interactively or from a protected file; never place it in
+the command line:
+
+```bash
+sudo -u argus env PYTHONPATH=/opt/eyeofsauron/current/src \
+  /usr/bin/python3 /opt/eyeofsauron/current/scripts/operations/manage_admin_user.py joker
+```
+
+Install `deploy/nginx/eos-rate-limits.conf` under `/etc/nginx/conf.d/` and the
+dedicated `deploy/nginx/eos.juggler.cc.conf` virtual host under
+`/etc/nginx/sites-available/`, enable it, test Nginx, then reload. The public
+origin is `https://eos.juggler.cc:10008`; it reuses the existing TLS port through
+SNI while ntfy retains its own hostname. No firewall rule is added, and
+`127.0.0.1:18080` remains unreachable from the network.
+Install `deploy/certbot/nginx-reload` as an executable Certbot deploy hook so a
+successfully renewed certificate is loaded only after `nginx -t` succeeds.
+
+The browser signs in with an individual username and password. Its server-side
+session has a fixed 14-day lifetime. The session cookie uses the browser-enforced
+`__Host-` prefix and is Secure, HttpOnly, and SameSite Strict; changing a role,
+disabling a user, resetting a password, or
+using “force logout” revokes applicable sessions immediately. `admin` can manage
+users and every setting, `operator` can manage sources, reminders, source
+quality, and queue operations, and `viewer` is read-only. The final enabled
+administrator cannot be disabled or demoted.
+
+The API supports `GET /api/config`, `POST /api/source-bundles` (a source plus its
 notification rule in one revision), the individual `POST /api/sources` and
 `POST /api/rules` compatibility routes, and DELETE on the corresponding ID
 paths. POST bodies are validated against the same configuration parser as the
@@ -49,14 +75,12 @@ service. SQLite stores the authoritative immutable revision; the old JSON file
 is a one-time migration input, not a live export. Argus notices a desired
 revision change, exits with status 75, and systemd starts a fresh process that
 loads it. The UI may briefly show “waiting for Argus” until the new process
-reports the revision as applied. The listener stays loopback-only. For ordinary
-maintenance, keep using the SSH tunnel. To make digest links usable remotely,
-publish it only through a dedicated HTTPS virtual host (or an authenticated
-Cloudflare Access route) that reverse-proxies to `127.0.0.1:18080`; do not merge
-it into the ntfy location or open port 18080 in UFW. The edge must preserve the
-application bearer login, rate-limit login/API failures, set HSTS, and cap
-request bodies. Treat the admin Token as a password even when an upstream
-identity gate is present.
+reports the revision as applied. The listener stays loopback-only. Cookie-backed
+state changes require both a session-bound CSRF token and an exact same-origin
+request. Login attempts are limited at both the reverse proxy and application;
+the application tracks account/address and address-wide failures without storing
+raw addresses. The legacy bearer credential works only on a direct loopback
+request and the public reverse proxy removes incoming Authorization headers.
 
 The same API also provides `POST /api/validate`, `POST /api/test-source`,
 `GET /api/revisions`, `POST /api/revisions/<id>/rollback`,
@@ -79,8 +103,7 @@ after reviewing model behavior and false positives.
 
 The browser UI is compiled from `frontend/` with Node/Vite. Node and npm are
 not required on the production host: the running service serves the compiled
-files from `src/argus/admin_web/`. Keep the admin listener loopback-only
-and continue using the SSH tunnel above.
+files from `src/argus/admin_web/`. Keep the admin listener loopback-only.
 
 The reminders panel writes directly to SQLite and does not require a service
 restart. It supports a specific future date/time, a relative countdown, and a
@@ -91,8 +114,9 @@ to the configured `eos` ntfy topic. API routes are `GET/POST
 offline are sent after recovery; daily downtime is coalesced to one missed
 notification rather than replaying every elapsed day.
 
-Retrieve the one-time browser credential locally when needed; do not send it
-through chat or store it in the project:
+The emergency bearer credential is for local recovery only. Retrieve it only
+when performing a direct loopback API repair; do not send it through chat or
+store it in the project:
 
 ```bash
 sudo sed -n 's/^ARGUS_ADMIN_TOKEN=//p' /etc/argus/admin.env

@@ -35,11 +35,13 @@ event, rule, state, and delivery contracts.
 ## Management backend
 
 The optional `admin` command serves a React/Vite-built management UI and a JSON
-API. The production template binds it to `127.0.0.1:18080`; access it remotely
-with an SSH tunnel, for example `ssh -N -L 18080:127.0.0.1:18080 joker@host`.
-For remote digest links it can sit behind a dedicated HTTPS authenticated
-reverse proxy while the application listener remains loopback-only; port 18080
-must never be exposed directly. The UI is a static build: Node is used
+API. The production template binds it to `127.0.0.1:18080` and publishes it only
+through a dedicated TLS virtual host; port 18080 must never be exposed directly.
+Administrators sign in with an individual username and Argon2id-protected
+password. A revocable server-side session lasts at most 14 days; the browser
+holds only Secure, HttpOnly/SameSite session material and a session-bound CSRF
+token. Administrator, operator, and viewer roles are enforced by the backend.
+The UI is a static build: Node is used
 only during development/build and is never a production runtime dependency.
 Source and rule changes are validated and committed as versioned SQLite
 configuration snapshots. The engine detects a new revision within five seconds
@@ -86,7 +88,8 @@ the same condition reports recovery.
 
 ## Local development
 
-No third-party runtime dependency is required.
+Python runtime dependencies are declared in `pyproject.toml`; password hashing
+uses `argon2-cffi`.
 
 ```bash
 cd /home/joker/services/eyeofsauron

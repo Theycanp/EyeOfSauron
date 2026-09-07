@@ -76,7 +76,13 @@ second process manager or an in-process partial reload path.
 The management surface is split into a Python standard-library HTTP server and
 a static React/Vite client. React is compiled during development and the
 resulting HTML/CSS/JavaScript is served by the same loopback-only process, so
-the production host does not run Node or expose another port.
+the production host does not run Node or expose another application port. A
+dedicated TLS reverse proxy is the only public edge. Accounts use Argon2id
+password hashes and absolute 14-day server-side sessions; only token hashes are
+stored. `__Host-` Secure/SameSite cookies, session-bound double-submit CSRF tokens,
+same-origin checks, edge and application login throttles, and backend RBAC guard
+all state changes. Role changes, disablement, and password resets revoke every
+existing session. The legacy bearer credential is a loopback-only recovery path.
 
 ## Delivery semantics
 

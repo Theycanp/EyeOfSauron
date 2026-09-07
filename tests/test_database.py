@@ -105,7 +105,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual("policy", rows[0]["topic"])
 
     def test_prompt_versions_are_stored_and_only_one_is_active(self) -> None:
-        self.assertEqual(12, self.database.status()["database_schema"])
+        self.assertEqual(13, self.database.status()["database_schema"])
         self.assertEqual(1, len(self.database.list_prompts("triage")))
         self.database.save_prompt("triage", 2, "Return JSON only.", "test", NOW)
         self.assertEqual("Return JSON only.", self.database.get_prompt("triage")["system_text"])

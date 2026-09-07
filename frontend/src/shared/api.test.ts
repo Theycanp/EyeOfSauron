@@ -19,6 +19,23 @@ afterEach(() => {
 })
 
 describe('AdminApi', () => {
+  it('uses same-origin cookies and binds mutations to the CSRF cookie', async () => {
+    vi.spyOn(document, 'cookie', 'get').mockReturnValue('__Host-eos_csrf=csrf-value')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ user: {} }))
+    const api = new AdminApi()
+
+    await api.login('owner', 'password-value')
+    await api.createUser({
+      username: 'reader', display_name: 'Reader', password: 'reader-password-value', role: 'viewer',
+    })
+
+    const loginInit = fetchMock.mock.calls[0]?.[1]
+    expect(loginInit?.credentials).toBe('same-origin')
+    expect(new Headers(loginInit?.headers).has('Authorization')).toBe(false)
+    const mutationInit = fetchMock.mock.calls[1]?.[1]
+    expect(new Headers(mutationInit?.headers).get('X-CSRF-Token')).toBe('csrf-value')
+  })
+
   it('sends the current revision with every configuration mutation', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ revision: 8 }))
     const api = new AdminApi('secret')

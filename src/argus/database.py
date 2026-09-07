@@ -28,7 +28,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 def read_active_config(path: Path) -> dict[str, Any] | None:
@@ -963,6 +963,79 @@ class Database:
                 self.connection.rollback()
                 raise
             version = 12
+
+        if version < 13:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 13:
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS admin_users (
+                            id INTEGER PRIMARY KEY,
+                            username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                            display_name TEXT NOT NULL,
+                            password_hash TEXT NOT NULL,
+                            role TEXT NOT NULL CHECK (role IN ('admin', 'operator', 'viewer')),
+                            enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                            session_version INTEGER NOT NULL DEFAULT 1,
+                            created_at INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL,
+                            last_login_at INTEGER
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS admin_sessions (
+                            session_hash TEXT PRIMARY KEY,
+                            csrf_hash TEXT NOT NULL,
+                            user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+                            session_version INTEGER NOT NULL,
+                            created_at INTEGER NOT NULL,
+                            expires_at INTEGER NOT NULL,
+                            last_seen_at INTEGER NOT NULL,
+                            revoked_at INTEGER
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS admin_sessions_user_expiry_idx "
+                        "ON admin_sessions(user_id, expires_at)"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS admin_login_limits (
+                            subject_hash TEXT PRIMARY KEY,
+                            failures INTEGER NOT NULL CHECK (failures >= 0),
+                            window_started_at INTEGER NOT NULL,
+                            blocked_until INTEGER NOT NULL DEFAULT 0,
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS admin_auth_audit (
+                            id INTEGER PRIMARY KEY,
+                            user_id INTEGER REFERENCES admin_users(id) ON DELETE SET NULL,
+                            action TEXT NOT NULL,
+                            actor TEXT NOT NULL,
+                            details_json TEXT NOT NULL DEFAULT '{}',
+                            created_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS admin_auth_audit_time_idx "
+                        "ON admin_auth_audit(created_at DESC, id DESC)"
+                    )
+                    self.connection.execute("PRAGMA user_version=13")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 13
 
     def close(self) -> None:
         self.connection.close()
@@ -3165,6 +3238,17 @@ class Database:
                 self.connection.execute(
                     "DELETE FROM analysis_api_usage WHERE updated_at < ?", (audit_cutoff,)
                 )
+                self.connection.execute(
+                    "DELETE FROM admin_auth_audit WHERE created_at < ?", (audit_cutoff,)
+                )
+                self.connection.execute(
+                    "DELETE FROM admin_login_limits WHERE updated_at < ?", (audit_cutoff,)
+                )
+                self.connection.execute(
+                    "DELETE FROM admin_sessions WHERE expires_at < ? OR "
+                    "(revoked_at IS NOT NULL AND revoked_at < ?)",
+                    (audit_cutoff, audit_cutoff),
+                )
         return int(deleted_alerts), int(deleted_observations)
 
     def status(self) -> dict[str, Any]:
@@ -3249,3 +3333,249 @@ class Database:
             "runtime": engine,
             "sources": sources,
         }
+
+    @staticmethod
+    def _public_admin_user(row: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            key: row[key]
+            for key in (
+                "id", "username", "display_name", "role", "enabled",
+                "created_at", "updated_at", "last_login_at",
+            )
+        }
+
+    def get_admin_user_for_auth(self, username: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM admin_users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_admin_users(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT id, username, display_name, role, enabled, created_at, updated_at, "
+            "last_login_at, (SELECT COUNT(*) FROM admin_sessions AS s WHERE s.user_id = u.id "
+            "AND s.revoked_at IS NULL AND s.expires_at > ?) AS active_sessions "
+            "FROM admin_users AS u ORDER BY username COLLATE NOCASE",
+            (int(time.time()),),
+        )
+        return [dict(self._public_admin_user(dict(row)), active_sessions=int(row["active_sessions"])) for row in rows]
+
+    def create_admin_user(
+        self,
+        username: str,
+        display_name: str,
+        password_hash: str,
+        role: str,
+        actor: str,
+        now: int,
+    ) -> dict[str, Any]:
+        if role not in {"admin", "operator", "viewer"} or now < 0:
+            raise ValueError("admin user role or timestamp is invalid")
+        if not username or len(username) > 32 or not display_name.strip() or len(display_name) > 80:
+            raise ValueError("admin user identity is invalid")
+        if not password_hash.startswith("$argon2id$") or len(password_hash) > 512:
+            raise ValueError("admin user password hash is invalid")
+        try:
+            with self.unit_of_work():
+                cursor = self.connection.execute(
+                    "INSERT INTO admin_users(username, display_name, password_hash, role, enabled, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+                    (username, display_name.strip(), password_hash, role, now, now),
+                )
+                user_id = int(cursor.lastrowid)
+                self.connection.execute(
+                    "INSERT INTO admin_auth_audit(user_id, action, actor, details_json, created_at) "
+                    "VALUES (?, 'user_created', ?, ?, ?)",
+                    (user_id, actor[:128], json.dumps({"role": role}, sort_keys=True), now),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("username already exists") from exc
+        row = self.connection.execute("SELECT * FROM admin_users WHERE id = ?", (user_id,)).fetchone()
+        assert row is not None
+        return self._public_admin_user(dict(row))
+
+    def update_admin_user(
+        self,
+        user_id: int,
+        display_name: str,
+        role: str,
+        enabled: bool,
+        actor: str,
+        now: int,
+    ) -> dict[str, Any]:
+        if user_id < 1 or role not in {"admin", "operator", "viewer"}:
+            raise ValueError("admin user update is invalid")
+        name = display_name.strip()
+        if not name or len(name) > 80:
+            raise ValueError("admin user display name is invalid")
+        with self.unit_of_work():
+            current = self.connection.execute(
+                "SELECT role, enabled FROM admin_users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError("admin user not found")
+            removes_admin = current["role"] == "admin" and current["enabled"] and (
+                role != "admin" or not enabled
+            )
+            if removes_admin:
+                remaining = int(self.connection.execute(
+                    "SELECT COUNT(*) FROM admin_users WHERE role = 'admin' AND enabled = 1 AND id != ?",
+                    (user_id,),
+                ).fetchone()[0])
+                if remaining == 0:
+                    raise ValueError("cannot disable or demote the final enabled administrator")
+            self.connection.execute(
+                "UPDATE admin_users SET display_name = ?, role = ?, enabled = ?, "
+                "session_version = session_version + 1, updated_at = ? WHERE id = ?",
+                (name, role, int(enabled), now, user_id),
+            )
+            self.connection.execute(
+                "UPDATE admin_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                (now, user_id),
+            )
+            self.connection.execute(
+                "INSERT INTO admin_auth_audit(user_id, action, actor, details_json, created_at) "
+                "VALUES (?, 'user_updated', ?, ?, ?)",
+                (user_id, actor[:128], json.dumps({"role": role, "enabled": bool(enabled)}, sort_keys=True), now),
+            )
+        row = self.connection.execute("SELECT * FROM admin_users WHERE id = ?", (user_id,)).fetchone()
+        assert row is not None
+        return self._public_admin_user(dict(row))
+
+    def set_admin_user_password(
+        self, user_id: int, password_hash: str, actor: str, now: int
+    ) -> bool:
+        if user_id < 1 or not password_hash.startswith("$argon2id$"):
+            raise ValueError("admin password update is invalid")
+        with self.unit_of_work():
+            updated = self.connection.execute(
+                "UPDATE admin_users SET password_hash = ?, session_version = session_version + 1, "
+                "updated_at = ? WHERE id = ?",
+                (password_hash, now, user_id),
+            )
+            if updated.rowcount != 1:
+                return False
+            self.connection.execute(
+                "UPDATE admin_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                (now, user_id),
+            )
+            self.connection.execute(
+                "INSERT INTO admin_auth_audit(user_id, action, actor, created_at) "
+                "VALUES (?, 'password_changed', ?, ?)",
+                (user_id, actor[:128], now),
+            )
+        return True
+
+    def revoke_admin_user_sessions(self, user_id: int, actor: str, now: int) -> int:
+        with self.unit_of_work():
+            if self.connection.execute(
+                "SELECT 1 FROM admin_users WHERE id = ?", (user_id,)
+            ).fetchone() is None:
+                raise KeyError("admin user not found")
+            updated = self.connection.execute(
+                "UPDATE admin_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                (now, user_id),
+            )
+            self.connection.execute(
+                "INSERT INTO admin_auth_audit(user_id, action, actor, created_at) "
+                "VALUES (?, 'sessions_revoked', ?, ?)",
+                (user_id, actor[:128], now),
+            )
+        return int(updated.rowcount)
+
+    def admin_login_blocked_until(self, subject_hash: str, now: int) -> int:
+        row = self.connection.execute(
+            "SELECT window_started_at, blocked_until FROM admin_login_limits WHERE subject_hash = ?",
+            (subject_hash,),
+        ).fetchone()
+        if row is None or now - int(row["window_started_at"]) > 900:
+            return 0
+        return int(row["blocked_until"])
+
+    def record_admin_login_attempt(self, subject_hash: str, success: bool, now: int) -> int:
+        if len(subject_hash) != 64 or now < 0:
+            raise ValueError("admin login attempt is invalid")
+        with self.unit_of_work():
+            if success:
+                self.connection.execute(
+                    "DELETE FROM admin_login_limits WHERE subject_hash = ?", (subject_hash,)
+                )
+                return 0
+            row = self.connection.execute(
+                "SELECT failures, window_started_at FROM admin_login_limits WHERE subject_hash = ?",
+                (subject_hash,),
+            ).fetchone()
+            failures = int(row["failures"]) + 1 if row is not None and now - int(row["window_started_at"]) <= 900 else 1
+            started = int(row["window_started_at"]) if row is not None and now - int(row["window_started_at"]) <= 900 else now
+            blocked = now + min(3600, 300 * (2 ** max(0, failures - 5))) if failures >= 5 else 0
+            self.connection.execute(
+                "INSERT INTO admin_login_limits(subject_hash, failures, window_started_at, blocked_until, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(subject_hash) DO UPDATE SET failures = excluded.failures, "
+                "window_started_at = excluded.window_started_at, blocked_until = excluded.blocked_until, updated_at = excluded.updated_at",
+                (subject_hash, failures, started, blocked, now),
+            )
+        return blocked
+
+    def create_admin_session(
+        self, session_hash: str, csrf_hash: str, user_id: int, now: int, expires_at: int
+    ) -> None:
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT session_version FROM admin_users WHERE id = ? AND enabled = 1", (user_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError("admin user is unavailable")
+            self.connection.execute(
+                "INSERT INTO admin_sessions(session_hash, csrf_hash, user_id, session_version, "
+                "created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_hash, csrf_hash, user_id, int(row["session_version"]), now, expires_at, now),
+            )
+            self.connection.execute(
+                "UPDATE admin_users SET last_login_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, user_id),
+            )
+            self.connection.execute(
+                "INSERT INTO admin_auth_audit(user_id, action, actor, created_at) "
+                "VALUES (?, 'login', ?, ?)", (user_id, "self", now),
+            )
+
+    def resolve_admin_session(self, session_hash: str, now: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT s.session_hash, s.csrf_hash, s.user_id, s.last_seen_at, u.username, "
+            "u.display_name, u.role FROM admin_sessions AS s JOIN admin_users AS u ON u.id = s.user_id "
+            "WHERE s.session_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? "
+            "AND u.enabled = 1 AND s.session_version = u.session_version",
+            (session_hash, now),
+        ).fetchone()
+        if row is None:
+            return None
+        if now - int(row["last_seen_at"]) >= 300:
+            with self.connection:
+                self.connection.execute(
+                    "UPDATE admin_sessions SET last_seen_at = ? WHERE session_hash = ?",
+                    (now, session_hash),
+                )
+        return dict(row)
+
+    def revoke_admin_session(self, session_hash: str, now: int) -> bool:
+        with self.connection:
+            updated = self.connection.execute(
+                "UPDATE admin_sessions SET revoked_at = ? WHERE session_hash = ? AND revoked_at IS NULL",
+                (now, session_hash),
+            )
+        return updated.rowcount == 1
+
+    def list_admin_auth_audit(self, limit: int = 100) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 500:
+            raise ValueError("admin auth audit limit is out of range")
+        result = []
+        for row in self.connection.execute(
+            "SELECT a.id, a.user_id, u.username, a.action, a.actor, a.details_json, "
+            "a.created_at FROM admin_auth_audit AS a LEFT JOIN admin_users AS u "
+            "ON u.id = a.user_id ORDER BY a.created_at DESC, a.id DESC LIMIT ?",
+            (limit,),
+        ):
+            item = dict(row)
+            item["details"] = json.loads(item.pop("details_json"))
+            result.append(item)
+        return result

@@ -1,17 +1,35 @@
 # Changelog
 
-## 0.9.1
+All notable changes to EyeOfSauron are documented here. The project follows
+Semantic Versioning and the Keep a Changelog structure.
+
+## [Unreleased]
+
+## [0.10.0] - 2026-09-07
+
+### Added
+
+- Add Argon2id username/password accounts, 14-day server-side Cookie sessions,
+  strict CSRF/origin validation, login throttling, and security audit history.
+- Add administrator, operator, and viewer roles with backend-enforced permissions.
+- Add responsive account management for user creation, role and status changes,
+  password resets, active-session visibility, and immediate session revocation.
+- Add a hardened HTTPS reverse-proxy template for the public management origin.
+- Add a guarded Certbot deploy hook that validates and reloads Nginx after renewal.
+
+### Changed
+
+- Keep the application listener on loopback and restrict the legacy emergency
+  bearer credential to direct loopback requests only.
+- Upgrade the SQLite schema to 13 for account, session, throttle, and audit state.
+
+## [0.9.1] - 2026-09-07
 
 - Include immediate observations in daily digests while retaining their real-time notification path.
 - Add long-horizon, decayed source-quality scoring with conservative eligibility thresholds, manual overrides, feedback, and audit history.
 - Add the authenticated admin quality-management page and API; quality weights affect digest ranking only.
 - Upgrade the SQLite schema to 12 with an isolated persistence boundary for quality data.
 - Rate-limit automatic reputation changes by elapsed time rather than page refresh frequency.
-
-All notable changes to EyeOfSauron are documented here. The project follows
-Semantic Versioning and the Keep a Changelog structure.
-
-## [Unreleased]
 
 ## [0.8.0] - 2026-09-06
 
@@ -84,7 +102,9 @@ Semantic Versioning and the Keep a Changelog structure.
 - Initial Bloomberg RSS monitoring, weighted alert rules, SQLite outbox, ntfy
   delivery, failure/recovery notifications, and baseline suppression.
 
-[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.9.1...v0.10.0
+[0.9.1]: https://github.com/Theycanp/EyeOfSauron/compare/v0.8.0...v0.9.1
 [0.8.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.3.0...v0.7.0
 [0.6.0]: https://github.com/Theycanp/EyeOfSauron/commits/1e12855

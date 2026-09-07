@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AdminApi, ApiError } from '../shared/api'
 import type { AdminResourceName, AdminResources, ConfigResponse, IncidentResponse, NewsCatalogResponse, PromptResponse, ReminderResponse, ResourceState, RevisionResponse, SourceQualityResponse } from '../shared/types'
 
@@ -32,15 +32,14 @@ function mergeResource<T>(current: ResourceState<T>, result: ResourceResult<T>):
   return result.ok ? { data: result.data, error: null, updatedAt: result.updatedAt, loading: false } : { ...current, error: result.error, loading: false }
 }
 
-export function useAdminData(token: string, onUnauthorized: () => void) {
-  const api = useMemo(() => new AdminApi(token), [token])
+export function useAdminData(api: AdminApi, active: boolean, onUnauthorized: () => void) {
   const [resources, setResources] = useState<AdminResources>(newResources)
   const [refreshing, setRefreshing] = useState(false)
   const refreshSequence = useRef(0)
 
 
   const refresh = useCallback(async (quiet = false): Promise<boolean> => {
-    if (!token) return false
+    if (!active) return false
     const sequence = ++refreshSequence.current
     if (!quiet) setRefreshing(true)
     setResources((current) => ({
@@ -80,10 +79,10 @@ export function useAdminData(token: string, onUnauthorized: () => void) {
     }))
     setRefreshing(false)
     return results.some((result) => result.ok)
-  }, [api, onUnauthorized, token])
+  }, [active, api, onUnauthorized])
 
   useEffect(() => {
-    if (!token) return
+    if (!active) return
     const initial = window.setTimeout(() => { void refresh(true) }, 0)
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refresh(true)
@@ -98,7 +97,7 @@ export function useAdminData(token: string, onUnauthorized: () => void) {
       window.clearInterval(interval)
       document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [refresh, token])
+  }, [active, refresh])
 
   const reset = useCallback(() => {
     refreshSequence.current += 1

@@ -5,6 +5,42 @@ export type IncidentStatus = 'open' | 'recovered' | 'recorded'
 export type Tone = 'positive' | 'warning' | 'negative' | 'info' | 'neutral'
 export type AdminJobStatus = 'queued' | 'running' | 'succeeded' | 'completed' | 'failed' | 'cancelled' | 'expired'
 export type OutboxStatus = 'pending' | 'sending' | 'delivered' | 'dead' | 'cancelled'
+export type AdminRole = 'admin' | 'operator' | 'viewer'
+
+export interface AdminIdentity extends JsonRecord {
+  id: number | null
+  username: string
+  display_name: string
+  role: AdminRole
+  permissions: string[]
+  emergency?: boolean
+}
+
+export interface AdminUser extends JsonRecord {
+  id: number
+  username: string
+  display_name: string
+  role: AdminRole
+  enabled: boolean | number
+  created_at: number
+  updated_at: number
+  last_login_at?: number | null
+  active_sessions?: number
+}
+
+export interface AdminAuthAudit extends JsonRecord {
+  id: number
+  user_id?: number | null
+  username?: string | null
+  action: string
+  actor: string
+  details: JsonRecord
+  created_at: number
+}
+
+export interface AuthResponse { user: AdminIdentity }
+export interface AdminUserResponse { users?: AdminUser[] }
+export interface AdminAuthAuditResponse { audit?: AdminAuthAudit[] }
 
 export interface ManagedSource extends JsonRecord {
   id: string

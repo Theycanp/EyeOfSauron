@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from . import __version__
+from .auth import AdminAuth, AuthContext, AuthError, LoginBlockedError
 from .config import AdminConfig, ConfigError, _parse_analysis, _parse_digest, _parse_rule, _parse_source
 from .digest import DigestDocument
 from .news_catalog import NEWS_SOURCE_CATALOG
@@ -597,6 +598,7 @@ def make_handler(
     provider_registry: ProviderRegistry | None = None,
 ):
     registry = provider_registry or store.provider_registry
+    authenticator = AdminAuth(database, auth_token)
     class Handler(BaseHTTPRequestHandler):
         server_version = f"ArgusAdmin/{__version__}"
 
@@ -614,14 +616,60 @@ def make_handler(
                 sanitize_error(format % args),
             )
 
-        def _authorized(self) -> bool:
-            if not auth_token:
-                return True
-            supplied = self.headers.get("Authorization", "")
-            return secrets.compare_digest(supplied, f"Bearer {auth_token}")
+        def _authenticate(self) -> AuthContext | None:
+            direct_loopback = (
+                self.client_address[0] in {"127.0.0.1", "::1"}
+                and not self.headers.get("X-Real-IP")
+            )
+            context = authenticator.authenticate(
+                self.headers,
+                now=int(time.time()),
+                allow_emergency=direct_loopback,
+            )
+            self.auth_context = context
+            return context
+
+        def _authorized(self, permission: str = "read") -> bool:
+            context = getattr(self, "auth_context", None) or self._authenticate()
+            return bool(context and context.allows(permission))
 
         def _actor(self) -> str:
-            return "web-admin"
+            context = getattr(self, "auth_context", None)
+            return context.username if context is not None else "anonymous"
+
+        def _same_origin(self) -> bool:
+            origin = self.headers.get("Origin", "")
+            host = self.headers.get("Host", "").strip().lower()
+            if not origin or not host:
+                return False
+            parsed = urllib.parse.urlsplit(origin)
+            forwarded = self.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip()
+            scheme = forwarded if forwarded in {"http", "https"} else "http"
+            return bool(
+                parsed.scheme == scheme
+                and parsed.netloc.lower() == host
+                and not parsed.username
+                and not parsed.password
+                and parsed.path in {"", "/"}
+                and not parsed.query
+                and not parsed.fragment
+            )
+
+        @staticmethod
+        def _write_permission(path: str) -> str:
+            if path == "/api/auth/logout":
+                return "read"
+            if path.startswith("/api/users"):
+                return "users:manage"
+            if path.startswith("/api/reminders"):
+                return "reminders:write"
+            if path.startswith("/api/source-quality"):
+                return "quality:write"
+            if path.startswith(("/api/outbox", "/api/jobs")):
+                return "operations:write"
+            if path.startswith(("/api/sources", "/api/source-bundles", "/api/rules", "/api/test-source")):
+                return "sources:write"
+            return "settings:write"
 
         def _body(self) -> Mapping[str, Any]:
             length = int(self.headers.get("Content-Length", "0"))
@@ -641,7 +689,9 @@ def make_handler(
                 raise AdminError("If-Match must contain a configuration revision")
             return int(normalized)
 
-        def _json(self, status: int, payload: Any) -> None:
+        def _json(
+            self, status: int, payload: Any, *, headers: tuple[tuple[str, str], ...] = ()
+        ) -> None:
             encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -649,6 +699,8 @@ def make_handler(
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Request-ID", self.request_id)
+            for name, value in headers:
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(encoded)
 
@@ -719,12 +771,24 @@ def make_handler(
             if static is not None:
                 self._static(static)
                 return
-            if not self._authorized():
-                self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized", "code": "unauthorized"})
-                return
             request = urllib.parse.urlsplit(self.path)
             path = request.path
+            required = "users:manage" if path.startswith("/api/users") else "read"
+            if not self._authorized(required):
+                status = HTTPStatus.FORBIDDEN if getattr(self, "auth_context", None) else HTTPStatus.UNAUTHORIZED
+                self._json(status, {"error": "forbidden", "code": "forbidden"})
+                return
             query = urllib.parse.parse_qs(request.query)
+            if path == "/api/auth/session":
+                assert self.auth_context is not None
+                self._json(HTTPStatus.OK, {"user": self.auth_context.public()})
+                return
+            if path == "/api/users":
+                self._json(HTTPStatus.OK, {"users": database.list_admin_users()})
+                return
+            if path == "/api/users/audit":
+                self._json(HTTPStatus.OK, {"audit": database.list_admin_auth_audit()})
+                return
             if path == "/api/config":
                 status = database.status()
                 for name in ("engine", "runtime"):
@@ -903,14 +967,112 @@ def make_handler(
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found", "code": "not_found"})
 
         def do_POST(self) -> None:  # noqa: N802
-            if not self._authorized():
-                self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized", "code": "unauthorized"})
-                return
             path = urllib.parse.urlsplit(self.path).path
             try:
                 data = self._body()
+                if path == "/api/auth/login":
+                    if not self._same_origin():
+                        self._json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": "origin validation failed", "code": "origin_failed"},
+                        )
+                        return
+                    username = str(data.get("username", ""))
+                    password = str(data.get("password", ""))
+                    remote = self.headers.get("X-Real-IP", self.client_address[0])[:128]
+                    try:
+                        context, session_token, csrf_token = authenticator.login(
+                            username, password, remote, now=int(time.time())
+                        )
+                    except LoginBlockedError:
+                        raise
+                    except AuthError:
+                        self._json(
+                            HTTPStatus.UNAUTHORIZED,
+                            {"error": "invalid username or password", "code": "login_failed"},
+                        )
+                        return
+                    cookies = tuple(
+                        ("Set-Cookie", value)
+                        for value in authenticator.cookie_headers(session_token, csrf_token)
+                    )
+                    self.auth_context = context
+                    self._json(HTTPStatus.OK, {"user": context.public()}, headers=cookies)
+                    return
+                if not self._authorized(self._write_permission(path)):
+                    status = HTTPStatus.FORBIDDEN if getattr(self, "auth_context", None) else HTTPStatus.UNAUTHORIZED
+                    self._json(status, {"error": "forbidden", "code": "forbidden"})
+                    return
+                assert self.auth_context is not None
+                if not self.auth_context.emergency and not self._same_origin():
+                    self._json(
+                        HTTPStatus.FORBIDDEN,
+                        {"error": "origin validation failed", "code": "origin_failed"},
+                    )
+                    return
+                if not authenticator.validate_csrf(self.auth_context, self.headers):
+                    self._json(HTTPStatus.FORBIDDEN, {"error": "CSRF validation failed", "code": "csrf_failed"})
+                    return
                 expected_revision = self._expected_revision()
                 actor = self._actor()
+                if path == "/api/auth/logout":
+                    if self.auth_context.session_hash:
+                        database.revoke_admin_session(self.auth_context.session_hash, int(time.time()))
+                    cookies = tuple(
+                        ("Set-Cookie", value) for value in authenticator.clear_cookie_headers()
+                    )
+                    self._json(HTTPStatus.OK, {"logged_out": True}, headers=cookies)
+                    return
+                if path == "/api/users":
+                    if not all(isinstance(data.get(key), str) for key in (
+                        "username", "display_name", "password", "role"
+                    )):
+                        raise AdminError("user identity, password, and role must be strings")
+                    username = authenticator.validate_username(data["username"])
+                    password_hash = authenticator.hash_password(data["password"])
+                    role = data["role"]
+                    saved = database.create_admin_user(
+                        username, data["display_name"], password_hash,
+                        role, actor, int(time.time()),
+                    )
+                    self._json(HTTPStatus.CREATED, {"user": saved})
+                    return
+                if path.startswith("/api/users/"):
+                    parts = path.strip("/").split("/")
+                    if len(parts) not in {3, 4}:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "not found", "code": "not_found"})
+                        return
+                    user_id = int(parts[2])
+                    if len(parts) == 4 and parts[3] == "password":
+                        if not isinstance(data.get("password"), str):
+                            raise AdminError("password must be a string")
+                        changed = database.set_admin_user_password(
+                            user_id, authenticator.hash_password(data["password"]),
+                            actor, int(time.time()),
+                        )
+                        if not changed:
+                            raise AdminError("admin user not found")
+                        self._json(HTTPStatus.OK, {"changed": True})
+                        return
+                    if len(parts) == 4 and parts[3] == "revoke-sessions":
+                        count = database.revoke_admin_user_sessions(user_id, actor, int(time.time()))
+                        self._json(HTTPStatus.OK, {"revoked": count})
+                        return
+                    if len(parts) != 3:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "not found", "code": "not_found"})
+                        return
+                    if (
+                        not isinstance(data.get("display_name"), str)
+                        or not isinstance(data.get("role"), str)
+                        or not isinstance(data.get("enabled"), bool)
+                    ):
+                        raise AdminError("display_name and role must be strings; enabled must be boolean")
+                    saved = database.update_admin_user(
+                        user_id, data["display_name"], data["role"], data["enabled"],
+                        actor, int(time.time()),
+                    )
+                    self._json(HTTPStatus.OK, {"user": saved})
+                    return
                 if path == "/api/reminders":
                     now = int(time.time())
                     reminder = parse_reminder(data, now)
@@ -1090,7 +1252,9 @@ def make_handler(
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found", "code": "not_found"})
             except RevisionConflictError as exc:
                 self._json(HTTPStatus.CONFLICT, {"error": str(exc), "code": "revision_conflict"})
-            except (AdminError, ConfigError, ReminderError, KeyError, ValueError, TypeError) as exc:
+            except LoginBlockedError as exc:
+                self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(exc), "code": "login_blocked"})
+            except (AdminError, AuthError, ConfigError, ReminderError, KeyError, ValueError, TypeError) as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), "code": "invalid_request"})
             except (OSError, RuntimeError) as exc:
                 LOGGER.error("admin_request_failed request_id=%s error=%s", self.request_id, sanitize_error(exc))
@@ -1100,10 +1264,21 @@ def make_handler(
                 })
 
         def do_DELETE(self) -> None:  # noqa: N802
-            if not self._authorized():
-                self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized", "code": "unauthorized"})
-                return
             path = urllib.parse.urlsplit(self.path).path
+            if not self._authorized(self._write_permission(path)):
+                status = HTTPStatus.FORBIDDEN if getattr(self, "auth_context", None) else HTTPStatus.UNAUTHORIZED
+                self._json(status, {"error": "forbidden", "code": "forbidden"})
+                return
+            assert self.auth_context is not None
+            if not self.auth_context.emergency and not self._same_origin():
+                self._json(
+                    HTTPStatus.FORBIDDEN,
+                    {"error": "origin validation failed", "code": "origin_failed"},
+                )
+                return
+            if not authenticator.validate_csrf(self.auth_context, self.headers):
+                self._json(HTTPStatus.FORBIDDEN, {"error": "CSRF validation failed", "code": "csrf_failed"})
+                return
             try:
                 expected_revision = self._expected_revision()
                 if path.startswith("/api/outbox/"):

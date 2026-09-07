@@ -68,7 +68,7 @@ jobs:
         run: |
           smoke_env="$RUNNER_TEMP/eos-wheel-smoke"
           python -m venv "$smoke_env"
-          "$smoke_env/bin/python" -m pip install --no-deps dist/*.whl
+          "$smoke_env/bin/python" -m pip install dist/*.whl
           "$smoke_env/bin/argus" --help >/dev/null
           "$smoke_env/bin/argus-backup" --help >/dev/null
           echo "SMOKE_PYTHON=$smoke_env/bin/python" >>"$GITHUB_ENV"
