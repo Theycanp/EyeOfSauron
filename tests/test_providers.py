@@ -127,6 +127,12 @@ class NewsCatalogTests(unittest.TestCase):
             "federal_reserve",
             "sec",
             "ecb",
+            "bank_of_japan",
+            "japan_meteorological_agency",
+            "china_ndrc",
+            "world_health_organization",
+            "nasa",
+            "usgs_earthquakes",
         ):
             self.assertIsNotNone(NEWS_SOURCE_CATALOG.get(entry_id))
         self.assertEqual((), NEWS_SOURCE_CATALOG.require("reuters").feeds)
@@ -135,6 +141,19 @@ class NewsCatalogTests(unittest.TestCase):
             IntegrationMode.LICENSED_PROVIDER,
             NEWS_SOURCE_CATALOG.require("reuters").integration_mode,
         )
+        self.assertEqual("JP", NEWS_SOURCE_CATALOG.require("bank_of_japan").region)
+        self.assertEqual("CN", NEWS_SOURCE_CATALOG.require("china_ndrc").region)
+        self.assertEqual("primary", NEWS_SOURCE_CATALOG.require("world_health_organization").source_tier)
+
+    def test_catalog_template_carries_information_policy(self) -> None:
+        source = NEWS_SOURCE_CATALOG.source_template(
+            "bank_of_japan", "whats_new", "boj_updates"
+        )
+        parsed = parse_source_config(source)
+        self.assertEqual("JP", parsed.region)
+        self.assertEqual("primary", parsed.source_tier)
+        self.assertEqual(4, parsed.default_importance)
+        self.assertEqual("policy", parsed.settings["topic"])
 
     def test_verified_template_requires_confirmation_only_when_enabling(self) -> None:
         disabled = NEWS_SOURCE_CATALOG.source_template(

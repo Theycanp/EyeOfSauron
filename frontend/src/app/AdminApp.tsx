@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BellRing, CircleAlert, Inbox, LayoutDashboard, LockKeyhole, LogOut, Menu, Moon, Radar, RefreshCw, Settings2, ShieldCheck, Sun, X } from 'lucide-react'
+import { BellRing, CircleAlert, FileText, Gauge, Inbox, LayoutDashboard, LockKeyhole, LogOut, Menu, Moon, Radar, RefreshCw, Settings2, ShieldCheck, Sun, UserRoundCog, X } from 'lucide-react'
 import { AdminApi, ApiError } from '../shared/api'
-import type { AdminResourceName, ConfigRevision, ManagedSource, NewsCatalogEntry, NewsCatalogFeed, OutboxAlert, Reminder, SourceKind } from '../shared/types'
+import type { AdminIdentity, AdminResourceName, AnalysisConfig, ConfigRevision, DigestConfig, ManagedSource, NewsCatalogEntry, NewsCatalogFeed, OutboxAlert, Reminder, SourceKind, SourceQualityProfile } from '../shared/types'
 import { deriveHealth, formatDate } from '../shared/utils'
 import { Brand, EyeMark } from '../shared/ui/Brand'
 import { ConfirmDialog, type Confirmation } from '../shared/ui/ConfirmDialog'
@@ -12,14 +12,20 @@ import { emptyReminderDraft, reminderDraft, reminderPayload, type ReminderDraft 
 import { catalogSourceDraft, createSourceDraft, editSourceDraft, ruleForSource, serializeSimpleRule, serializeSource, type SourceDraft } from '../features/sources/providers'
 import { SourceDialog, SourcesPage } from '../features/sources/Sources'
 import { EventsPage } from '../features/events/EventsPage'
+import { DigestsPage } from '../features/digests/DigestsPage'
 import { OutboxPanel } from '../features/settings/OutboxPanel'
 import { SettingsPage } from '../features/settings/SettingsPage'
+import { SourceQualityPage } from '../features/source-quality/SourceQualityPage'
+import { UsersPage } from '../features/users/UsersPage'
 
 const pages = [
   { id: 'overview', label: '概览', subtitle: '重要的事情，一眼就能看到', icon: LayoutDashboard },
   { id: 'reminders', label: '提醒', subtitle: '安排未来要发送的消息', icon: BellRing },
   { id: 'sources', label: '监测来源', subtitle: '决定 EyeOfSauron 要观察什么', icon: Radar },
   { id: 'events', label: '事件', subtitle: '异常、恢复和重要动态', icon: Inbox },
+  { id: 'digests', label: '日报', subtitle: '阅读每日汇总的重要信息', icon: FileText },
+  { id: 'source-quality', label: '信源质量', subtitle: '长期校准来源可信度', icon: Gauge },
+  { id: 'users', label: '用户与权限', subtitle: '管理后台访问和登录会话', icon: UserRoundCog },
   { id: 'settings', label: '设置', subtitle: '通知渠道、运行事实和高级选项', icon: Settings2 },
 ] as const
 
@@ -27,11 +33,15 @@ type PageId = typeof pages[number]['id']
 type Toast = { id: number; text: string; tone: 'success' | 'error' }
 
 export default function AdminApp() {
-  const [auth, setAuth] = useState(() => sessionStorage.getItem('eosAdminToken') || '')
-  const [loginToken, setLoginToken] = useState('')
+  const api = useMemo(() => new AdminApi(), [])
+  const [identity, setIdentity] = useState<AdminIdentity | null>(null)
+  const [authChecking, setAuthChecking] = useState(true)
+  const [loginUsername, setLoginUsername] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
   const [loginError, setLoginError] = useState('')
-  const [loginBusy, setLoginBusy] = useState(Boolean(auth))
+  const [loginBusy, setLoginBusy] = useState(false)
   const [page, setPage] = useState<PageId>(() => {
+    if (window.location.pathname.startsWith('/digests')) return 'digests'
     const value = window.location.hash.replace('#/', '')
     return pages.some((item) => item.id === value) ? value as PageId : 'overview'
   })
@@ -63,12 +73,19 @@ export default function AdminApp() {
   const sourceDraftRevision = useRef(-1)
   const outboxSequence = useRef(0)
 
-  const logout = useCallback(() => {
-    sessionStorage.removeItem('eosAdminToken')
-    setAuth('')
+  const clearSession = useCallback(() => {
+    setIdentity(null)
     setLoginBusy(false)
   }, [])
-  const { api, resources, refresh, refreshing, reset, lastUpdatedAt, hasAnyData } = useAdminData(auth, logout)
+  const { resources, refresh, refreshing, reset, lastUpdatedAt, hasAnyData } = useAdminData(api, Boolean(identity), clearSession)
+
+  useEffect(() => {
+    api.session().then((response) => setIdentity(response.user)).catch(() => setIdentity(null)).finally(() => setAuthChecking(false))
+  }, [api])
+
+  const logout = useCallback(() => {
+    void api.logout().catch(() => undefined).finally(() => { reset(); clearSession() })
+  }, [api, clearSession, reset])
 
   const notify = useCallback((text: string, tone: Toast['tone'] = 'success') => setToast({ id: Date.now(), text, tone }), [])
 
@@ -109,17 +126,20 @@ export default function AdminApp() {
   const revisions = resources.revisions.data?.revisions || []
   const incidents = resources.incidents.data?.incidents || []
   const newsCatalog = resources.newsCatalog.data?.sources || []
+  const prompts = resources.prompts.data?.prompts || []
+  const sourceQuality = resources.sourceQuality.data?.profiles || []
   const sourceStates = status.sources || []
   const health = useMemo(() => deriveHealth(config), [config])
   const openIncidents = Number(status.incidents?.open || 0)
   const pending = Number(status.outbox?.pending || 0) + Number(status.outbox?.sending || 0)
   const currentPage = pages.find((item) => item.id === page) || pages[0]
-  const resourceNames: AdminResourceName[] = ['config', 'reminders', 'revisions', 'incidents', 'newsCatalog']
+  const resourceNames: AdminResourceName[] = ['config', 'reminders', 'revisions', 'incidents', 'newsCatalog', 'prompts', 'sourceQuality']
   const partialErrors = resourceNames.flatMap((name) => resources[name].error ? [`${name}: ${resources[name].error}`] : [])
   const expectedRevision = Number.isInteger(Number(config?.revision?.revision)) ? Number(config?.revision?.revision) : -1
   const effectivePendingRevision = pendingRevision && health.appliedRevision !== null && health.appliedRevision >= pendingRevision ? null : pendingRevision
   const restartRequired = Boolean(effectivePendingRevision || health.configPending)
-  const authenticated = Boolean(auth && config)
+  const authenticated = Boolean(identity && config)
+  const can = (permission: string) => Boolean(identity?.permissions.includes(permission))
 
   const setAdvancedJson = (value: string) => {
     if (advancedDraftRevision.current === null || !value) advancedDraftRevision.current = expectedRevision
@@ -149,15 +169,14 @@ export default function AdminApp() {
   }
 
   const login = async () => {
-    const candidate = loginToken.trim()
-    if (!candidate) return
+    const username = loginUsername.trim()
+    if (!username || !loginPassword) return
     setLoginBusy(true)
     setLoginError('')
     try {
-      await new AdminApi(candidate).config()
-      sessionStorage.setItem('eosAdminToken', candidate)
-      setAuth(candidate)
-      setLoginToken('')
+      const response = await api.login(username, loginPassword)
+      setIdentity(response.user)
+      setLoginPassword('')
     } catch (error) {
       setLoginError(error instanceof Error ? error.message : '无法登录')
       setLoginBusy(false)
@@ -406,20 +425,74 @@ export default function AdminApp() {
     } catch (error) { await reportMutationError(error, '高级 JSON 无效') } finally { setBusy(false) }
   }
 
-  if (!authenticated) return <Login token={loginToken} setToken={setLoginToken} login={login} loading={loginBusy} error={loginError || resources.config.error || ''} />
+  const saveAnalysis = async (analysis: AnalysisConfig) => {
+    setBusy(true)
+    try {
+      const response = await api.configMutate('/api/analysis', 'POST', expectedRevision, analysis)
+      markRestart(response.revision)
+      await refresh(true)
+      notify('分析策略已保存；等待 Argus 应用')
+    } catch (error) { await reportMutationError(error, '无法保存分析策略') } finally { setBusy(false) }
+  }
+
+  const savePrompt = async (prompt: { prompt_id: string; version: number; system_text: string }) => {
+    setBusy(true)
+    try {
+      await api.mutate('/api/prompts', 'POST', prompt)
+      await refresh(true)
+      notify(`Prompt ${prompt.prompt_id}@${prompt.version} 已保存`)
+    } catch (error) { await reportMutationError(error, '无法保存 Prompt') } finally { setBusy(false) }
+  }
+
+  const saveDigest = async (digest: DigestConfig) => {
+    setBusy(true)
+    try {
+      const response = await api.configMutate('/api/digest-config', 'POST', expectedRevision, digest)
+      markRestart(response.revision)
+      await refresh(true)
+      notify('日报配置已保存；等待 Argus 应用')
+    } catch (error) { await reportMutationError(error, '无法保存日报配置') } finally { setBusy(false) }
+  }
+
+  const submitQualityFeedback = async (profile: SourceQualityProfile, signal: -1 | 0 | 1, reason: string) => {
+    setBusy(true)
+    try { await api.sourceQualityFeedback(profile.source_id, { signal, reason }); await refresh(true); notify(signal > 0 ? '已记录正反馈' : '已记录负反馈') }
+    catch (error) { await reportMutationError(error, '无法记录信源反馈') }
+    finally { setBusy(false) }
+  }
+
+  const setQualityOverride = async (profile: SourceQualityProfile, weight: number, reason: string) => {
+    setBusy(true)
+    try { await api.setSourceQualityOverride(profile.source_id, { weight, reason }); await refresh(true); notify('人工权重已保存') }
+    catch (error) { await reportMutationError(error, '无法保存人工权重') }
+    finally { setBusy(false) }
+  }
+
+  const clearQualityOverride = async (profile: SourceQualityProfile) => {
+    setBusy(true)
+    try { await api.clearSourceQualityOverride(profile.source_id); await refresh(true); notify('已恢复自动权重') }
+    catch (error) { await reportMutationError(error, '无法清除人工权重') }
+    finally { setBusy(false) }
+  }
+
+  if (authChecking || identity && !config) return <div className="loading-state full-page"><RefreshCw className="spin" size={24} />正在验证登录状态…</div>
+  if (!authenticated) return <Login username={loginUsername} password={loginPassword} setUsername={setLoginUsername} setPassword={setLoginPassword} login={login} loading={loginBusy} error={loginError || resources.config.error || ''} />
 
   return <div className="app-shell">
-    <aside className={`sidebar ${mobileNavOpen ? 'open' : ''}`} aria-label="主导航"><div className="sidebar-brand"><Brand /><button className="icon-button mobile-close" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)}><X size={18} /></button></div><nav className="main-nav" aria-label="后台导航">{pages.map((item) => <button key={item.id} aria-current={page === item.id ? 'page' : undefined} className={page === item.id ? 'active' : ''} onClick={() => go(item.id)}><item.icon size={19} /><span>{item.label}</span></button>)}</nav><div className="sidebar-health"><span className={`health-dot ${health.level === 'healthy' ? 'ok' : health.level === 'attention' ? 'warning' : 'unknown'}`} /><div><strong>{health.level === 'healthy' ? '实时运行正常' : health.level === 'attention' ? '有事项需留意' : '状态待验证'}</strong><span>{sourceStates.length} 个监测任务</span></div></div><button className="sidebar-logout" onClick={() => { reset(); logout() }}><LogOut size={18} /><span>锁定后台</span></button></aside>
+    <aside className={`sidebar ${mobileNavOpen ? 'open' : ''}`} aria-label="主导航"><div className="sidebar-brand"><Brand /><button className="icon-button mobile-close" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)}><X size={18} /></button></div><nav className="main-nav" aria-label="后台导航">{pages.filter((item) => item.id !== 'users' || identity?.permissions.includes('users:manage')).map((item) => <button key={item.id} aria-current={page === item.id ? 'page' : undefined} className={page === item.id ? 'active' : ''} onClick={() => go(item.id)}><item.icon size={19} /><span>{item.label}</span></button>)}</nav><div className="sidebar-health"><span className={`health-dot ${health.level === 'healthy' ? 'ok' : health.level === 'attention' ? 'warning' : 'unknown'}`} /><div><strong>{identity?.display_name}</strong><span>{identity?.role} · {sourceStates.length} 个任务</span></div></div><button className="sidebar-logout" onClick={logout}><LogOut size={18} /><span>退出登录</span></button></aside>
     {mobileNavOpen && <button className="nav-backdrop" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)} />}
     <section className="workspace"><header className="topbar"><button className="icon-button mobile-menu" aria-label="打开导航" aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(true)}><Menu size={20} /></button><div className="page-heading"><h1>{currentPage.label}</h1><p>{currentPage.subtitle}</p></div><div className="topbar-actions"><span className="connection-state"><span className={`health-dot ${health.level === 'healthy' ? 'ok' : health.level === 'attention' ? 'warning' : 'unknown'}`} />{health.level === 'healthy' ? '实时正常' : health.level === 'attention' ? '需要留意' : '待验证'}{lastUpdatedAt && <small> · {formatDate(lastUpdatedAt / 1000)}</small>}</span><button className="icon-button" aria-label={`切换为${theme === 'dark' ? '浅色' : '深色'}主题`} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}</button><button className="icon-button" aria-label="刷新数据" disabled={refreshing} onClick={() => { void refreshNow() }}><RefreshCw className={refreshing ? 'spin' : ''} size={18} /></button></div></header>
       {restartRequired && <div className="restart-banner"><CircleAlert size={18} /><div><strong>有配置等待 Argus 应用</strong><span>{health.appliedRevision !== null ? `期望修订 ${effectivePendingRevision || health.desiredRevision}，引擎已应用 ${health.appliedRevision}。` : '引擎尚未报告已应用修订。'}</span></div><button className="button subtle" onClick={() => go('settings')}>查看状态</button></div>}
       {partialErrors.length > 0 && <div className="partial-error" role="status"><CircleAlert size={17} /><span>部分数据暂时无法刷新，已保留上次成功结果：{partialErrors.join('；')}</span></div>}
       <main className="page-content">{!hasAnyData ? <div className="loading-state"><RefreshCw className="spin" size={24} />正在读取管理数据…</div> : <>
         {page === 'overview' && <OverviewPage health={health} pending={pending} observations={Number(status.observations || 0)} sourceStates={sourceStates} managedSources={managedSources} incidents={incidents} reminders={reminders} go={(value) => go(value as PageId)} onCreateReminder={() => openReminder()} />}
-        {page === 'reminders' && <RemindersPage reminders={reminders} total={resources.reminders.data?.pagination?.total} busy={busy} onOpen={openReminder} onToggle={(item) => { void toggleReminder(item) }} onDelete={deleteReminder} />}
-        {page === 'sources' && <SourcesPage sources={managedSources} sourceStates={sourceStates} busy={busy} query={sourceQuery} onQuery={setSourceQuery} onCreate={openSource} catalog={newsCatalog} catalogError={resources.newsCatalog.error} onCatalogFeed={prepareCatalogFeed} onEdit={editSource} onToggle={(source) => { void toggleSource(source) }} onDelete={deleteSource} />}
+        {page === 'reminders' && <RemindersPage reminders={reminders} total={resources.reminders.data?.pagination?.total} busy={busy || !can('reminders:write')} onOpen={openReminder} onToggle={(item) => { void toggleReminder(item) }} onDelete={deleteReminder} />}
+        {page === 'sources' && <SourcesPage sources={managedSources} sourceStates={sourceStates} busy={busy || !can('sources:write')} query={sourceQuery} onQuery={setSourceQuery} onCreate={openSource} catalog={newsCatalog} catalogError={resources.newsCatalog.error} onCatalogFeed={prepareCatalogFeed} onEdit={editSource} onToggle={(source) => { void toggleSource(source) }} onDelete={deleteSource} />}
         {page === 'events' && <EventsPage incidents={incidents} managedSources={managedSources} total={resources.incidents.data?.pagination?.total} health={health} openCount={openIncidents} />}
-        {page === 'settings' && <><SettingsPage status={status} health={health} revisions={revisions} revisionTotal={resources.revisions.data?.pagination?.total} busy={busy} advancedKind={advancedKind} advancedJson={advancedJson} onAdvancedKind={setAdvancedKind} onAdvancedJson={setAdvancedJson} onLoadExample={loadAdvancedExample} onSaveAdvanced={() => { void saveAdvanced() }} onRollback={rollback} /><OutboxPanel status={outboxStatus} alerts={outboxAlerts} loading={outboxLoading} error={outboxError} nextCursor={outboxNextCursor} busy={busy} onStatus={changeOutboxStatus} onReload={() => { void loadOutbox(outboxStatus) }} onLoadMore={() => { void loadOutbox(outboxStatus, true, outboxNextCursor) }} onRetry={retryOutbox} onCancel={cancelOutbox} onDelete={discardOutbox} /></>}
+        {page === 'digests' && <DigestsPage api={api} onUnauthorized={logout} initialKey={window.location.pathname.startsWith('/digests/') ? decodeURIComponent(window.location.pathname.slice('/digests/'.length)) : undefined} />}
+        {page === 'source-quality' && <SourceQualityPage profiles={sourceQuality} busy={busy || !can('quality:write')} onFeedback={submitQualityFeedback} onOverride={setQualityOverride} onClearOverride={clearQualityOverride} />}
+        {page === 'users' && identity?.permissions.includes('users:manage') && <UsersPage api={api} currentUserId={identity.id} notify={notify} onUnauthorized={clearSession} />}
+        {page === 'settings' && <><SettingsPage status={status} health={health} revisions={revisions} revisionTotal={resources.revisions.data?.pagination?.total} busy={busy || !can('settings:write')} analysis={config?.managed.analysis} digest={config?.managed.digest} prompts={prompts} analysisError={resources.prompts.error} onSaveAnalysis={(value) => { void saveAnalysis(value) }} onSaveDigest={(value) => { void saveDigest(value) }} onSavePrompt={(value) => { void savePrompt(value) }} advancedKind={advancedKind} advancedJson={advancedJson} onAdvancedKind={setAdvancedKind} onAdvancedJson={setAdvancedJson} onLoadExample={loadAdvancedExample} onSaveAdvanced={() => { void saveAdvanced() }} onRollback={rollback} /><OutboxPanel status={outboxStatus} alerts={outboxAlerts} loading={outboxLoading} error={outboxError} nextCursor={outboxNextCursor} busy={busy || !can('operations:write')} onStatus={changeOutboxStatus} onReload={() => { void loadOutbox(outboxStatus) }} onLoadMore={() => { void loadOutbox(outboxStatus, true, outboxNextCursor) }} onRetry={retryOutbox} onCancel={cancelOutbox} onDelete={discardOutbox} /></>}
       </>}</main>
     </section>
     <ReminderDialog ref={reminderDialog} draft={reminderForm} setDraft={setReminderForm} busy={busy} dirty={Boolean(reminderSnapshot && reminderSnapshot !== JSON.stringify(reminderForm))} onClose={closeReminder} onSubmit={() => { void saveReminder() }} />
@@ -430,6 +503,6 @@ export default function AdminApp() {
   </div>
 }
 
-function Login({ token, setToken, login, loading, error }: { token: string; setToken: (value: string) => void; login: () => Promise<void>; loading: boolean; error: string }) {
-  return <div className="login-shell"><div className="argus-field" aria-hidden="true"><span /><span /><span /><span /><span /></div><main className="login-card"><EyeMark size="large" /><div className="login-copy"><span className="eyebrow">ARGUS WATCHER CONSOLE</span><h1>欢迎回到 EyeOfSauron</h1><p>用管理 Token 解锁。凭据只保存在当前浏览器标签页，关闭后会自动清除。</p></div><form className="login-form" onSubmit={(event) => { event.preventDefault(); void login() }}><label htmlFor="admin-token">管理 Token</label><div className="input-with-icon"><LockKeyhole size={18} /><input id="admin-token" value={token} onChange={(event) => setToken(event.target.value)} type="password" autoComplete="current-password" autoFocus required placeholder="粘贴本机生成的 Token" /></div>{error && <p className="form-error" role="alert">{error}</p>}<button className="button primary wide" type="submit" disabled={loading}>{loading ? <RefreshCw className="spin" size={18} /> : <ShieldCheck size={18} />}{loading ? '正在验证…' : '进入后台'}</button></form><div className="login-security"><ShieldCheck size={16} /><span>后台仍只监听本机回环地址，不增加公网入口</span></div></main></div>
+function Login({ username, password, setUsername, setPassword, login, loading, error }: { username: string; password: string; setUsername: (value: string) => void; setPassword: (value: string) => void; login: () => Promise<void>; loading: boolean; error: string }) {
+  return <div className="login-shell"><div className="argus-field" aria-hidden="true"><span /><span /><span /><span /><span /></div><main className="login-card"><EyeMark size="large" /><div className="login-copy"><span className="eyebrow">ARGUS WATCHER CONSOLE</span><h1>欢迎回到 EyeOfSauron</h1><p>使用后台账户登录。登录状态由安全 Cookie 保存，最长有效 14 天。</p></div><form className="login-form" onSubmit={(event) => { event.preventDefault(); void login() }}><label htmlFor="admin-username">用户名</label><div className="input-with-icon"><UserRoundCog size={18} /><input id="admin-username" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" autoFocus required /></div><label htmlFor="admin-password">密码</label><div className="input-with-icon"><LockKeyhole size={18} /><input id="admin-password" value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" required /></div>{error && <p className="form-error" role="alert">{error}</p>}<button className="button primary wide" type="submit" disabled={loading}>{loading ? <RefreshCw className="spin" size={18} /> : <ShieldCheck size={18} />}{loading ? '正在验证…' : '进入后台'}</button></form><div className="login-security"><ShieldCheck size={16} /><span>TLS 加密 · 防暴力尝试 · 服务端会话可随时撤销</span></div></main></div>
 }

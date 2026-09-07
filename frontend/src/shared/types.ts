@@ -5,6 +5,42 @@ export type IncidentStatus = 'open' | 'recovered' | 'recorded'
 export type Tone = 'positive' | 'warning' | 'negative' | 'info' | 'neutral'
 export type AdminJobStatus = 'queued' | 'running' | 'succeeded' | 'completed' | 'failed' | 'cancelled' | 'expired'
 export type OutboxStatus = 'pending' | 'sending' | 'delivered' | 'dead' | 'cancelled'
+export type AdminRole = 'admin' | 'operator' | 'viewer'
+
+export interface AdminIdentity extends JsonRecord {
+  id: number | null
+  username: string
+  display_name: string
+  role: AdminRole
+  permissions: string[]
+  emergency?: boolean
+}
+
+export interface AdminUser extends JsonRecord {
+  id: number
+  username: string
+  display_name: string
+  role: AdminRole
+  enabled: boolean | number
+  created_at: number
+  updated_at: number
+  last_login_at?: number | null
+  active_sessions?: number
+}
+
+export interface AdminAuthAudit extends JsonRecord {
+  id: number
+  user_id?: number | null
+  username?: string | null
+  action: string
+  actor: string
+  details: JsonRecord
+  created_at: number
+}
+
+export interface AuthResponse { user: AdminIdentity }
+export interface AdminUserResponse { users?: AdminUser[] }
+export interface AdminAuthAuditResponse { audit?: AdminAuthAudit[] }
 
 export interface ManagedSource extends JsonRecord {
   id: string
@@ -201,9 +237,135 @@ export interface AdminStatus extends JsonRecord {
 }
 
 export interface ConfigResponse {
-  managed: { sources?: ManagedSource[]; rules?: ManagedRule[] }
+  managed: { sources?: ManagedSource[]; rules?: ManagedRule[]; analysis?: AnalysisConfig; digest?: DigestConfig }
   revision?: { revision?: number; updated_at?: number | null; updated_by?: string | null; reason?: string | null }
   status?: AdminStatus
+}
+
+export interface DigestConfig extends JsonRecord {
+  enabled?: boolean
+  timezone?: string
+  daily_time?: string
+  item_limit?: number
+  observation_limit?: number
+  notify?: boolean
+  public_base_url?: string
+}
+
+export interface AnalysisConfig extends JsonRecord {
+  enabled?: boolean
+  shadow_mode?: boolean
+  local_enabled?: boolean
+  local_base_url?: string
+  local_model?: string
+  api_enabled?: boolean
+  api_base_url?: string
+  api_model?: string
+  api_key_env?: string
+  prompt_id?: string
+  prompt_version?: number
+  timeout_seconds?: number
+  max_input_chars?: number
+  max_response_bytes?: number
+  max_tokens?: number
+  max_items_per_run?: number
+  daily_api_budget?: number
+  send_full_text?: boolean
+  region_weights?: Record<string, number>
+}
+
+export interface PromptTemplate extends JsonRecord {
+  prompt_id: string
+  version: number
+  system_text: string
+  created_at?: number | null
+  actor?: string | null
+}
+
+export interface PromptResponse {
+  prompts?: PromptTemplate[]
+}
+
+export interface DigestSummary extends JsonRecord {
+  digest_key: string
+  version: number
+  period_start: number
+  period_end: number
+  timezone: string
+  title: string
+  summary: string
+  generation_kind: string
+  status: 'published' | 'draft' | 'superseded'
+  created_at: number
+  published_at?: number | null
+  item_count: number
+  source_count: number
+  web_path?: string
+}
+
+export interface DigestItem extends JsonRecord {
+  cluster_key: string
+  title: string
+  summary: string
+  score: number
+  importance: number
+  urgency: number
+  relevance: number
+  confidence: number
+  published_at?: number | null
+  regions?: string[]
+  topics?: string[]
+  source_ids?: string[]
+  observation_ids?: number[]
+  links?: string[]
+  handling?: 'digest' | 'immediate'
+}
+
+export interface SourceQualityProfile extends JsonRecord {
+  source_id: string
+  weight: number
+  automatic_weight?: number
+  score: number
+  effective_samples: number
+  positive_count: number
+  negative_count: number
+  neutral_count: number
+  first_feedback_at?: number | null
+  last_feedback_at?: number | null
+  evidence_span_days: number
+  eligible: boolean
+  manual_override?: number | null
+  override_reason?: string | null
+  updated_at?: number | null
+  policy?: JsonRecord
+}
+
+export interface SourceQualityResponse {
+  profiles?: SourceQualityProfile[]
+  logic?: JsonRecord
+}
+
+export interface DigestCoverage extends JsonRecord {
+  source_id: string
+  status: string
+  observation_count: number
+  last_attempt_at?: number | null
+  last_success_at?: number | null
+  consecutive_failures?: number
+}
+
+export interface DigestDetail extends DigestSummary {
+  items?: DigestItem[]
+  coverage?: DigestCoverage[]
+}
+
+export interface DigestListResponse {
+  digests?: DigestSummary[]
+  pagination?: PaginationMeta
+}
+
+export interface DigestDetailResponse {
+  digest: DigestDetail
 }
 
 export interface ReminderResponse {
@@ -253,7 +415,7 @@ export interface ResourceState<T> {
   loading: boolean
 }
 
-export type AdminResourceName = 'config' | 'reminders' | 'revisions' | 'incidents' | 'newsCatalog'
+export type AdminResourceName = 'config' | 'reminders' | 'revisions' | 'incidents' | 'newsCatalog' | 'prompts' | 'sourceQuality'
 
 export interface AdminResources {
   config: ResourceState<ConfigResponse>
@@ -261,6 +423,8 @@ export interface AdminResources {
   revisions: ResourceState<RevisionResponse>
   incidents: ResourceState<IncidentResponse>
   newsCatalog: ResourceState<NewsCatalogResponse>
+  prompts: ResourceState<PromptResponse>
+  sourceQuality: ResourceState<SourceQualityResponse>
 }
 
 export interface HealthSummary {

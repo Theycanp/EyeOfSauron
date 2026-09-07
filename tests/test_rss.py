@@ -59,6 +59,13 @@ class RssTests(unittest.TestCase):
         observations = parse_feed(payload, self.source)
         self.assertEqual("", observations[0].url)
 
+    def test_upgrades_legacy_http_article_link_on_allowlisted_host(self) -> None:
+        from argus.rss import _safe_link
+        self.assertEqual(
+            "https://www.bloomberg.com/news",
+            _safe_link("http://www.bloomberg.com/news", self.source.allowed_hosts),
+        )
+
     def _state(self, etag: str | None = None, modified: str | None = None) -> SourceState:
         return SourceState(
             source_id=self.source.id,

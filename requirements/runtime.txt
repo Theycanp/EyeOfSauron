@@ -1,1 +1,2 @@
-# EyeOfSauron has no third-party Python runtime dependencies.
+# Keep this synchronized with pyproject.toml; pip-audit checks this exact set.
+argon2-cffi==25.1.0

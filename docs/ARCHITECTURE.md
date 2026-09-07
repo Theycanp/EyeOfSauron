@@ -9,9 +9,9 @@ records. Rules turn observations into
 rule output, and the notification outbox. Notifiers deliver outbox entries.
 
 ```text
-collectors -> normalized observations -> rules -> incidents -> SQLite outbox -> notifiers
-                     |                    |
-                     +---- SQLite --------+
+collectors -> normalized observations -> triage -> rules -> incidents -> SQLite outbox -> notifiers
+                     |                       |
+                     +---- repository ports -+
 ```
 
 ## Contracts
@@ -19,14 +19,31 @@ collectors -> normalized observations -> rules -> incidents -> SQLite outbox -> 
 - A collector owns network access and returns normalized observations.
 - A rule is deterministic for an observation and configuration.
 - A notifier knows nothing about collectors or rules.
+- Delivery depends only on the `Notifier.publish` port. Ntfy is the current
+  adapter; email, webhooks, or other channels must implement the same port and
+  inherit the outbox lease, retry, dead-letter, and audit behavior.
 - A dedupe scope plus external ID identifies the same item across collectors.
 - A rule ID plus observation identity identifies the same alert.
 - A matching rule records confidence and human-readable evidence. A normalized
   incident key suppresses repeated headlines from independent feeds for a short
   window while retaining the original observation and link.
+- Every observation stores importance, urgency, relevance, confidence, region,
+  topic, source tier, information type, handling route, and processing state.
+  These are durable fields for digest and read APIs, not values hidden in a
+  notification payload.
+- The deterministic triage policy is authoritative. Optional local or remote
+  semantic analyzers implement a narrow advisory port and cannot independently
+  escalate an item to immediate delivery. Invalid, slow, or unavailable
+  analyzers fall back to the deterministic result.
 
 These contracts allow future adapters for market APIs, X, host events, webhooks,
 and MQTT without changing delivery reliability.
+
+Semantic enrichment depends only on the `Analyzer.analyze` port. Prompt text is
+versioned configuration owned by the analysis subsystem, never concatenated
+from article instructions or accepted from an untrusted feed. Remote API and
+local-model adapters are optional and disabled by default; their structured
+output is bounded, validated, and advisory.
 
 Incidents are durable records separate from notification attempts. An `event`
 is a one-off fact such as a breaking-news match and is immediately `recorded`;
@@ -38,8 +55,12 @@ details; multiple alerts can refer to one incident while the outbox remains
 at-least-once. This prevents notification deduplication from erasing operational
 history or ordinary news from polluting the unresolved-health count.
 
-Configuration changes are revisioned and audited. SQLite is the authoritative
-configuration store: the management API validates the complete managed set and
+Configuration changes are revisioned and audited. SQLite is the current
+repository implementation, not a business-layer dependency: engine, digest,
+analysis, and HTTP code consume narrow repository protocols from
+`persistence.py`. A future PostgreSQL or remote implementation can replace the
+adapter while retaining those contracts and transaction semantics. SQLite is
+the authoritative configuration store: the management API validates the complete managed set and
 atomically activates an immutable revision with compare-and-swap protection.
 The legacy private JSON file is imported once when there is no active database
 revision; it is not rewritten in database-backed operation. Current settings
@@ -55,7 +76,13 @@ second process manager or an in-process partial reload path.
 The management surface is split into a Python standard-library HTTP server and
 a static React/Vite client. React is compiled during development and the
 resulting HTML/CSS/JavaScript is served by the same loopback-only process, so
-the production host does not run Node or expose another port.
+the production host does not run Node or expose another application port. A
+dedicated TLS reverse proxy is the only public edge. Accounts use Argon2id
+password hashes and absolute 14-day server-side sessions; only token hashes are
+stored. `__Host-` Secure/SameSite cookies, session-bound double-submit CSRF tokens,
+same-origin checks, edge and application login throttles, and backend RBAC guard
+all state changes. Role changes, disablement, and password resets revoke every
+existing session. The legacy bearer credential is a loopback-only recovery path.
 
 ## Delivery semantics
 
@@ -68,6 +95,33 @@ over silently losing a critical alert.
 No external message queue is needed at current volume. The database and in-process
 async tasks form the queue boundary. A future transport can implement the same
 contracts with NATS JetStream if workers are ever split across hosts.
+
+## Daily digests
+
+The daily digest builder reads normalized observations and source coverage only
+through repository ports. Its algorithmic version ranks by the durable triage
+fields and configured regional interest, then deterministically clusters similar
+headlines across publishers. Corroboration from independent sources raises a
+cluster modestly but never rewrites the underlying observations.
+
+Digest drafts are immutable, monotonically versioned documents. Publishing one
+version atomically supersedes the previously published version for the same
+digest key, preserving both audit history and rollback capability. Optional API
+polishing creates another draft; it cannot mutate or erase the algorithmic
+version. Digest items retain their observation IDs, source IDs, and links so a
+reader can inspect the evidence behind a summary.
+
+Source coverage is captured with every digest and is distinct from item count.
+`covered` means the source produced observations, while `quiet` means polling
+succeeded but produced none. `degraded`, `stale`, `disabled`, and `unknown`
+remain explicit so an apparently quiet day cannot conceal a collector outage.
+
+`DigestScheduler` owns wall-clock scheduling and depends on digest input,
+versioned storage, and notification repository ports. It resolves consecutive
+IANA-timezone boundaries, catches up the latest missed local day after downtime,
+and uses the digest key plus version as the outbox identity. Repeated scans are
+therefore idempotent. The authenticated HTTP reader depends on the narrower
+read-only digest repository and cannot publish or enqueue anything.
 
 ## Durable reminders
 

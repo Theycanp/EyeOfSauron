@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 from argus.admin import AdminError, ManagedConfigStore, make_handler
 from argus.database import Database, read_active_config
+from argus.digest import DigestCluster, DigestDocument, SourceCoverage
 from argus.persistence import ControlPlaneRepository, RevisionConflictError, RuntimeRepository
 from argus.service import ArgusService
 
@@ -67,6 +68,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIsInstance(self.database, RuntimeRepository)
         self.assertIsInstance(self.database, ControlPlaneRepository)
         self.assertFalse(hasattr(ControlPlaneRepository, "claim_due_alert"))
+        self.assertFalse(hasattr(ControlPlaneRepository, "save_digest"))
+        self.assertTrue(hasattr(ControlPlaneRepository, "list_digests"))
 
     def test_readonly_config_lookup_does_not_create_or_migrate_database(self) -> None:
         missing = self.root / "missing" / "state.db"
@@ -253,6 +256,44 @@ class ControlPlaneHTTPTests(unittest.TestCase):
         with response:
             return response.status, json.loads(response.read())
 
+    def _save_digest(self, *, title: str = "每日情报摘要") -> DigestDocument:
+        return self.database.save_digest(
+            DigestDocument(
+                digest_key="daily:2026-09-06",
+                version=0,
+                period_start=1_788_307_200,
+                period_end=1_788_393_600,
+                timezone="Asia/Shanghai",
+                title=title,
+                summary="三条重点信息，其中一条需要持续关注。",
+                generation_kind="algorithm",
+                items=(
+                    DigestCluster(
+                        cluster_key="policy-update",
+                        title="重要政策公告",
+                        summary="政策公告摘要",
+                        score=4.75,
+                        importance=5,
+                        urgency=3,
+                        relevance=5,
+                        confidence=0.9,
+                        published_at=1_788_307_300,
+                        regions=("CN",),
+                        topics=("policy",),
+                        source_ids=("mof_cn",),
+                        observation_ids=(42,),
+                        links=("https://example.test/42",),
+                    ),
+                ),
+                coverage=(
+                    SourceCoverage(
+                        "mof_cn", "covered", 1, 1_788_393_500, 1_788_393_500, 0
+                    ),
+                ),
+                created_at=1_788_393_600,
+            )
+        )
+
     def test_readiness_requires_daemon_and_current_revision(self) -> None:
         self.assertEqual(503, self.request("/ready")[0])
         self.database.register_engine("test", started_at=int(time.time()), applied_revision=0,
@@ -274,6 +315,126 @@ class ControlPlaneHTTPTests(unittest.TestCase):
         status, _ = self.request("/api/jobs/" + payload["job"]["id"], headers={"Authorization": "invalid"})
         self.assertEqual(401, status)
         self.assertEqual(400, self.request("/api/outbox?limit=invalid")[0])
+
+    def test_prompt_catalog_is_authenticated_and_versioned(self) -> None:
+        status, payload = self.request("/api/prompts")
+        self.assertEqual(200, status)
+        self.assertEqual("triage", payload["prompts"][0]["prompt_id"])
+        status, payload = self.request(
+            "/api/prompts",
+            {"prompt_id": "triage", "version": 2, "system_text": "Return JSON only."},
+            method="POST",
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(2, payload["saved"]["version"])
+        status, _ = self.request("/api/prompts", headers={"Authorization": "invalid"})
+        self.assertEqual(401, status)
+
+    def test_analysis_policy_has_dedicated_revisioned_endpoint(self) -> None:
+        policy = {
+            "enabled": False,
+            "local_enabled": False,
+            "api_enabled": False,
+            "send_full_text": False,
+            "region_weights": {"CN": 5, "JP": 4, "US": 5, "GLOBAL": 3, "OTHER": 3},
+        }
+        status, payload = self.request(
+            "/api/analysis", policy, headers={"If-Match": '"0"'}, method="POST"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(1, payload["revision"])
+        self.assertEqual(4, payload["saved"]["region_weights"]["JP"])
+        _, config = self.request("/api/config")
+        self.assertEqual(policy, config["managed"]["analysis"])
+        self.assertEqual(
+            409,
+            self.request(
+                "/api/analysis", policy, headers={"If-Match": '"0"'}, method="POST"
+            )[0],
+        )
+
+    def test_digest_policy_has_dedicated_revisioned_endpoint(self) -> None:
+        policy = {
+            "enabled": False,
+            "timezone": "Asia/Shanghai",
+            "daily_time": "20:00",
+            "item_limit": 30,
+            "observation_limit": 5000,
+            "notify": True,
+            "public_base_url": "https://eos.example.test",
+        }
+        status, payload = self.request(
+            "/api/digest-config", policy, headers={"If-Match": '"0"'}, method="POST"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(1, payload["revision"])
+        _, config = self.request("/api/config")
+        self.assertEqual(policy, config["managed"]["digest"])
+
+    def test_digest_reader_lists_only_published_and_returns_full_detail(self) -> None:
+        draft = self._save_digest()
+        status, payload = self.request("/api/digests")
+        self.assertEqual(200, status)
+        self.assertEqual([], payload["digests"])
+        self.assertEqual(
+            404,
+            self.request("/api/digests/daily%3A2026-09-06")[0],
+        )
+
+        self.database.publish_digest(draft.digest_key, draft.version, 1_788_393_700)
+        status, payload = self.request("/api/digests")
+        self.assertEqual(200, status)
+        self.assertEqual(1, len(payload["digests"]))
+        row = payload["digests"][0]
+        self.assertEqual("daily:2026-09-06", row["digest_key"])
+        self.assertEqual("/digests/daily%3A2026-09-06", row["web_path"])
+        self.assertEqual(1, row["item_count"])
+        self.assertNotIn("items", row)
+
+        status, payload = self.request("/api/digests/daily%3A2026-09-06")
+        self.assertEqual(200, status)
+        detail = payload["digest"]
+        self.assertEqual([42], detail["items"][0]["observation_ids"])
+        self.assertEqual(["mof_cn"], detail["items"][0]["source_ids"])
+        self.assertEqual("covered", detail["coverage"][0]["status"])
+
+    def test_digest_reader_supports_explicit_versions_and_validates_queries(self) -> None:
+        first = self._save_digest(title="第一版")
+        self.database.publish_digest(first.digest_key, first.version, 1_788_393_700)
+        second = self._save_digest(title="第二版草稿")
+
+        status, payload = self.request("/api/digests?status=all&limit=1")
+        self.assertEqual(200, status)
+        self.assertTrue(payload["pagination"]["truncated"])
+        self.assertEqual("第二版草稿", payload["digests"][0]["title"])
+        status, payload = self.request(
+            "/api/digests/daily%3A2026-09-06?version=2"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(second.version, payload["digest"]["version"])
+        self.assertEqual("draft", payload["digest"]["status"])
+
+        self.assertEqual(400, self.request("/api/digests?status=unknown")[0])
+        self.assertEqual(400, self.request("/api/digests?limit=101")[0])
+        self.assertEqual(
+            400,
+            self.request("/api/digests/daily%3A2026-09-06?version=zero")[0],
+        )
+        self.assertEqual(
+            401,
+            self.request("/api/digests", headers={"Authorization": "invalid"})[0],
+        )
+
+    def test_digest_spa_routes_serve_only_the_application_shell(self) -> None:
+        self._save_digest(title="must not leak into static shell")
+        for path in ("/digests", "/digests/daily%3A2026-09-06"):
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.server.server_port}{path}", timeout=3
+            ) as response:
+                body = response.read().decode("utf-8")
+                self.assertEqual(200, response.status)
+                self.assertIn("text/html", response.headers["Content-Type"])
+                self.assertNotIn("must not leak into static shell", body)
 
     def test_readiness_detects_stale_poll_despite_healthy_daemon(self) -> None:
         now = int(time.time())

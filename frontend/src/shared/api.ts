@@ -1,14 +1,21 @@
 import type {
   AdminJob,
+  AdminAuthAuditResponse,
+  AdminUserResponse,
+  AuthResponse,
   ConfigResponse,
+  DigestDetailResponse,
+  DigestListResponse,
   IncidentResponse,
   JobResponse,
   MutationResponse,
   NewsCatalogResponse,
   OutboxResponse,
   OutboxStatus,
+  PromptResponse,
   ReminderResponse,
   RevisionResponse,
+  SourceQualityResponse,
   SourceTestResult,
 } from './types'
 
@@ -35,7 +42,8 @@ function errorDetails(body: ApiErrorPayload, status: number): { message: string;
   const nested = typeof body.error === 'object' && body.error ? body.error : null
   const code = body.code || nested?.code || null
   const serverMessage = typeof body.error === 'string' ? body.error : nested?.message
-  if (status === 401) return { message: '管理 Token 不正确或已失效', code: code || 'unauthorized' }
+  if (status === 401) return { message: '登录已失效，请重新登录', code: code || 'unauthorized' }
+  if (status === 403) return { message: code === 'csrf_failed' ? '安全校验已失效，请刷新页面后重试' : '当前账户没有执行此操作的权限', code: code || 'forbidden' }
   if (status === 409 && code === 'revision_conflict') {
     return {
       message: '配置已在其他标签页或会话中修改。请先刷新数据，再重新执行刚才的操作。',
@@ -83,7 +91,7 @@ function sourceTestResult(job: AdminJob): SourceTestResult | null {
 export class AdminApi {
   private token: string
 
-  constructor(token: string) {
+  constructor(token = '') {
     this.token = token
   }
 
@@ -103,10 +111,16 @@ export class AdminApi {
     else externalSignal?.addEventListener('abort', abortFromCaller, { once: true })
     const timer = window.setTimeout(() => controller.abort(), timeoutMs)
     const headers = new Headers(options.headers)
-    headers.set('Authorization', `Bearer ${this.token}`)
+    if (this.token) headers.set('Authorization', `Bearer ${this.token}`)
+    const method = (options.method || 'GET').toUpperCase()
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !this.token) {
+      const name = '__Host-eos_csrf='
+      const csrf = document.cookie.split('; ').find((part) => part.startsWith(name))?.slice(name.length)
+      if (csrf) headers.set('X-CSRF-Token', decodeURIComponent(csrf))
+    }
     if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
     try {
-      const response = await fetch(path, { ...options, headers, signal: controller.signal })
+      const response = await fetch(path, { ...options, headers, credentials: 'same-origin', signal: controller.signal })
       const body = await response.json().catch(() => ({ error: '服务器返回了无法识别的响应' })) as ApiErrorPayload
       if (!response.ok) {
         const details = errorDetails(body, response.status)
@@ -126,10 +140,47 @@ export class AdminApi {
   }
 
   config(): Promise<ConfigResponse> { return this.request('/api/config') }
+  session(): Promise<AuthResponse> { return this.request('/api/auth/session') }
+  login(username: string, password: string): Promise<AuthResponse> {
+    return this.request('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) })
+  }
+  logout(): Promise<{ logged_out: boolean }> { return this.request('/api/auth/logout', { method: 'POST', body: '{}' }) }
+  users(): Promise<AdminUserResponse> { return this.request('/api/users') }
+  authAudit(): Promise<AdminAuthAuditResponse> { return this.request('/api/users/audit') }
+  createUser(body: { username: string; display_name: string; password: string; role: string }): Promise<MutationResponse> {
+    return this.request('/api/users', { method: 'POST', body: JSON.stringify(body) })
+  }
+  updateUser(id: number, body: { display_name: string; role: string; enabled: boolean }): Promise<MutationResponse> {
+    return this.request(`/api/users/${id}`, { method: 'POST', body: JSON.stringify(body) })
+  }
+  resetUserPassword(id: number, password: string): Promise<MutationResponse> {
+    return this.request(`/api/users/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) })
+  }
+  revokeUserSessions(id: number): Promise<MutationResponse> {
+    return this.request(`/api/users/${id}/revoke-sessions`, { method: 'POST', body: '{}' })
+  }
   reminders(): Promise<ReminderResponse> { return this.request('/api/reminders') }
   revisions(): Promise<RevisionResponse> { return this.request('/api/revisions') }
   incidents(): Promise<IncidentResponse> { return this.request('/api/incidents') }
   newsCatalog(): Promise<NewsCatalogResponse> { return this.request('/api/news-catalog') }
+  prompts(): Promise<PromptResponse> { return this.request('/api/prompts') }
+  sourceQuality(): Promise<SourceQualityResponse> { return this.request('/api/source-quality') }
+  sourceQualityFeedback(sourceId: string, body: { signal: -1 | 0 | 1; reason: string; observation_id?: number }): Promise<MutationResponse> {
+    return this.request(`/api/source-quality/${encodeURIComponent(sourceId)}/feedback`, { method: 'POST', body: JSON.stringify(body) })
+  }
+  setSourceQualityOverride(sourceId: string, body: { weight: number; reason: string }): Promise<MutationResponse> {
+    return this.request(`/api/source-quality/${encodeURIComponent(sourceId)}/override`, { method: 'POST', body: JSON.stringify(body) })
+  }
+  clearSourceQualityOverride(sourceId: string): Promise<MutationResponse> {
+    return this.request(`/api/source-quality/${encodeURIComponent(sourceId)}/override`, { method: 'DELETE' })
+  }
+  digests(status: 'published' | 'draft' | 'superseded' | 'all' = 'published'): Promise<DigestListResponse> {
+    return this.request(`/api/digests?${new URLSearchParams({ status, limit: '30' })}`)
+  }
+  digest(key: string, version?: number): Promise<DigestDetailResponse> {
+    const query = version ? `?${new URLSearchParams({ version: String(version) })}` : ''
+    return this.request(`/api/digests/${encodeURIComponent(key)}${query}`)
+  }
 
   outbox(status: Extract<OutboxStatus, 'dead' | 'pending'>, beforeId?: number): Promise<OutboxResponse> {
     const query = new URLSearchParams({ status, limit: '50' })

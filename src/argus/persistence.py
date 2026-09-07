@@ -4,6 +4,13 @@ import sqlite3
 from types import TracebackType
 from typing import Any, Mapping, Protocol, runtime_checkable
 
+from .analysis_orchestrator import AnalysisRepository
+from .digest import (
+    DigestInputRepository,
+    DigestNotificationRepository,
+    DigestReaderRepository,
+    DigestRepository,
+)
 from .models import FeedFetchResult, IngestReport, OutboxMessage, SourceState
 from .reminders import ReminderSpec
 from .rules import RuleSet
@@ -48,7 +55,9 @@ class SQLiteUnitOfWork:
 
 
 @runtime_checkable
-class RuntimeRepository(Protocol):
+class RuntimeRepository(
+    AnalysisRepository, DigestInputRepository, DigestRepository, DigestNotificationRepository, Protocol
+):
     """Persistence port used by the always-on application service."""
 
     def get_source_state(self, source_id: str) -> SourceState: ...
@@ -83,6 +92,10 @@ class RuntimeRepository(Protocol):
 
     def heartbeat_engine(self, instance_id: str, now: int, *, state: str = "running") -> bool: ...
     def stop_engine(self, instance_id: str, now: int, *, error: str | None = None) -> None: ...
+
+    def list_source_quality(
+        self, *, source_ids: list[str] | None = None, now: int | None = None
+    ) -> list[dict[str, Any]]: ...
 
     def record_source_success(
         self,
@@ -170,7 +183,29 @@ class ManagedConfigRepository(Protocol):
 
 
 @runtime_checkable
-class ControlPlaneRepository(ManagedConfigRepository, Protocol):
+class PromptRepository(Protocol):
+    """Versioned prompt storage kept behind the persistence boundary."""
+
+    def get_prompt(self, prompt_id: str, version: int | None = None) -> dict[str, Any] | None: ...
+
+    def list_prompts(self, prompt_id: str | None = None) -> list[dict[str, Any]]: ...
+
+    def save_prompt(
+        self,
+        prompt_id: str,
+        version: int,
+        system_text: str,
+        actor: str,
+        now: int,
+        *,
+        active: bool = True,
+    ) -> None: ...
+
+
+@runtime_checkable
+class ControlPlaneRepository(
+    ManagedConfigRepository, PromptRepository, DigestReaderRepository, Protocol
+):
     """Narrow persistence port used by the local administration API."""
 
     def status(self) -> dict[str, Any]: ...
@@ -210,3 +245,42 @@ class ControlPlaneRepository(ManagedConfigRepository, Protocol):
     def retry_alert(self, alert_id: int, now: int) -> bool: ...
     def cancel_alert(self, alert_id: int, now: int) -> bool: ...
     def discard_alert(self, alert_id: int) -> bool: ...
+    def list_source_quality(
+        self, *, source_ids: list[str] | None = None, now: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    def record_source_quality_feedback(
+        self,
+        source_id: str,
+        signal: int,
+        reason: str,
+        actor: str,
+        now: int,
+        observation_id: int | None = None,
+    ) -> int: ...
+    def set_source_quality_override(
+        self, source_id: str, weight: float, reason: str, actor: str, now: int
+    ) -> None: ...
+    def clear_source_quality_override(self, source_id: str, actor: str, now: int) -> bool: ...
+    def list_source_quality_audit(self, source_id: str, limit: int = 100) -> list[dict[str, Any]]: ...
+    def get_admin_user_for_auth(self, username: str) -> dict[str, Any] | None: ...
+    def list_admin_users(self) -> list[dict[str, Any]]: ...
+    def create_admin_user(
+        self, username: str, display_name: str, password_hash: str, role: str,
+        actor: str, now: int,
+    ) -> dict[str, Any]: ...
+    def update_admin_user(
+        self, user_id: int, display_name: str, role: str, enabled: bool,
+        actor: str, now: int,
+    ) -> dict[str, Any]: ...
+    def set_admin_user_password(
+        self, user_id: int, password_hash: str, actor: str, now: int
+    ) -> bool: ...
+    def revoke_admin_user_sessions(self, user_id: int, actor: str, now: int) -> int: ...
+    def admin_login_blocked_until(self, subject_hash: str, now: int) -> int: ...
+    def record_admin_login_attempt(self, subject_hash: str, success: bool, now: int) -> int: ...
+    def create_admin_session(
+        self, session_hash: str, csrf_hash: str, user_id: int, now: int, expires_at: int
+    ) -> None: ...
+    def resolve_admin_session(self, session_hash: str, now: int) -> dict[str, Any] | None: ...
+    def revoke_admin_session(self, session_hash: str, now: int) -> bool: ...
+    def list_admin_auth_audit(self, limit: int = 100) -> list[dict[str, Any]]: ...

@@ -16,6 +16,27 @@ class Observation:
     summary: str
     url: str
     attributes: dict[str, Any] = field(default_factory=dict)
+    importance: int = 3
+    urgency: int = 2
+    relevance: int = 3
+    confidence: float = 0.5
+    region: str = "GLOBAL"
+    topic: str = "general"
+    source_tier: str = "secondary"
+    information_type: str = "report"
+    handling: str = "digest"
+    processing_state: str = "new"
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisWorkItem:
+    """A persisted observation leased to the analysis application service."""
+
+    observation_id: int
+    observation: Observation
+    lease_token: str
+    fetched_at: int
+    attempts: int = 0
 
 
 @dataclass(frozen=True, slots=True)

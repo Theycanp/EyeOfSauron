@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AdminApi, ApiError } from '../shared/api'
-import type { AdminResourceName, AdminResources, ConfigResponse, IncidentResponse, NewsCatalogResponse, ReminderResponse, ResourceState, RevisionResponse } from '../shared/types'
+import type { AdminResourceName, AdminResources, ConfigResponse, IncidentResponse, NewsCatalogResponse, PromptResponse, ReminderResponse, ResourceState, RevisionResponse, SourceQualityResponse } from '../shared/types'
 
 function resource<T>(): ResourceState<T> {
   return { data: null, error: null, updatedAt: null, loading: false }
@@ -13,11 +13,13 @@ function newResources(): AdminResources {
     revisions: resource<RevisionResponse>(),
     incidents: resource<IncidentResponse>(),
     newsCatalog: resource<NewsCatalogResponse>(),
+    prompts: resource<PromptResponse>(),
+    sourceQuality: resource<SourceQualityResponse>(),
   }
 }
 
 
-const resourceNames: AdminResourceName[] = ['config', 'reminders', 'revisions', 'incidents', 'newsCatalog']
+const resourceNames: AdminResourceName[] = ['config', 'reminders', 'revisions', 'incidents', 'newsCatalog', 'prompts', 'sourceQuality']
 
 type ResourceResult<T> = { ok: true; data: T; updatedAt: number } | { ok: false; error: string; unauthorized: boolean }
 
@@ -30,15 +32,14 @@ function mergeResource<T>(current: ResourceState<T>, result: ResourceResult<T>):
   return result.ok ? { data: result.data, error: null, updatedAt: result.updatedAt, loading: false } : { ...current, error: result.error, loading: false }
 }
 
-export function useAdminData(token: string, onUnauthorized: () => void) {
-  const api = useMemo(() => new AdminApi(token), [token])
+export function useAdminData(api: AdminApi, active: boolean, onUnauthorized: () => void) {
   const [resources, setResources] = useState<AdminResources>(newResources)
   const [refreshing, setRefreshing] = useState(false)
   const refreshSequence = useRef(0)
 
 
   const refresh = useCallback(async (quiet = false): Promise<boolean> => {
-    if (!token) return false
+    if (!active) return false
     const sequence = ++refreshSequence.current
     if (!quiet) setRefreshing(true)
     setResources((current) => ({
@@ -47,15 +48,19 @@ export function useAdminData(token: string, onUnauthorized: () => void) {
       revisions: { ...current.revisions, loading: true },
       incidents: { ...current.incidents, loading: true },
       newsCatalog: { ...current.newsCatalog, loading: true },
+      prompts: { ...current.prompts, loading: true },
+      sourceQuality: { ...current.sourceQuality, loading: true },
     }))
-    const [configResult, reminderResult, revisionResult, incidentResult, newsCatalogResult] = await Promise.all([
+    const [configResult, reminderResult, revisionResult, incidentResult, newsCatalogResult, promptsResult, sourceQualityResult] = await Promise.all([
       capture(() => api.config()),
       capture(() => api.reminders()),
       capture(() => api.revisions()),
       capture(() => api.incidents()),
       capture(() => api.newsCatalog()),
+      capture(() => api.prompts()),
+      capture(() => api.sourceQuality()),
     ])
-    const results = [configResult, reminderResult, revisionResult, incidentResult, newsCatalogResult]
+    const results = [configResult, reminderResult, revisionResult, incidentResult, newsCatalogResult, promptsResult, sourceQualityResult]
     if (sequence !== refreshSequence.current) return false
     if (results.some((result) => !result.ok && result.unauthorized)) {
       setResources(newResources())
@@ -69,13 +74,15 @@ export function useAdminData(token: string, onUnauthorized: () => void) {
       revisions: mergeResource(current.revisions, revisionResult),
       incidents: mergeResource(current.incidents, incidentResult),
       newsCatalog: mergeResource(current.newsCatalog, newsCatalogResult),
+      prompts: mergeResource(current.prompts, promptsResult),
+      sourceQuality: mergeResource(current.sourceQuality, sourceQualityResult),
     }))
     setRefreshing(false)
     return results.some((result) => result.ok)
-  }, [api, onUnauthorized, token])
+  }, [active, api, onUnauthorized])
 
   useEffect(() => {
-    if (!token) return
+    if (!active) return
     const initial = window.setTimeout(() => { void refresh(true) }, 0)
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refresh(true)
@@ -90,7 +97,7 @@ export function useAdminData(token: string, onUnauthorized: () => void) {
       window.clearInterval(interval)
       document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [refresh, token])
+  }, [active, refresh])
 
   const reset = useCallback(() => {
     refreshSequence.current += 1

@@ -1,15 +1,40 @@
 import { expect, test, type Page } from '@playwright/test'
 
 async function mockAdminApi(page: Page) {
+  let authenticated = false
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     const now = Math.floor(Date.now() / 1000)
+    const user = {
+      id: 1,
+      username: 'owner',
+      display_name: 'Owner',
+      role: 'admin',
+      permissions: [
+        'read', 'sources:write', 'reminders:write', 'quality:write',
+        'operations:write', 'settings:write', 'users:manage',
+      ],
+    }
+    if (path === '/api/auth/session') {
+      await route.fulfill(authenticated ? { json: { user } } : { status: 401, json: { error: 'unauthorized' } })
+      return
+    }
+    if (path === '/api/auth/login') {
+      authenticated = true
+      await route.fulfill({ json: { user } })
+      return
+    }
+    if (path === '/api/auth/logout') {
+      authenticated = false
+      await route.fulfill({ json: { logged_out: true } })
+      return
+    }
     const bodies: Record<string, unknown> = {
       '/api/config': {
-        managed: { sources: [], rules: [] },
+        managed: { sources: [], rules: [], analysis: { enabled: false, shadow_mode: true }, digest: { enabled: false } },
         revision: { revision: 1, updated_at: now },
         status: {
-          database_schema: 7,
+          database_schema: 13,
           observations: 0,
           sources: [],
           incidents: { open: 0 },
@@ -22,6 +47,9 @@ async function mockAdminApi(page: Page) {
       '/api/incidents': { incidents: [], pagination: { total: 0 } },
       '/api/news-catalog': { sources: [{ id: 'wsj', publisher: 'The Wall Street Journal', homepage_url: 'https://www.wsj.com', access_model: 'mixed', integration_mode: 'verified_rss', notes: 'Headlines and original links.', feeds: [{ id: 'markets', label: 'Markets', section: 'Markets', url: 'https://feeds.a.dj.com/rss/RSSMarketsMain.xml', allowed_hosts: ['feeds.a.dj.com'] }] }] },
       '/api/outbox': { alerts: [], pagination: { next_cursor: null } },
+      '/api/prompts': { prompts: [] },
+      '/api/source-quality': { profiles: [], logic: {} },
+      '/api/digests': { digests: [], pagination: { total: 0, truncated: false } },
     }
     const body = bodies[path]
     if (body) await route.fulfill({ json: body })
@@ -31,7 +59,8 @@ async function mockAdminApi(page: Page) {
 
 async function login(page: Page) {
   await page.goto('/')
-  await page.getByLabel('管理 Token').fill('test-token')
+  await page.getByLabel('用户名').fill('owner')
+  await page.getByLabel('密码').fill('correct-horse-battery')
   await page.getByRole('button', { name: '进入后台' }).click()
   await expect(page.getByRole('heading', { name: '概览' }).first()).toBeVisible()
 }
@@ -42,10 +71,12 @@ async function openSources(page: Page) {
   await page.getByRole('button', { name: '监测来源' }).click()
 }
 
-test('login screen exposes the EyeOfSauron identity and accessible token field', async ({ page }) => {
+test('login screen exposes the EyeOfSauron identity and accessible account fields', async ({ page }) => {
+  await mockAdminApi(page)
   await page.goto('/')
   await expect(page.getByRole('heading', { name: '欢迎回到 EyeOfSauron' })).toBeVisible()
-  await expect(page.getByLabel('管理 Token')).toBeVisible()
+  await expect(page.getByLabel('用户名')).toBeVisible()
+  await expect(page.getByLabel('密码')).toBeVisible()
 })
 
 test('typed source entry never repeats the provider picker', async ({ page }) => {
@@ -97,7 +128,7 @@ test('catalog creates a disabled draft and saves with its opening revision', asy
   let backgroundRefreshed = false
   await page.route('**/api/config', (route) => {
     backgroundRefreshed = true
-    return route.fulfill({ json: { managed: { sources: [], rules: [] }, revision: { revision: 2 }, status: { runtime: { heartbeat_at: Math.floor(Date.now() / 1_000), applied_revision: 1 } } } })
+    return route.fulfill({ json: { managed: { sources: [], rules: [], analysis: { enabled: false, shadow_mode: true }, digest: { enabled: false } }, revision: { revision: 2 }, status: { runtime: { heartbeat_at: Math.floor(Date.now() / 1_000), applied_revision: 1 } } } })
   })
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await expect.poll(() => backgroundRefreshed).toBe(true)

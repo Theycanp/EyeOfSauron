@@ -79,6 +79,9 @@ class SourceConfig:
     enabled: bool = True
     settings: Mapping[str, Any] = field(default_factory=dict)
     credential_refs: Mapping[str, SecretRef] = field(default_factory=dict)
+    region: str = "GLOBAL"
+    source_tier: str = "secondary"
+    default_importance: int = 3
 
 
 # Kept as an alias for integrations written against the 0.1 RSS-only API.
@@ -91,6 +94,46 @@ class AdminConfig:
     bind: str
     port: int
     auth_token_env: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisConfig:
+    """Opt-in semantic processing and personal relevance policy."""
+
+    enabled: bool = False
+    local_enabled: bool = False
+    local_base_url: str = "http://127.0.0.1:11434/v1"
+    local_model: str = ""
+    api_enabled: bool = False
+    shadow_mode: bool = True
+    api_base_url: str = ""
+    api_model: str = ""
+    api_key_env: str = ""
+    prompt_id: str = "triage"
+    prompt_version: int = 1
+    timeout_seconds: int = 20
+    max_input_chars: int = 12000
+    max_response_bytes: int = 65536
+    max_tokens: int = 300
+    max_items_per_run: int = 50
+    daily_api_budget: int = 2
+    send_full_text: bool = False
+    region_weights: Mapping[str, int] = field(
+        default_factory=lambda: {"CN": 5, "JP": 4, "US": 5, "GLOBAL": 3, "OTHER": 3}
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DigestConfig:
+    """Daily digest publication policy. Disabled until explicitly configured."""
+
+    enabled: bool = False
+    timezone: str = "Asia/Shanghai"
+    daily_time: str = "20:00"
+    item_limit: int = 30
+    observation_limit: int = 5000
+    notify: bool = True
+    public_base_url: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +166,8 @@ class AppConfig:
     sources: tuple[SourceConfig, ...]
     rules: tuple[WeightedTextRuleConfig, ...]
     admin: AdminConfig = AdminConfig(False, "127.0.0.1", 18080, None)
+    analysis: AnalysisConfig = AnalysisConfig()
+    digest: DigestConfig = DigestConfig()
 
 
 def _mapping(value: Any, location: str) -> Mapping[str, Any]:
@@ -253,7 +298,8 @@ def _parse_source(
     allowed = {
         "id", "kind", "publisher", "section", "dedupe_scope", "url", "allowed_hosts",
         "poll_interval_seconds", "request_timeout_seconds", "request_attempts",
-        "retry_base_seconds", "max_response_bytes", "enabled", "settings",
+        "retry_base_seconds", "max_response_bytes", "enabled", "settings", "region",
+        "source_tier", "default_importance",
     }
     _reject_unknown(data, allowed, location)
     source_id = _identifier(_required(data, "id", str, location), f"{location}.id")
@@ -302,6 +348,16 @@ def _parse_source(
     )
     if not publisher or not section:
         raise ConfigError(f"{location} publisher and section cannot be empty")
+    region = _required(data, "region", str, location).strip().upper() if "region" in data else "GLOBAL"
+    if region not in {"CN", "JP", "US", "GLOBAL", "OTHER"}:
+        raise ConfigError(f"{location}.region is invalid")
+    source_tier = _required(data, "source_tier", str, location).strip().lower() if "source_tier" in data else "secondary"
+    if source_tier not in {"primary", "secondary", "social"}:
+        raise ConfigError(f"{location}.source_tier is invalid")
+    default_importance = _bounded_int(
+        {"default_importance": data.get("default_importance", 3)},
+        "default_importance", location, 1, 5,
+    )
     return SourceConfig(
         id=source_id,
         kind=kind,
@@ -318,6 +374,9 @@ def _parse_source(
         enabled=enabled,
         settings=normalized_settings,
         credential_refs=credential_refs,
+        region=region,
+        source_tier=source_tier,
+        default_importance=default_importance,
     )
 
 
@@ -348,6 +407,122 @@ def _parse_admin(raw: Any) -> AdminConfig:
     if enabled and auth_env is None:
         raise ConfigError("admin.auth_token_env is required when admin.enabled is true")
     return AdminConfig(enabled, bind, port, auth_env)
+
+
+def _parse_analysis(raw: Any) -> AnalysisConfig:
+    if raw is None:
+        return AnalysisConfig()
+    data = _mapping(raw, "analysis")
+    allowed = {
+        "enabled", "local_enabled", "local_base_url", "local_model", "api_enabled",
+        "api_base_url", "api_model", "api_key_env", "prompt_id", "prompt_version",
+        "timeout_seconds", "max_input_chars", "max_response_bytes", "max_tokens",
+        "max_items_per_run", "daily_api_budget", "send_full_text", "region_weights",
+        "shadow_mode",
+    }
+    _reject_unknown(data, allowed, "analysis")
+    booleans = ("enabled", "local_enabled", "api_enabled", "send_full_text", "shadow_mode")
+    values = {key: data.get(key, key == "shadow_mode") for key in booleans}
+    for key, value in values.items():
+        if not isinstance(value, bool):
+            raise ConfigError(f"analysis.{key} must be bool")
+    local_base_url = data.get("local_base_url", AnalysisConfig().local_base_url)
+    api_base_url = data.get("api_base_url", "")
+    local_model = data.get("local_model", "")
+    api_model = data.get("api_model", "")
+    api_key_env = data.get("api_key_env", "")
+    for key, value in (("local_base_url", local_base_url), ("api_base_url", api_base_url),
+                       ("local_model", local_model), ("api_model", api_model),
+                       ("api_key_env", api_key_env)):
+        if not isinstance(value, str) or len(value) > 256:
+            raise ConfigError(f"analysis.{key} is invalid")
+    if values["local_enabled"]:
+        parsed = urlsplit(local_base_url)
+        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ConfigError("analysis.local_base_url must be loopback HTTP")
+        if not local_model.strip():
+            raise ConfigError("analysis.local_model is required when local analysis is enabled")
+    if values["api_enabled"]:
+        api_base_url = _https_url(api_base_url, "analysis.api_base_url")
+        if not api_model.strip() or not _ENV_RE.fullmatch(api_key_env):
+            raise ConfigError("analysis API model and key environment variable are required")
+    prompt_id = data.get("prompt_id", "triage")
+    if not isinstance(prompt_id, str) or not _ID_RE.fullmatch(prompt_id):
+        raise ConfigError("analysis.prompt_id is invalid")
+    prompt_version = _bounded_int({"prompt_version": data.get("prompt_version", 1)}, "prompt_version", "analysis", 1, 10000)
+    timeout_seconds = _bounded_int({"timeout_seconds": data.get("timeout_seconds", 20)}, "timeout_seconds", "analysis", 1, 120)
+    max_input_chars = _bounded_int({"max_input_chars": data.get("max_input_chars", 12000)}, "max_input_chars", "analysis", 512, 100000)
+    max_response_bytes = _bounded_int({"max_response_bytes": data.get("max_response_bytes", 65536)}, "max_response_bytes", "analysis", 1024, 4 * 1024 * 1024)
+    max_tokens = _bounded_int({"max_tokens": data.get("max_tokens", 300)}, "max_tokens", "analysis", 1, 4096)
+    max_items_per_run = _bounded_int({"max_items_per_run": data.get("max_items_per_run", 50)}, "max_items_per_run", "analysis", 1, 500)
+    daily_api_budget = _bounded_int({"daily_api_budget": data.get("daily_api_budget", 2)}, "daily_api_budget", "analysis", 0, 1000)
+    weights = data.get("region_weights", {"CN": 5, "JP": 4, "US": 5, "GLOBAL": 3, "OTHER": 3})
+    if not isinstance(weights, Mapping) or set(weights) - {"CN", "JP", "US", "GLOBAL", "OTHER"}:
+        raise ConfigError("analysis.region_weights has invalid regions")
+    normalized_weights: dict[str, int] = {}
+    for region in ("CN", "JP", "US", "GLOBAL", "OTHER"):
+        normalized_weights[region] = _bounded_int(
+            {region: weights.get(region, 3)}, region, "analysis.region_weights", 1, 5
+        )
+    return AnalysisConfig(
+        **values,
+        local_base_url=local_base_url,
+        local_model=local_model.strip(),
+        api_base_url=api_base_url,
+        api_model=api_model.strip(),
+        api_key_env=api_key_env,
+        prompt_id=prompt_id,
+        prompt_version=prompt_version,
+        timeout_seconds=timeout_seconds,
+        max_input_chars=max_input_chars,
+        max_response_bytes=max_response_bytes,
+        max_tokens=max_tokens,
+        max_items_per_run=max_items_per_run,
+        daily_api_budget=daily_api_budget,
+        region_weights=normalized_weights,
+    )
+
+
+def _parse_digest(raw: Any) -> DigestConfig:
+    if raw is None:
+        return DigestConfig()
+    data = _mapping(raw, "digest")
+    _reject_unknown(
+        data,
+        {"enabled", "timezone", "daily_time", "item_limit", "observation_limit", "notify", "public_base_url"},
+        "digest",
+    )
+    enabled = data.get("enabled", False)
+    notify = data.get("notify", True)
+    if not isinstance(enabled, bool) or not isinstance(notify, bool):
+        raise ConfigError("digest.enabled and digest.notify must be bool")
+    timezone = data.get("timezone", "Asia/Shanghai")
+    daily_time = data.get("daily_time", "20:00")
+    public_base_url = data.get("public_base_url", "")
+    if not isinstance(timezone, str) or not timezone.strip() or len(timezone) > 128:
+        raise ConfigError("digest.timezone is invalid")
+    try:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise ConfigError("digest.timezone is unknown") from exc
+    if not isinstance(daily_time, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", daily_time):
+        raise ConfigError("digest.daily_time must use HH:MM")
+    if not isinstance(public_base_url, str) or len(public_base_url) > 512:
+        raise ConfigError("digest.public_base_url is invalid")
+    if public_base_url:
+        public_base_url = _https_url(public_base_url.rstrip("/"), "digest.public_base_url")
+    if enabled and notify and not public_base_url:
+        raise ConfigError("digest.public_base_url is required when digest notifications are enabled")
+    return DigestConfig(
+        enabled=enabled,
+        timezone=timezone,
+        daily_time=daily_time,
+        item_limit=_bounded_int({"item_limit": data.get("item_limit", 30)}, "item_limit", "digest", 1, 100),
+        observation_limit=_bounded_int({"observation_limit": data.get("observation_limit", 5000)}, "observation_limit", "digest", 1, 5000),
+        notify=notify,
+        public_base_url=public_base_url,
+    )
 
 
 def _parse_rule(raw: Any, index: int) -> WeightedTextRuleConfig:
@@ -422,7 +597,7 @@ def load_config(
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"cannot load configuration: {exc}") from exc
 
-    _reject_unknown(data, {"schema_version", "service", "ntfy", "sources", "rules", "admin"}, "top-level")
+    _reject_unknown(data, {"schema_version", "service", "ntfy", "sources", "rules", "admin", "analysis", "digest"}, "top-level")
     version = _required(data, "schema_version", int, "top-level")
     if version not in {1, 2}:
         raise ConfigError(f"unsupported schema_version: {version}")
@@ -435,6 +610,8 @@ def load_config(
 
     source_rows = list(raw_sources)
     rule_rows = list(raw_rules)
+    analysis_raw = data.get("analysis")
+    digest_raw = data.get("digest")
     base_service = _parse_service(data.get("service"))
     managed_path = base_service.managed_sources_path
     managed: Mapping[str, Any] | None = None
@@ -469,6 +646,10 @@ def load_config(
             overrides = {item.get("id"): item for item in managed["rules"] if isinstance(item, Mapping)}
             rule_rows = [overrides.pop(item.get("id"), item) if isinstance(item, Mapping) else item for item in rule_rows]
             rule_rows.extend(overrides.values())
+        if isinstance(managed.get("analysis"), Mapping):
+            analysis_raw = managed["analysis"]
+        if isinstance(managed.get("digest"), Mapping):
+            digest_raw = managed["digest"]
     sources = tuple(
         _parse_source(source, index, provider_registry=provider_registry)
         for index, source in enumerate(source_rows)
@@ -491,4 +672,6 @@ def load_config(
         sources=sources,
         rules=rules,
         admin=_parse_admin(data.get("admin")),
+        analysis=_parse_analysis(analysis_raw),
+        digest=_parse_digest(digest_raw),
     )

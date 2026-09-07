@@ -14,6 +14,8 @@ from typing import Any, Mapping
 
 from . import __version__
 from .adapters import build_collector
+from .analysis_orchestrator import AnalysisOrchestrator
+from .digest import DigestScheduler
 from .config import AppConfig, parse_source_config
 from .persistence import RuntimeRepository
 from .models import FeedFetchResult, SourceState
@@ -85,6 +87,8 @@ class ArgusService:
         rules: RuleSet,
         notifier: Notifier | None,
         config_revision: int | None = None,
+        analysis_orchestrator: AnalysisOrchestrator | None = None,
+        digest_scheduler: DigestScheduler | None = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -93,6 +97,8 @@ class ArgusService:
         self.notifier = notifier
         self.stop_event = asyncio.Event()
         self.config_revision = config_revision
+        self.analysis_orchestrator = analysis_orchestrator
+        self.digest_scheduler = digest_scheduler
         self.instance_id = uuid.uuid4().hex
         self._source_slots = asyncio.Semaphore(config.service.max_source_concurrency)
         self._jitter = random.SystemRandom()
@@ -149,6 +155,22 @@ class ArgusService:
             )
             return False
 
+        # Attach source provenance once at the service boundary so every
+        # collector (RSS, market, mail, and future adapters) shares one
+        # information-classification contract.
+        annotated = tuple(
+            replace(
+                item,
+                attributes={
+                    "region": source_config.region,
+                    "source_tier": source_config.source_tier,
+                    "importance": source_config.default_importance,
+                    **item.attributes,
+                },
+            )
+            for item in result.observations
+        )
+        result = replace(result, observations=annotated)
         report = self.database.record_source_success(
             source_id,
             result,
@@ -275,6 +297,38 @@ class ArgusService:
             self.process_reminders_once()
             try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=1.0)
+            except TimeoutError:
+                pass
+
+    async def _analysis_loop(self) -> None:
+        assert self.analysis_orchestrator is not None
+        while not self.stop_event.is_set():
+            processed = await self.analysis_orchestrator.process_once()
+            if processed:
+                LOGGER.info("analysis_batch_processed count=%d", processed)
+                continue
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=2.0)
+            except TimeoutError:
+                pass
+
+    async def _digest_loop(self) -> None:
+        assert self.digest_scheduler is not None
+        while not self.stop_event.is_set():
+            try:
+                published = await asyncio.to_thread(
+                    self.digest_scheduler.process_once, now_epoch()
+                )
+                if published is not None:
+                    LOGGER.debug(
+                        "digest_checked key=%s version=%d", published.digest_key, published.version
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.error("digest_generation_failed error=%s", sanitize_error(exc))
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=60.0)
             except TimeoutError:
                 pass
 
@@ -428,6 +482,10 @@ class ArgusService:
                         )
                 group.create_task(self._delivery_loop(), name="delivery")
                 group.create_task(self._reminder_loop(), name="reminders")
+                if self.analysis_orchestrator is not None:
+                    group.create_task(self._analysis_loop(), name="analysis")
+                if self.digest_scheduler is not None:
+                    group.create_task(self._digest_loop(), name="digest")
                 group.create_task(self._maintenance_loop(), name="maintenance")
                 group.create_task(self._heartbeat_loop(), name="heartbeat")
                 group.create_task(self._admin_job_loop(), name="admin-jobs")
@@ -448,6 +506,10 @@ class ArgusService:
 
     async def run_once(self, deliver: bool = False) -> None:
         await asyncio.gather(*(self.poll_source_once(source.id) for source in self.config.sources if source.id in self.collectors))
+        if self.analysis_orchestrator is not None:
+            await self.analysis_orchestrator.process_once()
+        if self.digest_scheduler is not None:
+            await asyncio.to_thread(self.digest_scheduler.process_once, now_epoch())
         self.process_reminders_once()
         if deliver:
             while await self.deliver_one():

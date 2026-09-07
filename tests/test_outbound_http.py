@@ -5,10 +5,19 @@ import urllib.error
 from unittest.mock import Mock, patch
 
 from argus.heartbeat import HeartbeatConfig, HeartbeatError, HeartbeatSender, _NoRedirect, main
-from argus.notifier import NtfyNotifier, NotifyError, delivery_error_details
+from argus.notifier import NtfyNotifier, NotifierRegistry, NotifyError, delivery_error_details
 
 
 class OutboundHttpTests(unittest.TestCase):
+    def test_notifier_registry_is_explicit_and_rejects_duplicates(self):
+        registry = NotifierRegistry()
+        registry.register("fake", lambda: Mock())
+        self.assertEqual(("fake",), registry.kinds())
+        with self.assertRaises(ValueError):
+            registry.register("fake", lambda: Mock())
+        with self.assertRaises(NotifyError):
+            registry.build("missing")
+
     def heartbeat(self, url="https://monitor.example/ping?id=private", **kwargs):
         return HeartbeatSender(HeartbeatConfig("URL", "TOKEN", **kwargs),
                                {"URL": url, "TOKEN": "test-token"})

@@ -6,22 +6,29 @@ import os
 import sqlite3
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
+from .analysis import AnalysisAttempt, InformationAnalysis, analyze_observation
+from .digest import DigestCluster, DigestDocument, SourceCoverage
 from .models import (
+    AnalysisWorkItem,
     AlertCandidate,
     FeedFetchResult,
     IngestReport,
+    Observation,
     OutboxMessage,
     SourceState,
 )
 from .rules import RuleSet
 from .reminders import ReminderError, ReminderSpec, next_daily_occurrence
+from .source_quality import SourceQualityPolicy, calculate_quality
 from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
+from .prompts import PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 13
 
 
 def read_active_config(path: Path) -> dict[str, Any] | None:
@@ -96,6 +103,16 @@ class Database:
                     summary TEXT NOT NULL,
                     url TEXT NOT NULL,
                     attributes_json TEXT NOT NULL,
+                    importance INTEGER NOT NULL DEFAULT 3,
+                    urgency INTEGER NOT NULL DEFAULT 2,
+                    relevance INTEGER NOT NULL DEFAULT 3,
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    region TEXT NOT NULL DEFAULT 'GLOBAL',
+                    topic TEXT NOT NULL DEFAULT 'general',
+                    source_tier TEXT NOT NULL DEFAULT 'secondary',
+                    information_type TEXT NOT NULL DEFAULT 'report',
+                    handling TEXT NOT NULL DEFAULT 'digest',
+                    processing_state TEXT NOT NULL DEFAULT 'new',
                     UNIQUE (dedupe_scope, external_id)
                 );
 
@@ -218,6 +235,19 @@ class Database:
                 );
 
                 CREATE INDEX config_audit_time_idx ON config_audit(created_at, id);
+
+                CREATE TABLE prompts (
+                    id INTEGER PRIMARY KEY,
+                    prompt_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    system_text TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                    actor TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE (prompt_id, version)
+                );
+
+                CREATE INDEX prompts_active_idx ON prompts(prompt_id, active, version DESC);
                 PRAGMA user_version=6;
                 COMMIT;
                 """
@@ -629,6 +659,383 @@ class Database:
                 self.connection.execute("PRAGMA foreign_keys=ON")
             if self.connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise RuntimeError("database foreign key check failed after schema 7 migration")
+
+        if version < 8:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 8:
+                    observation_columns = {
+                        str(row[1]) for row in self.connection.execute("PRAGMA table_info(observations)")
+                    }
+                    columns = (
+                        ("importance", "INTEGER NOT NULL DEFAULT 3"),
+                        ("urgency", "INTEGER NOT NULL DEFAULT 2"),
+                        ("relevance", "INTEGER NOT NULL DEFAULT 3"),
+                        ("confidence", "REAL NOT NULL DEFAULT 0.5"),
+                        ("region", "TEXT NOT NULL DEFAULT 'GLOBAL'"),
+                        ("topic", "TEXT NOT NULL DEFAULT 'general'"),
+                        ("source_tier", "TEXT NOT NULL DEFAULT 'secondary'"),
+                        ("information_type", "TEXT NOT NULL DEFAULT 'report'"),
+                        ("handling", "TEXT NOT NULL DEFAULT 'digest'"),
+                        ("processing_state", "TEXT NOT NULL DEFAULT 'new'"),
+                    )
+                    for name, definition in columns:
+                        if name not in observation_columns:
+                            self.connection.execute(
+                                f"ALTER TABLE observations ADD COLUMN {name} {definition}"
+                            )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS observations_handling_idx "
+                        "ON observations(handling, fetched_at DESC, id DESC)"
+                    )
+                    self.connection.execute("PRAGMA user_version=8")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 8
+
+        if version < 9:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 9:
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS prompts (
+                            id INTEGER PRIMARY KEY,
+                            prompt_id TEXT NOT NULL,
+                            version INTEGER NOT NULL,
+                            system_text TEXT NOT NULL,
+                            active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                            actor TEXT NOT NULL,
+                            created_at INTEGER NOT NULL,
+                            UNIQUE (prompt_id, version)
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS prompts_active_idx "
+                        "ON prompts(prompt_id, active, version DESC)"
+                    )
+                    self.connection.execute(
+                        """
+                        INSERT OR IGNORE INTO prompts(prompt_id, version, system_text, active, actor, created_at)
+                        VALUES (?, ?, ?, 1, ?, ?)
+                        """,
+                        (TRIAGE_V1.prompt_id, TRIAGE_V1.version, TRIAGE_V1.system_text, "system", int(time.time())),
+                    )
+                    self.connection.execute("PRAGMA user_version=9")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 9
+
+        if version < 10:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 10:
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS digests (
+                            id INTEGER PRIMARY KEY,
+                            digest_key TEXT NOT NULL,
+                            version INTEGER NOT NULL,
+                            period_start INTEGER NOT NULL,
+                            period_end INTEGER NOT NULL,
+                            timezone TEXT NOT NULL,
+                            title TEXT NOT NULL,
+                            summary TEXT NOT NULL,
+                            generation_kind TEXT NOT NULL CHECK (
+                                generation_kind IN ('algorithm', 'api')
+                            ),
+                            status TEXT NOT NULL CHECK (
+                                status IN ('draft', 'published', 'superseded')
+                            ),
+                            created_at INTEGER NOT NULL,
+                            published_at INTEGER,
+                            UNIQUE (digest_key, version),
+                            CHECK (period_end > period_start)
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS digests_one_published_idx "
+                        "ON digests(digest_key) WHERE status = 'published'"
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS digests_period_idx "
+                        "ON digests(period_start DESC, digest_key, version DESC)"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS digest_items (
+                            id INTEGER PRIMARY KEY,
+                            digest_id INTEGER NOT NULL REFERENCES digests(id) ON DELETE CASCADE,
+                            position INTEGER NOT NULL,
+                            cluster_key TEXT NOT NULL,
+                            title TEXT NOT NULL,
+                            summary TEXT NOT NULL,
+                            score REAL NOT NULL,
+                            importance INTEGER NOT NULL CHECK (importance BETWEEN 1 AND 5),
+                            urgency INTEGER NOT NULL CHECK (urgency BETWEEN 1 AND 5),
+                            relevance INTEGER NOT NULL CHECK (relevance BETWEEN 1 AND 5),
+                            confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+                            published_at INTEGER NOT NULL,
+                            regions_json TEXT NOT NULL,
+                            topics_json TEXT NOT NULL,
+                            source_ids_json TEXT NOT NULL,
+                            observation_ids_json TEXT NOT NULL,
+                            links_json TEXT NOT NULL,
+                            UNIQUE (digest_id, position),
+                            UNIQUE (digest_id, cluster_key)
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS digest_source_coverage (
+                            digest_id INTEGER NOT NULL REFERENCES digests(id) ON DELETE CASCADE,
+                            source_id TEXT NOT NULL,
+                            status TEXT NOT NULL CHECK (
+                                status IN (
+                                    'covered', 'quiet', 'degraded',
+                                    'stale', 'disabled', 'unknown'
+                                )
+                            ),
+                            observation_count INTEGER NOT NULL CHECK (observation_count >= 0),
+                            last_attempt_at INTEGER,
+                            last_success_at INTEGER,
+                            consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (
+                                consecutive_failures >= 0
+                            ),
+                            PRIMARY KEY (digest_id, source_id)
+                        )
+                        """
+                    )
+                    self.connection.execute("PRAGMA user_version=10")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 10
+
+        if version < 11:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 11:
+                    observation_columns = {
+                        str(row[1])
+                        for row in self.connection.execute("PRAGMA table_info(observations)")
+                    }
+                    for name, definition in (
+                        ("analysis_lease_token", "TEXT"),
+                        ("analysis_lease_until", "INTEGER"),
+                        ("analysis_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                        ("analysis_error", "TEXT"),
+                        ("analyzed_at", "INTEGER"),
+                    ):
+                        if name not in observation_columns:
+                            self.connection.execute(
+                                f"ALTER TABLE observations ADD COLUMN {name} {definition}"
+                            )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS observations_analysis_due_idx "
+                        "ON observations(processing_state, analysis_lease_until, fetched_at, id)"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS analysis_runs (
+                            id INTEGER PRIMARY KEY,
+                            observation_id INTEGER NOT NULL REFERENCES observations(id)
+                                ON DELETE CASCADE,
+                            analyzer TEXT NOT NULL,
+                            outcome TEXT NOT NULL CHECK (
+                                outcome IN ('succeeded', 'failed', 'budget_exhausted')
+                            ),
+                            shadow INTEGER NOT NULL CHECK (shadow IN (0, 1)),
+                            advisory_json TEXT,
+                            error TEXT,
+                            duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+                            created_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS analysis_runs_observation_idx "
+                        "ON analysis_runs(observation_id, created_at, id)"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS analysis_api_usage (
+                            budget_day TEXT PRIMARY KEY,
+                            calls INTEGER NOT NULL CHECK (calls >= 0),
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute("PRAGMA user_version=11")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 11
+
+        if version < 12:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 12:
+                    digest_columns = {
+                        str(row[1])
+                        for row in self.connection.execute("PRAGMA table_info(digest_items)")
+                    }
+                    if "handling" not in digest_columns:
+                        self.connection.execute(
+                            "ALTER TABLE digest_items ADD COLUMN handling TEXT NOT NULL DEFAULT 'digest' "
+                            "CHECK (handling IN ('digest', 'immediate'))"
+                        )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS source_quality_feedback (
+                            id INTEGER PRIMARY KEY,
+                            source_id TEXT NOT NULL,
+                            observation_id INTEGER REFERENCES observations(id) ON DELETE SET NULL,
+                            signal INTEGER NOT NULL CHECK (signal IN (-1, 0, 1)),
+                            reason TEXT NOT NULL,
+                            actor TEXT NOT NULL,
+                            created_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS source_quality_feedback_source_time_idx "
+                        "ON source_quality_feedback(source_id, created_at, id)"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS source_quality_overrides (
+                            source_id TEXT PRIMARY KEY,
+                            weight REAL NOT NULL CHECK (weight BETWEEN 0.70 AND 1.15),
+                            reason TEXT NOT NULL,
+                            actor TEXT NOT NULL,
+                            created_at INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS source_quality_state (
+                            source_id TEXT PRIMARY KEY,
+                            automatic_weight REAL NOT NULL CHECK (
+                                automatic_weight BETWEEN 0.70 AND 1.15
+                            ),
+                            calculated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS source_quality_audit (
+                            id INTEGER PRIMARY KEY,
+                            source_id TEXT NOT NULL,
+                            action TEXT NOT NULL CHECK (
+                                action IN ('feedback', 'override_set', 'override_cleared')
+                            ),
+                            actor TEXT NOT NULL,
+                            details_json TEXT NOT NULL,
+                            created_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS source_quality_audit_source_time_idx "
+                        "ON source_quality_audit(source_id, created_at DESC, id DESC)"
+                    )
+                    self.connection.execute("PRAGMA user_version=12")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 12
+
+        if version < 13:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 13:
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS admin_users (
+                            id INTEGER PRIMARY KEY,
+                            username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                            display_name TEXT NOT NULL,
+                            password_hash TEXT NOT NULL,
+                            role TEXT NOT NULL CHECK (role IN ('admin', 'operator', 'viewer')),
+                            enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                            session_version INTEGER NOT NULL DEFAULT 1,
+                            created_at INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL,
+                            last_login_at INTEGER
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS admin_sessions (
+                            session_hash TEXT PRIMARY KEY,
+                            csrf_hash TEXT NOT NULL,
+                            user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+                            session_version INTEGER NOT NULL,
+                            created_at INTEGER NOT NULL,
+                            expires_at INTEGER NOT NULL,
+                            last_seen_at INTEGER NOT NULL,
+                            revoked_at INTEGER
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS admin_sessions_user_expiry_idx "
+                        "ON admin_sessions(user_id, expires_at)"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS admin_login_limits (
+                            subject_hash TEXT PRIMARY KEY,
+                            failures INTEGER NOT NULL CHECK (failures >= 0),
+                            window_started_at INTEGER NOT NULL,
+                            blocked_until INTEGER NOT NULL DEFAULT 0,
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS admin_auth_audit (
+                            id INTEGER PRIMARY KEY,
+                            user_id INTEGER REFERENCES admin_users(id) ON DELETE SET NULL,
+                            action TEXT NOT NULL,
+                            actor TEXT NOT NULL,
+                            details_json TEXT NOT NULL DEFAULT '{}',
+                            created_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS admin_auth_audit_time_idx "
+                        "ON admin_auth_audit(created_at DESC, id DESC)"
+                    )
+                    self.connection.execute("PRAGMA user_version=13")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 13
 
     def close(self) -> None:
         self.connection.close()
@@ -1060,12 +1467,15 @@ class Database:
         recovery_queued = False
         with self.unit_of_work():
             for observation in result.observations:
+                analysis = analyze_observation(observation)
                 cursor = self.connection.execute(
                     """
                     INSERT OR IGNORE INTO observations(
                         source_id, publisher, dedupe_scope, external_id,
-                        published_at, fetched_at, title, summary, url, attributes_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        published_at, fetched_at, title, summary, url, attributes_json,
+                        importance, urgency, relevance, confidence, region, topic,
+                        source_tier, information_type, handling, processing_state
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         observation.source_id,
@@ -1078,6 +1488,16 @@ class Database:
                         observation.summary,
                         observation.url,
                         json.dumps(observation.attributes, ensure_ascii=False, sort_keys=True),
+                        analysis.importance,
+                        analysis.urgency,
+                        analysis.relevance,
+                        analysis.confidence,
+                        analysis.region,
+                        analysis.topic,
+                        analysis.source_tier,
+                        analysis.information_type,
+                        analysis.handling,
+                        observation.processing_state,
                     ),
                 )
                 if cursor.rowcount != 1:
@@ -1820,6 +2240,854 @@ class Database:
             raise RuntimeError("stored configuration revision must be an object")
         return result
 
+    def get_prompt(self, prompt_id: str, version: int | None = None) -> dict[str, Any] | None:
+        if not prompt_id or len(prompt_id) > 64:
+            raise ValueError("prompt ID is invalid")
+        if version is not None and version < 1:
+            raise ValueError("prompt version is invalid")
+        if version is None:
+            row = self.connection.execute(
+                "SELECT * FROM prompts WHERE prompt_id = ? AND active = 1 "
+                "ORDER BY version DESC LIMIT 1", (prompt_id,)
+            ).fetchone()
+        else:
+            row = self.connection.execute(
+                "SELECT * FROM prompts WHERE prompt_id = ? AND version = ?",
+                (prompt_id, version),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_prompts(self, prompt_id: str | None = None) -> list[dict[str, Any]]:
+        if prompt_id is None:
+            rows = self.connection.execute(
+                "SELECT * FROM prompts ORDER BY prompt_id, version DESC"
+            )
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM prompts WHERE prompt_id = ? ORDER BY version DESC",
+                (prompt_id,),
+            )
+        return [dict(row) for row in rows]
+
+    def save_prompt(
+        self,
+        prompt_id: str,
+        version: int,
+        system_text: str,
+        actor: str,
+        now: int,
+        *,
+        active: bool = True,
+    ) -> None:
+        template = PromptTemplate(prompt_id, version, system_text)
+        if len(actor.strip()) > 128:
+            raise ValueError("prompt actor is too long")
+        with self.connection:
+            if active:
+                self.connection.execute(
+                    "UPDATE prompts SET active = 0 WHERE prompt_id = ?", (prompt_id,)
+                )
+            self.connection.execute(
+                """
+                INSERT INTO prompts(prompt_id, version, system_text, active, actor, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(prompt_id, version) DO UPDATE SET
+                    system_text = excluded.system_text,
+                    active = excluded.active,
+                    actor = excluded.actor,
+                    created_at = excluded.created_at
+                """,
+                (template.prompt_id, template.version, template.system_text,
+                 int(active), actor.strip()[:128], int(now)),
+            )
+
+    def list_observations(
+        self,
+        since: int,
+        until: int,
+        *,
+        handling: str | None = None,
+        region: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Read normalized observations through the repository boundary."""
+        if since < 0 or until < since:
+            raise ValueError("observation time range is invalid")
+        if not 1 <= limit <= 5000:
+            raise ValueError("observation limit is out of range")
+        clauses = ["published_at >= ?", "published_at < ?"]
+        params: list[Any] = [since, until]
+        if handling is not None:
+            if handling not in {"immediate", "digest", "archive"}:
+                raise ValueError("observation handling is invalid")
+            clauses.append("handling = ?")
+            params.append(handling)
+        if region is not None:
+            if not region or len(region) > 16:
+                raise ValueError("observation region is invalid")
+            clauses.append("region = ?")
+            params.append(region.upper())
+        params.append(limit)
+        rows = self.connection.execute(
+            "SELECT id, source_id, publisher, published_at, fetched_at, title, summary, "
+            "url, attributes_json, importance, urgency, relevance, confidence, region, "
+            "topic, source_tier, information_type, handling, processing_state "
+            f"FROM observations WHERE {' AND '.join(clauses)} "
+            "ORDER BY published_at DESC, id DESC LIMIT ?",
+            params,
+        )
+        observations: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["attributes"] = json.loads(item.pop("attributes_json"))
+            except (TypeError, ValueError):
+                item["attributes"] = {}
+            observations.append(item)
+        return observations
+
+    def claim_analysis_observations(
+        self, now: int, *, limit: int, lease_seconds: int
+    ) -> list[AnalysisWorkItem]:
+        """Lease unprocessed observations without holding a transaction during inference."""
+        if now < 0:
+            raise ValueError("analysis claim time is invalid")
+        if not 1 <= limit <= 500:
+            raise ValueError("analysis claim limit is out of range")
+        if not 10 <= lease_seconds <= 3600:
+            raise ValueError("analysis lease is out of range")
+        token = uuid.uuid4().hex
+        with self.unit_of_work():
+            rows = list(self.connection.execute(
+                """
+                SELECT id FROM observations
+                WHERE processing_state = 'new'
+                   OR (
+                       processing_state = 'processing'
+                       AND COALESCE(analysis_lease_until, 0) <= ?
+                   )
+                ORDER BY fetched_at, id
+                LIMIT ?
+                """,
+                (now, limit),
+            ))
+            ids = [int(row["id"]) for row in rows]
+            if not ids:
+                return []
+            placeholders = ",".join("?" for _ in ids)
+            self.connection.execute(
+                f"""
+                UPDATE observations
+                SET processing_state = 'processing', analysis_lease_token = ?,
+                    analysis_lease_until = ?, analysis_attempts = analysis_attempts + 1,
+                    analysis_error = NULL
+                WHERE id IN ({placeholders})
+                """,
+                (token, now + lease_seconds, *ids),
+            )
+            leased = list(self.connection.execute(
+                f"""
+                SELECT id, source_id, publisher, dedupe_scope, external_id,
+                       published_at, fetched_at, title, summary, url, attributes_json,
+                       importance, urgency, relevance, confidence, region, topic,
+                       source_tier, information_type, handling, processing_state,
+                       analysis_lease_token, analysis_attempts
+                FROM observations
+                WHERE id IN ({placeholders}) AND analysis_lease_token = ?
+                ORDER BY fetched_at, id
+                """,
+                (*ids, token),
+            ))
+
+        items: list[AnalysisWorkItem] = []
+        for row in leased:
+            try:
+                attributes = json.loads(row["attributes_json"])
+            except (TypeError, ValueError):
+                attributes = {}
+            if not isinstance(attributes, dict):
+                attributes = {}
+            observation = Observation(
+                source_id=str(row["source_id"]),
+                publisher=str(row["publisher"]),
+                dedupe_scope=str(row["dedupe_scope"]),
+                external_id=str(row["external_id"]),
+                published_at=datetime.fromtimestamp(int(row["published_at"]), UTC),
+                title=str(row["title"]),
+                summary=str(row["summary"]),
+                url=str(row["url"]),
+                attributes=attributes,
+                importance=int(row["importance"]),
+                urgency=int(row["urgency"]),
+                relevance=int(row["relevance"]),
+                confidence=float(row["confidence"]),
+                region=str(row["region"]),
+                topic=str(row["topic"]),
+                source_tier=str(row["source_tier"]),
+                information_type=str(row["information_type"]),
+                handling=str(row["handling"]),
+                processing_state=str(row["processing_state"]),
+            )
+            items.append(AnalysisWorkItem(
+                observation_id=int(row["id"]),
+                observation=observation,
+                lease_token=str(row["analysis_lease_token"]),
+                fetched_at=int(row["fetched_at"]),
+                attempts=int(row["analysis_attempts"]),
+            ))
+        return items
+
+    def reserve_analysis_api_call(
+        self, budget_day: str, *, limit: int, now: int
+    ) -> bool:
+        """Atomically reserve one remote analysis call against a UTC-day budget."""
+        try:
+            parsed_day = datetime.strptime(budget_day, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise ValueError("analysis budget day is invalid") from exc
+        if parsed_day.isoformat() != budget_day:
+            raise ValueError("analysis budget day is invalid")
+        if not 0 <= limit <= 1000:
+            raise ValueError("analysis API budget is out of range")
+        if limit == 0:
+            return False
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT calls FROM analysis_api_usage WHERE budget_day = ?",
+                (budget_day,),
+            ).fetchone()
+            used = int(row["calls"]) if row is not None else 0
+            if used >= limit:
+                return False
+            self.connection.execute(
+                """
+                INSERT INTO analysis_api_usage(budget_day, calls, updated_at)
+                VALUES (?, 1, ?)
+                ON CONFLICT(budget_day) DO UPDATE SET
+                    calls = analysis_api_usage.calls + 1,
+                    updated_at = excluded.updated_at
+                """,
+                (budget_day, now),
+            )
+        return True
+
+    def save_analysis_result(
+        self,
+        observation_id: int,
+        lease_token: str,
+        analysis: InformationAnalysis,
+        attempts: list[AnalysisAttempt] | tuple[AnalysisAttempt, ...],
+        *,
+        processing_state: str,
+        now: int,
+        error: str | None = None,
+    ) -> None:
+        """Persist the final classification and its stage-by-stage audit trail."""
+        if processing_state not in {"analyzed", "degraded"}:
+            raise ValueError("analysis processing state is invalid")
+        if not lease_token or len(lease_token) > 128:
+            raise ValueError("analysis lease token is invalid")
+        encoded_attempts: list[tuple[AnalysisAttempt, str | None, str | None]] = []
+        for attempt in attempts:
+            advisory_json = (
+                json.dumps(attempt.advisory, ensure_ascii=False, sort_keys=True)
+                if attempt.advisory is not None
+                else None
+            )
+            encoded_attempts.append(
+                (attempt, advisory_json, sanitize_error(attempt.error) if attempt.error else None)
+            )
+        with self.unit_of_work():
+            updated = self.connection.execute(
+                """
+                UPDATE observations
+                SET importance = ?, urgency = ?, relevance = ?, confidence = ?,
+                    region = ?, topic = ?, source_tier = ?, information_type = ?,
+                    handling = ?, processing_state = ?, analysis_lease_token = NULL,
+                    analysis_lease_until = NULL, analysis_error = ?, analyzed_at = ?
+                WHERE id = ? AND processing_state = 'processing'
+                  AND analysis_lease_token = ?
+                """,
+                (
+                    analysis.importance,
+                    analysis.urgency,
+                    analysis.relevance,
+                    analysis.confidence,
+                    analysis.region,
+                    analysis.topic,
+                    analysis.source_tier,
+                    analysis.information_type,
+                    analysis.handling,
+                    processing_state,
+                    sanitize_error(error) if error else None,
+                    now,
+                    observation_id,
+                    lease_token,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("analysis lease is stale or observation does not exist")
+            for attempt, advisory_json, attempt_error in encoded_attempts:
+                self.connection.execute(
+                    """
+                    INSERT INTO analysis_runs(
+                        observation_id, analyzer, outcome, shadow, advisory_json,
+                        error, duration_ms, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        observation_id,
+                        attempt.analyzer[:64],
+                        attempt.outcome,
+                        int(attempt.shadow),
+                        advisory_json,
+                        attempt_error,
+                        max(0, int(attempt.duration_ms)),
+                        now,
+                    ),
+                )
+
+    def list_source_coverage(
+        self,
+        since: int,
+        until: int,
+        *,
+        source_ids: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return source health and period coverage without exposing SQL upstream."""
+        if since < 0 or until < since:
+            raise ValueError("source coverage time range is invalid")
+        requested: list[str] | None = None
+        if source_ids is not None:
+            requested = list(dict.fromkeys(str(item).strip() for item in source_ids))
+            if any(not item or len(item) > 128 for item in requested):
+                raise ValueError("source coverage contains an invalid source ID")
+            if len(requested) > 1000:
+                raise ValueError("source coverage source limit is out of range")
+            if not requested:
+                return []
+            placeholders = ",".join("?" for _ in requested)
+            state_rows = self.connection.execute(
+                "SELECT c.source_id, c.last_attempt_at, c.last_success_at, "
+                "c.consecutive_failures, r.configured_enabled, r.runtime_status "
+                "FROM collector_state AS c LEFT JOIN source_runtime AS r "
+                "ON r.source_id = c.source_id "
+                f"WHERE c.source_id IN ({placeholders})",
+                requested,
+            )
+        else:
+            state_rows = self.connection.execute(
+                "SELECT c.source_id, c.last_attempt_at, c.last_success_at, "
+                "c.consecutive_failures, r.configured_enabled, r.runtime_status "
+                "FROM collector_state AS c LEFT JOIN source_runtime AS r "
+                "ON r.source_id = c.source_id"
+            )
+        states = {str(row["source_id"]): dict(row) for row in state_rows}
+        expected = requested if requested is not None else sorted(states)
+        counts: dict[str, int] = {}
+        if expected:
+            placeholders = ",".join("?" for _ in expected)
+            rows = self.connection.execute(
+                "SELECT source_id, COUNT(*) AS observation_count FROM observations "
+                "WHERE published_at >= ? AND published_at < ? "
+                f"AND source_id IN ({placeholders}) GROUP BY source_id",
+                [since, until, *expected],
+            )
+            counts = {str(row["source_id"]): int(row["observation_count"]) for row in rows}
+
+        result: list[dict[str, Any]] = []
+        for source_id in expected:
+            state = states.get(source_id, {})
+            count = counts.get(source_id, 0)
+            enabled = state.get("configured_enabled")
+            runtime_status = state.get("runtime_status")
+            failures = int(state.get("consecutive_failures") or 0)
+            last_success = state.get("last_success_at")
+            if enabled == 0:
+                status = "disabled"
+            elif runtime_status in {"invalid", "degraded"} or failures > 0:
+                status = "degraded"
+            elif runtime_status == "stale":
+                status = "stale"
+            elif count:
+                status = "covered"
+            elif last_success is not None and int(last_success) >= since:
+                status = "quiet"
+            elif last_success is not None:
+                status = "stale"
+            else:
+                status = "unknown"
+            result.append(
+                {
+                    "source_id": source_id,
+                    "status": status,
+                    "observation_count": count,
+                    "last_attempt_at": state.get("last_attempt_at"),
+                    "last_success_at": last_success,
+                    "consecutive_failures": failures,
+                }
+            )
+        return result
+
+    @staticmethod
+    def _validate_source_quality_source_id(source_id: str) -> str:
+        normalized = source_id.strip()
+        if not normalized or len(normalized) > 128:
+            raise ValueError("source quality source ID is invalid")
+        return normalized
+
+    def _known_source_id(self, source_id: str) -> bool:
+        return self.connection.execute(
+            "SELECT 1 FROM source_runtime WHERE source_id = ? "
+            "UNION SELECT 1 FROM collector_state WHERE source_id = ? "
+            "UNION SELECT 1 FROM observations WHERE source_id = ? LIMIT 1",
+            (source_id, source_id, source_id),
+        ).fetchone() is not None
+
+    def list_source_quality(
+        self,
+        *,
+        source_ids: Sequence[str] | None = None,
+        now: int | None = None,
+    ) -> list[dict[str, Any]]:
+        calculated_at = int(time.time()) if now is None else int(now)
+        if calculated_at < 0:
+            raise ValueError("source quality calculation time is invalid")
+        if source_ids is None:
+            rows = self.connection.execute(
+                "SELECT source_id FROM source_runtime UNION SELECT source_id FROM collector_state "
+                "UNION SELECT source_id FROM source_quality_feedback "
+                "UNION SELECT source_id FROM source_quality_overrides ORDER BY source_id"
+            )
+            identifiers = [str(row["source_id"]) for row in rows]
+        else:
+            identifiers = list(dict.fromkeys(
+                self._validate_source_quality_source_id(str(item)) for item in source_ids
+            ))
+        if len(identifiers) > 1000:
+            raise ValueError("source quality source limit is out of range")
+
+        policy = SourceQualityPolicy()
+        profiles: list[dict[str, Any]] = []
+        for source_id in identifiers:
+            feedback = [dict(row) for row in self.connection.execute(
+                "SELECT signal, created_at FROM source_quality_feedback "
+                "WHERE source_id = ? ORDER BY created_at, id",
+                (source_id,),
+            )]
+            override = self.connection.execute(
+                "SELECT weight, reason, actor, created_at, updated_at "
+                "FROM source_quality_overrides WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+            state = self.connection.execute(
+                "SELECT automatic_weight, calculated_at FROM source_quality_state WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+            previous_weight = float(state["automatic_weight"]) if state is not None else 1.0
+            previous_at = int(state["calculated_at"]) if state is not None else None
+            profile = calculate_quality(
+                source_id,
+                feedback,
+                now=calculated_at,
+                policy=policy,
+                current_weight=previous_weight,
+                manual_override=float(override["weight"]) if override is not None else None,
+                updated_at=previous_at,
+            )
+            automatic = calculate_quality(
+                source_id,
+                feedback,
+                now=calculated_at,
+                policy=policy,
+                current_weight=previous_weight,
+                updated_at=previous_at,
+            )
+            if state is None or automatic.weight != previous_weight:
+                with self.connection:
+                    self.connection.execute(
+                        "INSERT INTO source_quality_state(source_id, automatic_weight, calculated_at) "
+                        "VALUES (?, ?, ?) ON CONFLICT(source_id) DO UPDATE SET "
+                        "automatic_weight = excluded.automatic_weight, calculated_at = excluded.calculated_at",
+                        (source_id, automatic.weight, calculated_at),
+                    )
+            item = {
+                "source_id": profile.source_id,
+                "weight": profile.weight,
+                "automatic_weight": automatic.weight,
+                "score": profile.score,
+                "effective_samples": profile.effective_samples,
+                "positive_count": profile.positive_count,
+                "negative_count": profile.negative_count,
+                "neutral_count": profile.neutral_count,
+                "first_feedback_at": profile.first_feedback_at,
+                "last_feedback_at": profile.last_feedback_at,
+                "evidence_span_days": profile.evidence_span_days,
+                "eligible": automatic.eligible,
+                "manual_override": profile.manual_override,
+                "updated_at": calculated_at,
+                "override_reason": str(override["reason"]) if override is not None else None,
+                "override_actor": str(override["actor"]) if override is not None else None,
+                "override_updated_at": int(override["updated_at"]) if override is not None else None,
+                "policy": {
+                    "half_life_days": policy.half_life_days,
+                    "min_effective_samples": policy.min_effective_samples,
+                    "min_span_days": policy.min_span_days,
+                    "prior_positive": policy.prior_positive,
+                    "prior_negative": policy.prior_negative,
+                    "minimum_weight": policy.minimum_weight,
+                    "maximum_weight": policy.maximum_weight,
+                    "maximum_change_per_30_days": policy.maximum_change_per_30_days,
+                    "scope": "digest_ranking_only",
+                },
+            }
+            profiles.append(item)
+        return profiles
+
+    def record_source_quality_feedback(
+        self,
+        source_id: str,
+        signal: int,
+        reason: str,
+        actor: str,
+        now: int,
+        observation_id: int | None = None,
+    ) -> int:
+        source_id = self._validate_source_quality_source_id(source_id)
+        if signal not in {-1, 0, 1} or now < 0:
+            raise ValueError("source quality feedback is invalid")
+        reason = reason.strip()
+        actor = actor.strip()
+        if not reason or len(reason) > 1000 or not actor or len(actor) > 128:
+            raise ValueError("source quality feedback metadata is invalid")
+        if not self._known_source_id(source_id):
+            raise KeyError(f"unknown source: {source_id}")
+        if observation_id is not None and self.connection.execute(
+            "SELECT 1 FROM observations WHERE id = ? AND source_id = ?",
+            (observation_id, source_id),
+        ).fetchone() is None:
+            raise ValueError("feedback observation does not belong to the source")
+        with self.unit_of_work():
+            cursor = self.connection.execute(
+                "INSERT INTO source_quality_feedback(source_id, observation_id, signal, reason, actor, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (source_id, observation_id, signal, reason, actor, now),
+            )
+            self.connection.execute(
+                "INSERT INTO source_quality_audit(source_id, action, actor, details_json, created_at) "
+                "VALUES (?, 'feedback', ?, ?, ?)",
+                (source_id, actor, json.dumps({"signal": signal, "reason": reason, "observation_id": observation_id}, ensure_ascii=False), now),
+            )
+        return int(cursor.lastrowid)
+
+    def set_source_quality_override(
+        self, source_id: str, weight: float, reason: str, actor: str, now: int
+    ) -> None:
+        source_id = self._validate_source_quality_source_id(source_id)
+        if isinstance(weight, bool) or not 0.70 <= float(weight) <= 1.15 or now < 0:
+            raise ValueError("source quality override weight is invalid")
+        reason = reason.strip()
+        actor = actor.strip()
+        if not reason or len(reason) > 1000 or not actor or len(actor) > 128:
+            raise ValueError("source quality override metadata is invalid")
+        if not self._known_source_id(source_id):
+            raise KeyError(f"unknown source: {source_id}")
+        with self.unit_of_work():
+            self.connection.execute(
+                "INSERT INTO source_quality_overrides(source_id, weight, reason, actor, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(source_id) DO UPDATE SET "
+                "weight = excluded.weight, reason = excluded.reason, actor = excluded.actor, "
+                "updated_at = excluded.updated_at",
+                (source_id, float(weight), reason, actor, now, now),
+            )
+            self.connection.execute(
+                "INSERT INTO source_quality_audit(source_id, action, actor, details_json, created_at) "
+                "VALUES (?, 'override_set', ?, ?, ?)",
+                (source_id, actor, json.dumps({"weight": float(weight), "reason": reason}, ensure_ascii=False), now),
+            )
+
+    def clear_source_quality_override(self, source_id: str, actor: str, now: int) -> bool:
+        source_id = self._validate_source_quality_source_id(source_id)
+        actor = actor.strip()
+        if not actor or len(actor) > 128 or now < 0:
+            raise ValueError("source quality override request is invalid")
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT weight, reason FROM source_quality_overrides WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            self.connection.execute(
+                "DELETE FROM source_quality_overrides WHERE source_id = ?", (source_id,)
+            )
+            self.connection.execute(
+                "INSERT INTO source_quality_audit(source_id, action, actor, details_json, created_at) "
+                "VALUES (?, 'override_cleared', ?, ?, ?)",
+                (source_id, actor, json.dumps({"previous_weight": float(row["weight"]), "previous_reason": str(row["reason"])}, ensure_ascii=False), now),
+            )
+        return True
+
+    def list_source_quality_audit(self, source_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        source_id = self._validate_source_quality_source_id(source_id)
+        if not 1 <= limit <= 500:
+            raise ValueError("source quality audit limit is out of range")
+        result = []
+        for row in self.connection.execute(
+            "SELECT id, source_id, action, actor, details_json, created_at "
+            "FROM source_quality_audit WHERE source_id = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (source_id, limit),
+        ):
+            item = dict(row)
+            item["details"] = json.loads(item.pop("details_json"))
+            result.append(item)
+        return result
+
+    def save_digest(self, digest: DigestDocument) -> DigestDocument:
+        """Allocate and store the next immutable version of a digest."""
+        if digest.version != 0 or digest.status != "draft" or digest.published_at is not None:
+            raise ValueError("new digest must be an unversioned draft")
+        if len({item.cluster_key for item in digest.items}) != len(digest.items):
+            raise ValueError("digest contains duplicate cluster keys")
+        if len({item.source_id for item in digest.coverage}) != len(digest.coverage):
+            raise ValueError("digest contains duplicate source coverage")
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT version, period_start, period_end, timezone FROM digests "
+                "WHERE digest_key = ? ORDER BY version DESC LIMIT 1",
+                (digest.digest_key,),
+            ).fetchone()
+            if row is not None and (
+                int(row["period_start"]) != digest.period_start
+                or int(row["period_end"]) != digest.period_end
+                or str(row["timezone"]) != digest.timezone
+            ):
+                raise ValueError("digest revisions must describe the same period")
+            version = int(row["version"]) + 1 if row is not None else 1
+            cursor = self.connection.execute(
+                """
+                INSERT INTO digests(
+                    digest_key, version, period_start, period_end, timezone, title,
+                    summary, generation_kind, status, created_at, published_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, NULL)
+                """,
+                (
+                    digest.digest_key,
+                    version,
+                    digest.period_start,
+                    digest.period_end,
+                    digest.timezone,
+                    digest.title,
+                    digest.summary,
+                    digest.generation_kind,
+                    digest.created_at,
+                ),
+            )
+            digest_id = int(cursor.lastrowid)
+            for position, item in enumerate(digest.items):
+                self.connection.execute(
+                    """
+                    INSERT INTO digest_items(
+                        digest_id, position, cluster_key, title, summary, score,
+                        importance, urgency, relevance, confidence, published_at,
+                        regions_json, topics_json, source_ids_json,
+                        observation_ids_json, links_json, handling
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        digest_id,
+                        position,
+                        item.cluster_key,
+                        item.title,
+                        item.summary,
+                        item.score,
+                        item.importance,
+                        item.urgency,
+                        item.relevance,
+                        item.confidence,
+                        item.published_at,
+                        json.dumps(item.regions, ensure_ascii=False),
+                        json.dumps(item.topics, ensure_ascii=False),
+                        json.dumps(item.source_ids, ensure_ascii=False),
+                        json.dumps(item.observation_ids),
+                        json.dumps(item.links, ensure_ascii=False),
+                        item.handling,
+                    ),
+                )
+            for item in digest.coverage:
+                self.connection.execute(
+                    """
+                    INSERT INTO digest_source_coverage(
+                        digest_id, source_id, status, observation_count,
+                        last_attempt_at, last_success_at, consecutive_failures
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        digest_id,
+                        item.source_id,
+                        item.status,
+                        item.observation_count,
+                        item.last_attempt_at,
+                        item.last_success_at,
+                        item.consecutive_failures,
+                    ),
+                )
+        saved = self.get_digest(digest.digest_key, version)
+        assert saved is not None
+        return saved
+
+    def publish_digest(self, digest_key: str, version: int, now: int) -> DigestDocument:
+        """Atomically publish one version and supersede the previous publication."""
+        if not digest_key or version < 1 or now < 0:
+            raise ValueError("digest publication request is invalid")
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT id, status FROM digests WHERE digest_key = ? AND version = ?",
+                (digest_key, version),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"digest does not exist: {digest_key}@{version}")
+            if row["status"] != "published":
+                self.connection.execute(
+                    "UPDATE digests SET status = 'superseded' "
+                    "WHERE digest_key = ? AND status = 'published' AND version != ?",
+                    (digest_key, version),
+                )
+                self.connection.execute(
+                    "UPDATE digests SET status = 'published', published_at = ? WHERE id = ?",
+                    (now, int(row["id"])),
+                )
+        published = self.get_digest(digest_key, version)
+        assert published is not None
+        return published
+
+    def enqueue_digest_notification(
+        self,
+        digest: DigestDocument,
+        *,
+        topic: str,
+        click_url: str,
+        now: int,
+    ) -> bool:
+        if digest.status != "published":
+            raise ValueError("only a published digest can be notified")
+        candidate = AlertCandidate(
+            rule_id="digest.daily",
+            dedupe_key=f"digest:{digest.digest_key}:{digest.version}",
+            title=digest.title,
+            message=digest.summary,
+            priority=3,
+            tags=("newspaper", "eye"),
+            click_url=click_url,
+            topic=topic,
+            confidence=1.0,
+            evidence=(f"digest {digest.digest_key}@{digest.version}",),
+        )
+        with self.connection:
+            return self._insert_alert(candidate, None, now)
+
+    def get_digest(
+        self,
+        digest_key: str,
+        version: int | None = None,
+        *,
+        published_only: bool = False,
+    ) -> DigestDocument | None:
+        clauses = ["digest_key = ?"]
+        params: list[Any] = [digest_key]
+        if version is not None:
+            if version < 1:
+                raise ValueError("digest version is invalid")
+            clauses.append("version = ?")
+            params.append(version)
+        if published_only:
+            clauses.append("status = 'published'")
+        row = self.connection.execute(
+            f"SELECT * FROM digests WHERE {' AND '.join(clauses)} "
+            "ORDER BY version DESC LIMIT 1",
+            params,
+        ).fetchone()
+        return self._digest_from_row(row) if row is not None else None
+
+    def list_digests(
+        self, *, status: str | None = None, limit: int = 30
+    ) -> list[DigestDocument]:
+        if status is not None and status not in {"draft", "published", "superseded"}:
+            raise ValueError("digest status is invalid")
+        if not 1 <= limit <= 500:
+            raise ValueError("digest limit is out of range")
+        if status is None:
+            rows = self.connection.execute(
+                "SELECT * FROM digests ORDER BY period_start DESC, digest_key, version DESC LIMIT ?",
+                (limit,),
+            )
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM digests WHERE status = ? "
+                "ORDER BY period_start DESC, digest_key, version DESC LIMIT ?",
+                (status, limit),
+            )
+        return [self._digest_from_row(row) for row in rows]
+
+    def _digest_from_row(self, row: sqlite3.Row) -> DigestDocument:
+        digest_id = int(row["id"])
+        items = []
+        for item in self.connection.execute(
+            "SELECT * FROM digest_items WHERE digest_id = ? ORDER BY position", (digest_id,)
+        ):
+            try:
+                items.append(
+                    DigestCluster(
+                        cluster_key=str(item["cluster_key"]),
+                        title=str(item["title"]),
+                        summary=str(item["summary"]),
+                        score=float(item["score"]),
+                        importance=int(item["importance"]),
+                        urgency=int(item["urgency"]),
+                        relevance=int(item["relevance"]),
+                        confidence=float(item["confidence"]),
+                        published_at=int(item["published_at"]),
+                        regions=tuple(json.loads(item["regions_json"])),
+                        topics=tuple(json.loads(item["topics_json"])),
+                        source_ids=tuple(json.loads(item["source_ids_json"])),
+                        observation_ids=tuple(int(value) for value in json.loads(item["observation_ids_json"])),
+                        links=tuple(json.loads(item["links_json"])),
+                        handling=str(item["handling"]),
+                    )
+                )
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"digest item {item['id']} is corrupt") from exc
+        coverage = tuple(
+            SourceCoverage(
+                source_id=str(item["source_id"]),
+                status=str(item["status"]),
+                observation_count=int(item["observation_count"]),
+                last_attempt_at=item["last_attempt_at"],
+                last_success_at=item["last_success_at"],
+                consecutive_failures=int(item["consecutive_failures"]),
+            )
+            for item in self.connection.execute(
+                "SELECT * FROM digest_source_coverage WHERE digest_id = ? ORDER BY source_id",
+                (digest_id,),
+            )
+        )
+        return DigestDocument(
+            digest_key=str(row["digest_key"]),
+            version=int(row["version"]),
+            period_start=int(row["period_start"]),
+            period_end=int(row["period_end"]),
+            timezone=str(row["timezone"]),
+            title=str(row["title"]),
+            summary=str(row["summary"]),
+            generation_kind=str(row["generation_kind"]),
+            items=tuple(items),
+            coverage=coverage,
+            created_at=int(row["created_at"]),
+            status=str(row["status"]),
+            published_at=row["published_at"],
+        )
+
     def get_active_config_revision(self) -> dict[str, Any] | None:
         row = self.connection.execute(
             "SELECT * FROM config_revisions WHERE active = 1 ORDER BY revision DESC LIMIT 1"
@@ -1967,6 +3235,20 @@ class Database:
                     "DELETE FROM admin_jobs WHERE completed_at IS NOT NULL AND completed_at < ?",
                     (audit_cutoff,),
                 )
+                self.connection.execute(
+                    "DELETE FROM analysis_api_usage WHERE updated_at < ?", (audit_cutoff,)
+                )
+                self.connection.execute(
+                    "DELETE FROM admin_auth_audit WHERE created_at < ?", (audit_cutoff,)
+                )
+                self.connection.execute(
+                    "DELETE FROM admin_login_limits WHERE updated_at < ?", (audit_cutoff,)
+                )
+                self.connection.execute(
+                    "DELETE FROM admin_sessions WHERE expires_at < ? OR "
+                    "(revoked_at IS NOT NULL AND revoked_at < ?)",
+                    (audit_cutoff, audit_cutoff),
+                )
         return int(deleted_alerts), int(deleted_observations)
 
     def status(self) -> dict[str, Any]:
@@ -2002,6 +3284,17 @@ class Database:
             ).fetchone()[0]),
         }
         observations = int(self.connection.execute("SELECT COUNT(*) FROM observations").fetchone()[0])
+        analysis_states = {
+            str(row["processing_state"]): int(row["count"])
+            for row in self.connection.execute(
+                "SELECT processing_state, COUNT(*) AS count FROM observations "
+                "GROUP BY processing_state"
+            )
+        }
+        budget_day = datetime.fromtimestamp(now, UTC).date().isoformat()
+        usage_row = self.connection.execute(
+            "SELECT calls FROM analysis_api_usage WHERE budget_day = ?", (budget_day,)
+        ).fetchone()
         incidents = {
             str(row["status"]): int(row["count"])
             for row in self.connection.execute("SELECT status, COUNT(*) AS count FROM incidents GROUP BY status")
@@ -2025,6 +3318,11 @@ class Database:
         return {
             "database_schema": SCHEMA_VERSION,
             "observations": observations,
+            "analysis": {
+                "states": analysis_states,
+                "api_calls_today": int(usage_row["calls"]) if usage_row is not None else 0,
+                "budget_day": budget_day,
+            },
             "outbox": outbox,
             "outbox_metrics": outbox_metrics,
             "incidents": incidents,
@@ -2035,3 +3333,249 @@ class Database:
             "runtime": engine,
             "sources": sources,
         }
+
+    @staticmethod
+    def _public_admin_user(row: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            key: row[key]
+            for key in (
+                "id", "username", "display_name", "role", "enabled",
+                "created_at", "updated_at", "last_login_at",
+            )
+        }
+
+    def get_admin_user_for_auth(self, username: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM admin_users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_admin_users(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT id, username, display_name, role, enabled, created_at, updated_at, "
+            "last_login_at, (SELECT COUNT(*) FROM admin_sessions AS s WHERE s.user_id = u.id "
+            "AND s.revoked_at IS NULL AND s.expires_at > ?) AS active_sessions "
+            "FROM admin_users AS u ORDER BY username COLLATE NOCASE",
+            (int(time.time()),),
+        )
+        return [dict(self._public_admin_user(dict(row)), active_sessions=int(row["active_sessions"])) for row in rows]
+
+    def create_admin_user(
+        self,
+        username: str,
+        display_name: str,
+        password_hash: str,
+        role: str,
+        actor: str,
+        now: int,
+    ) -> dict[str, Any]:
+        if role not in {"admin", "operator", "viewer"} or now < 0:
+            raise ValueError("admin user role or timestamp is invalid")
+        if not username or len(username) > 32 or not display_name.strip() or len(display_name) > 80:
+            raise ValueError("admin user identity is invalid")
+        if not password_hash.startswith("$argon2id$") or len(password_hash) > 512:
+            raise ValueError("admin user password hash is invalid")
+        try:
+            with self.unit_of_work():
+                cursor = self.connection.execute(
+                    "INSERT INTO admin_users(username, display_name, password_hash, role, enabled, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+                    (username, display_name.strip(), password_hash, role, now, now),
+                )
+                user_id = int(cursor.lastrowid)
+                self.connection.execute(
+                    "INSERT INTO admin_auth_audit(user_id, action, actor, details_json, created_at) "
+                    "VALUES (?, 'user_created', ?, ?, ?)",
+                    (user_id, actor[:128], json.dumps({"role": role}, sort_keys=True), now),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("username already exists") from exc
+        row = self.connection.execute("SELECT * FROM admin_users WHERE id = ?", (user_id,)).fetchone()
+        assert row is not None
+        return self._public_admin_user(dict(row))
+
+    def update_admin_user(
+        self,
+        user_id: int,
+        display_name: str,
+        role: str,
+        enabled: bool,
+        actor: str,
+        now: int,
+    ) -> dict[str, Any]:
+        if user_id < 1 or role not in {"admin", "operator", "viewer"}:
+            raise ValueError("admin user update is invalid")
+        name = display_name.strip()
+        if not name or len(name) > 80:
+            raise ValueError("admin user display name is invalid")
+        with self.unit_of_work():
+            current = self.connection.execute(
+                "SELECT role, enabled FROM admin_users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError("admin user not found")
+            removes_admin = current["role"] == "admin" and current["enabled"] and (
+                role != "admin" or not enabled
+            )
+            if removes_admin:
+                remaining = int(self.connection.execute(
+                    "SELECT COUNT(*) FROM admin_users WHERE role = 'admin' AND enabled = 1 AND id != ?",
+                    (user_id,),
+                ).fetchone()[0])
+                if remaining == 0:
+                    raise ValueError("cannot disable or demote the final enabled administrator")
+            self.connection.execute(
+                "UPDATE admin_users SET display_name = ?, role = ?, enabled = ?, "
+                "session_version = session_version + 1, updated_at = ? WHERE id = ?",
+                (name, role, int(enabled), now, user_id),
+            )
+            self.connection.execute(
+                "UPDATE admin_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                (now, user_id),
+            )
+            self.connection.execute(
+                "INSERT INTO admin_auth_audit(user_id, action, actor, details_json, created_at) "
+                "VALUES (?, 'user_updated', ?, ?, ?)",
+                (user_id, actor[:128], json.dumps({"role": role, "enabled": bool(enabled)}, sort_keys=True), now),
+            )
+        row = self.connection.execute("SELECT * FROM admin_users WHERE id = ?", (user_id,)).fetchone()
+        assert row is not None
+        return self._public_admin_user(dict(row))
+
+    def set_admin_user_password(
+        self, user_id: int, password_hash: str, actor: str, now: int
+    ) -> bool:
+        if user_id < 1 or not password_hash.startswith("$argon2id$"):
+            raise ValueError("admin password update is invalid")
+        with self.unit_of_work():
+            updated = self.connection.execute(
+                "UPDATE admin_users SET password_hash = ?, session_version = session_version + 1, "
+                "updated_at = ? WHERE id = ?",
+                (password_hash, now, user_id),
+            )
+            if updated.rowcount != 1:
+                return False
+            self.connection.execute(
+                "UPDATE admin_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                (now, user_id),
+            )
+            self.connection.execute(
+                "INSERT INTO admin_auth_audit(user_id, action, actor, created_at) "
+                "VALUES (?, 'password_changed', ?, ?)",
+                (user_id, actor[:128], now),
+            )
+        return True
+
+    def revoke_admin_user_sessions(self, user_id: int, actor: str, now: int) -> int:
+        with self.unit_of_work():
+            if self.connection.execute(
+                "SELECT 1 FROM admin_users WHERE id = ?", (user_id,)
+            ).fetchone() is None:
+                raise KeyError("admin user not found")
+            updated = self.connection.execute(
+                "UPDATE admin_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                (now, user_id),
+            )
+            self.connection.execute(
+                "INSERT INTO admin_auth_audit(user_id, action, actor, created_at) "
+                "VALUES (?, 'sessions_revoked', ?, ?)",
+                (user_id, actor[:128], now),
+            )
+        return int(updated.rowcount)
+
+    def admin_login_blocked_until(self, subject_hash: str, now: int) -> int:
+        row = self.connection.execute(
+            "SELECT window_started_at, blocked_until FROM admin_login_limits WHERE subject_hash = ?",
+            (subject_hash,),
+        ).fetchone()
+        if row is None or now - int(row["window_started_at"]) > 900:
+            return 0
+        return int(row["blocked_until"])
+
+    def record_admin_login_attempt(self, subject_hash: str, success: bool, now: int) -> int:
+        if len(subject_hash) != 64 or now < 0:
+            raise ValueError("admin login attempt is invalid")
+        with self.unit_of_work():
+            if success:
+                self.connection.execute(
+                    "DELETE FROM admin_login_limits WHERE subject_hash = ?", (subject_hash,)
+                )
+                return 0
+            row = self.connection.execute(
+                "SELECT failures, window_started_at FROM admin_login_limits WHERE subject_hash = ?",
+                (subject_hash,),
+            ).fetchone()
+            failures = int(row["failures"]) + 1 if row is not None and now - int(row["window_started_at"]) <= 900 else 1
+            started = int(row["window_started_at"]) if row is not None and now - int(row["window_started_at"]) <= 900 else now
+            blocked = now + min(3600, 300 * (2 ** max(0, failures - 5))) if failures >= 5 else 0
+            self.connection.execute(
+                "INSERT INTO admin_login_limits(subject_hash, failures, window_started_at, blocked_until, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(subject_hash) DO UPDATE SET failures = excluded.failures, "
+                "window_started_at = excluded.window_started_at, blocked_until = excluded.blocked_until, updated_at = excluded.updated_at",
+                (subject_hash, failures, started, blocked, now),
+            )
+        return blocked
+
+    def create_admin_session(
+        self, session_hash: str, csrf_hash: str, user_id: int, now: int, expires_at: int
+    ) -> None:
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT session_version FROM admin_users WHERE id = ? AND enabled = 1", (user_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError("admin user is unavailable")
+            self.connection.execute(
+                "INSERT INTO admin_sessions(session_hash, csrf_hash, user_id, session_version, "
+                "created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_hash, csrf_hash, user_id, int(row["session_version"]), now, expires_at, now),
+            )
+            self.connection.execute(
+                "UPDATE admin_users SET last_login_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, user_id),
+            )
+            self.connection.execute(
+                "INSERT INTO admin_auth_audit(user_id, action, actor, created_at) "
+                "VALUES (?, 'login', ?, ?)", (user_id, "self", now),
+            )
+
+    def resolve_admin_session(self, session_hash: str, now: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT s.session_hash, s.csrf_hash, s.user_id, s.last_seen_at, u.username, "
+            "u.display_name, u.role FROM admin_sessions AS s JOIN admin_users AS u ON u.id = s.user_id "
+            "WHERE s.session_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? "
+            "AND u.enabled = 1 AND s.session_version = u.session_version",
+            (session_hash, now),
+        ).fetchone()
+        if row is None:
+            return None
+        if now - int(row["last_seen_at"]) >= 300:
+            with self.connection:
+                self.connection.execute(
+                    "UPDATE admin_sessions SET last_seen_at = ? WHERE session_hash = ?",
+                    (now, session_hash),
+                )
+        return dict(row)
+
+    def revoke_admin_session(self, session_hash: str, now: int) -> bool:
+        with self.connection:
+            updated = self.connection.execute(
+                "UPDATE admin_sessions SET revoked_at = ? WHERE session_hash = ? AND revoked_at IS NULL",
+                (now, session_hash),
+            )
+        return updated.rowcount == 1
+
+    def list_admin_auth_audit(self, limit: int = 100) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 500:
+            raise ValueError("admin auth audit limit is out of range")
+        result = []
+        for row in self.connection.execute(
+            "SELECT a.id, a.user_id, u.username, a.action, a.actor, a.details_json, "
+            "a.created_at FROM admin_auth_audit AS a LEFT JOIN admin_users AS u "
+            "ON u.id = a.user_id ORDER BY a.created_at DESC, a.id DESC LIMIT ?",
+            (limit,),
+        ):
+            item = dict(row)
+            item["details"] = json.loads(item.pop("details_json"))
+            result.append(item)
+        return result
