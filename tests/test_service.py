@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import replace
@@ -161,6 +162,23 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.poll_source_once(self.source.id)
         self.assertEqual("active", mark.call_args_list[0].args[1])
         self.assertNotIn("starting", [call.args[1] for call in mark.call_args_list])
+
+    async def test_digest_loop_keeps_database_work_on_event_loop_thread(self) -> None:
+        owner_thread = threading.get_ident()
+        service = self._service(_Collector(FeedFetchResult((), None, None)), _Notifier())
+
+        class Scheduler:
+            def process_once(self, now: int):  # type: ignore[no-untyped-def]
+                self.thread_id = threading.get_ident()
+                service.request_stop()
+                return None
+
+            thread_id = None
+
+        scheduler = Scheduler()
+        service.digest_scheduler = scheduler  # type: ignore[assignment]
+        await service._digest_loop()
+        self.assertEqual(owner_thread, scheduler.thread_id)
 
 
 if __name__ == "__main__":

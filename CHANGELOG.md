@@ -5,6 +5,27 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-09-07
+
+### Changed
+
+- Show the audited news catalog without a hidden disclosure step and distinguish
+  enabled, disabled, and not-yet-added feeds in the administration interface.
+- Explain that catalog templates remain inactive until their generated draft is
+  explicitly saved, and surface catalog notes for disabled managed sources.
+
+### Fixed
+
+- Install the pinned runtime dependency set in CI before running authentication
+  tests, while retaining the no-dependency editable package verification step.
+
+## [0.10.1] - 2026-09-07
+
+### Fixed
+
+- Keep daily digest SQLite work on the event-loop thread so scheduled
+  generation does not fail from cross-thread connection use.
+
 ## [0.10.0] - 2026-09-07
 
 ### Added
