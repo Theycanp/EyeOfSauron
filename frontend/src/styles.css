@@ -452,8 +452,8 @@ h1, h2, h3, p { margin-top: 0; }
 .source-card-actions .icon-button { width: 35px; height: 35px; margin-left: auto; }
 
 .catalog-section { padding-block: 17px; border-top: 1px solid var(--border); }
-.catalog-section > summary { cursor: pointer; margin-bottom: 0; }
-.catalog-section[open] > summary { margin-bottom: 14px; }
+.catalog-section > .section-heading { margin-bottom: 14px; }
+.section-count { display: inline-flex; min-width: 22px; height: 22px; align-items: center; justify-content: center; margin-left: 5px; padding-inline: 6px; border-radius: 999px; color: var(--text-soft); background: var(--surface-soft); font-size: 11px; font-weight: 650; vertical-align: 1px; }
 .catalog-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .catalog-card { min-width: 0; padding: 15px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .catalog-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
@@ -467,10 +467,14 @@ h1, h2, h3, p { margin-top: 0; }
 .catalog-feed strong, .catalog-feed small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .catalog-feed strong { font-size: 12px; }
 .catalog-feed small { color: var(--text-faint); font-size: 10px; }
+.catalog-feed-action { display: flex; align-items: center; justify-content: flex-end; gap: 7px; flex: 0 0 auto; }
+.catalog-feed-action .status-pill { font-size: 10px; }
 .catalog-feed .button { min-height: 32px; flex: 0 0 auto; padding: 6px 9px; font-size: 11px; }
 .catalog-unavailable { min-height: 49px; display: flex; align-items: center; gap: 8px; padding: 9px 10px; border-radius: 10px; color: var(--warning); background: var(--warning-soft); font-size: 11px; }
 .catalog-unavailable svg { flex: 0 0 auto; }
 .catalog-loading { min-height: 110px; }
+.source-card-note { display: flex; align-items: flex-start; gap: 6px; margin: 9px 0 0; color: var(--warning); font-size: 11px; line-height: 1.45; }
+.source-card-note svg { flex: 0 0 auto; margin-top: 1px; }
 .inline-error { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 12px; padding: 10px 11px; border-radius: 10px; color: var(--negative); background: var(--negative-soft); font-size: 12px; }
 .inline-error svg { flex: 0 0 auto; margin-top: 1px; }
 
