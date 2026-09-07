@@ -5,7 +5,7 @@ import os
 import re
 import urllib.error
 import urllib.request
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 from . import __version__
@@ -39,9 +39,41 @@ def delivery_error_details(error: BaseException) -> tuple[bool, str]:
     return True, "transient_unknown"
 
 
+@runtime_checkable
 class Notifier(Protocol):
     def publish(self, alert: OutboxMessage) -> None:
         ...
+
+
+NotifierFactory = Callable[..., Notifier]
+
+
+class NotifierRegistry:
+    """Explicit adapter registry for delivery channels.
+
+    The service depends on ``Notifier`` only. Registry entries are assembled
+    at the composition root, keeping provider-specific authentication and
+    configuration out of business logic.
+    """
+
+    def __init__(self, factories: Mapping[str, NotifierFactory] | None = None) -> None:
+        self._factories: dict[str, NotifierFactory] = dict(factories or {})
+
+    def register(self, kind: str, factory: NotifierFactory) -> None:
+        if not kind or not kind.isidentifier():
+            raise ValueError("notifier kind is invalid")
+        if kind in self._factories:
+            raise ValueError(f"notifier kind is already registered: {kind}")
+        self._factories[kind] = factory
+
+    def build(self, kind: str, **kwargs: object) -> Notifier:
+        factory = self._factories.get(kind)
+        if factory is None:
+            raise NotifyError(f"unsupported notifier kind: {kind}", failure_kind="invalid_config")
+        return factory(**kwargs)
+
+    def kinds(self) -> tuple[str, ...]:
+        return tuple(sorted(self._factories))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -128,3 +160,6 @@ class NtfyNotifier:
                 retryable=True,
                 failure_kind="transport",
             ) from exc
+
+
+DEFAULT_NOTIFIER_REGISTRY = NotifierRegistry({"ntfy": NtfyNotifier.from_config})

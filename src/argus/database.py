@@ -6,13 +6,18 @@ import os
 import sqlite3
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
+from .analysis import AnalysisAttempt, InformationAnalysis, analyze_observation
+from .digest import DigestCluster, DigestDocument, SourceCoverage
 from .models import (
+    AnalysisWorkItem,
     AlertCandidate,
     FeedFetchResult,
     IngestReport,
+    Observation,
     OutboxMessage,
     SourceState,
 )
@@ -20,8 +25,9 @@ from .rules import RuleSet
 from .reminders import ReminderError, ReminderSpec, next_daily_occurrence
 from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
+from .prompts import PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 11
 
 
 def read_active_config(path: Path) -> dict[str, Any] | None:
@@ -96,6 +102,16 @@ class Database:
                     summary TEXT NOT NULL,
                     url TEXT NOT NULL,
                     attributes_json TEXT NOT NULL,
+                    importance INTEGER NOT NULL DEFAULT 3,
+                    urgency INTEGER NOT NULL DEFAULT 2,
+                    relevance INTEGER NOT NULL DEFAULT 3,
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    region TEXT NOT NULL DEFAULT 'GLOBAL',
+                    topic TEXT NOT NULL DEFAULT 'general',
+                    source_tier TEXT NOT NULL DEFAULT 'secondary',
+                    information_type TEXT NOT NULL DEFAULT 'report',
+                    handling TEXT NOT NULL DEFAULT 'digest',
+                    processing_state TEXT NOT NULL DEFAULT 'new',
                     UNIQUE (dedupe_scope, external_id)
                 );
 
@@ -218,6 +234,19 @@ class Database:
                 );
 
                 CREATE INDEX config_audit_time_idx ON config_audit(created_at, id);
+
+                CREATE TABLE prompts (
+                    id INTEGER PRIMARY KEY,
+                    prompt_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    system_text TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                    actor TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE (prompt_id, version)
+                );
+
+                CREATE INDEX prompts_active_idx ON prompts(prompt_id, active, version DESC);
                 PRAGMA user_version=6;
                 COMMIT;
                 """
@@ -629,6 +658,231 @@ class Database:
                 self.connection.execute("PRAGMA foreign_keys=ON")
             if self.connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise RuntimeError("database foreign key check failed after schema 7 migration")
+
+        if version < 8:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 8:
+                    observation_columns = {
+                        str(row[1]) for row in self.connection.execute("PRAGMA table_info(observations)")
+                    }
+                    columns = (
+                        ("importance", "INTEGER NOT NULL DEFAULT 3"),
+                        ("urgency", "INTEGER NOT NULL DEFAULT 2"),
+                        ("relevance", "INTEGER NOT NULL DEFAULT 3"),
+                        ("confidence", "REAL NOT NULL DEFAULT 0.5"),
+                        ("region", "TEXT NOT NULL DEFAULT 'GLOBAL'"),
+                        ("topic", "TEXT NOT NULL DEFAULT 'general'"),
+                        ("source_tier", "TEXT NOT NULL DEFAULT 'secondary'"),
+                        ("information_type", "TEXT NOT NULL DEFAULT 'report'"),
+                        ("handling", "TEXT NOT NULL DEFAULT 'digest'"),
+                        ("processing_state", "TEXT NOT NULL DEFAULT 'new'"),
+                    )
+                    for name, definition in columns:
+                        if name not in observation_columns:
+                            self.connection.execute(
+                                f"ALTER TABLE observations ADD COLUMN {name} {definition}"
+                            )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS observations_handling_idx "
+                        "ON observations(handling, fetched_at DESC, id DESC)"
+                    )
+                    self.connection.execute("PRAGMA user_version=8")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 8
+
+        if version < 9:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 9:
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS prompts (
+                            id INTEGER PRIMARY KEY,
+                            prompt_id TEXT NOT NULL,
+                            version INTEGER NOT NULL,
+                            system_text TEXT NOT NULL,
+                            active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                            actor TEXT NOT NULL,
+                            created_at INTEGER NOT NULL,
+                            UNIQUE (prompt_id, version)
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS prompts_active_idx "
+                        "ON prompts(prompt_id, active, version DESC)"
+                    )
+                    self.connection.execute(
+                        """
+                        INSERT OR IGNORE INTO prompts(prompt_id, version, system_text, active, actor, created_at)
+                        VALUES (?, ?, ?, 1, ?, ?)
+                        """,
+                        (TRIAGE_V1.prompt_id, TRIAGE_V1.version, TRIAGE_V1.system_text, "system", int(time.time())),
+                    )
+                    self.connection.execute("PRAGMA user_version=9")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 9
+
+        if version < 10:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 10:
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS digests (
+                            id INTEGER PRIMARY KEY,
+                            digest_key TEXT NOT NULL,
+                            version INTEGER NOT NULL,
+                            period_start INTEGER NOT NULL,
+                            period_end INTEGER NOT NULL,
+                            timezone TEXT NOT NULL,
+                            title TEXT NOT NULL,
+                            summary TEXT NOT NULL,
+                            generation_kind TEXT NOT NULL CHECK (
+                                generation_kind IN ('algorithm', 'api')
+                            ),
+                            status TEXT NOT NULL CHECK (
+                                status IN ('draft', 'published', 'superseded')
+                            ),
+                            created_at INTEGER NOT NULL,
+                            published_at INTEGER,
+                            UNIQUE (digest_key, version),
+                            CHECK (period_end > period_start)
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS digests_one_published_idx "
+                        "ON digests(digest_key) WHERE status = 'published'"
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS digests_period_idx "
+                        "ON digests(period_start DESC, digest_key, version DESC)"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS digest_items (
+                            id INTEGER PRIMARY KEY,
+                            digest_id INTEGER NOT NULL REFERENCES digests(id) ON DELETE CASCADE,
+                            position INTEGER NOT NULL,
+                            cluster_key TEXT NOT NULL,
+                            title TEXT NOT NULL,
+                            summary TEXT NOT NULL,
+                            score REAL NOT NULL,
+                            importance INTEGER NOT NULL CHECK (importance BETWEEN 1 AND 5),
+                            urgency INTEGER NOT NULL CHECK (urgency BETWEEN 1 AND 5),
+                            relevance INTEGER NOT NULL CHECK (relevance BETWEEN 1 AND 5),
+                            confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+                            published_at INTEGER NOT NULL,
+                            regions_json TEXT NOT NULL,
+                            topics_json TEXT NOT NULL,
+                            source_ids_json TEXT NOT NULL,
+                            observation_ids_json TEXT NOT NULL,
+                            links_json TEXT NOT NULL,
+                            UNIQUE (digest_id, position),
+                            UNIQUE (digest_id, cluster_key)
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS digest_source_coverage (
+                            digest_id INTEGER NOT NULL REFERENCES digests(id) ON DELETE CASCADE,
+                            source_id TEXT NOT NULL,
+                            status TEXT NOT NULL CHECK (
+                                status IN (
+                                    'covered', 'quiet', 'degraded',
+                                    'stale', 'disabled', 'unknown'
+                                )
+                            ),
+                            observation_count INTEGER NOT NULL CHECK (observation_count >= 0),
+                            last_attempt_at INTEGER,
+                            last_success_at INTEGER,
+                            consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (
+                                consecutive_failures >= 0
+                            ),
+                            PRIMARY KEY (digest_id, source_id)
+                        )
+                        """
+                    )
+                    self.connection.execute("PRAGMA user_version=10")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 10
+
+        if version < 11:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 11:
+                    observation_columns = {
+                        str(row[1])
+                        for row in self.connection.execute("PRAGMA table_info(observations)")
+                    }
+                    for name, definition in (
+                        ("analysis_lease_token", "TEXT"),
+                        ("analysis_lease_until", "INTEGER"),
+                        ("analysis_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                        ("analysis_error", "TEXT"),
+                        ("analyzed_at", "INTEGER"),
+                    ):
+                        if name not in observation_columns:
+                            self.connection.execute(
+                                f"ALTER TABLE observations ADD COLUMN {name} {definition}"
+                            )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS observations_analysis_due_idx "
+                        "ON observations(processing_state, analysis_lease_until, fetched_at, id)"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS analysis_runs (
+                            id INTEGER PRIMARY KEY,
+                            observation_id INTEGER NOT NULL REFERENCES observations(id)
+                                ON DELETE CASCADE,
+                            analyzer TEXT NOT NULL,
+                            outcome TEXT NOT NULL CHECK (
+                                outcome IN ('succeeded', 'failed', 'budget_exhausted')
+                            ),
+                            shadow INTEGER NOT NULL CHECK (shadow IN (0, 1)),
+                            advisory_json TEXT,
+                            error TEXT,
+                            duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+                            created_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS analysis_runs_observation_idx "
+                        "ON analysis_runs(observation_id, created_at, id)"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS analysis_api_usage (
+                            budget_day TEXT PRIMARY KEY,
+                            calls INTEGER NOT NULL CHECK (calls >= 0),
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute("PRAGMA user_version=11")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 11
 
     def close(self) -> None:
         self.connection.close()
@@ -1060,12 +1314,15 @@ class Database:
         recovery_queued = False
         with self.unit_of_work():
             for observation in result.observations:
+                analysis = analyze_observation(observation)
                 cursor = self.connection.execute(
                     """
                     INSERT OR IGNORE INTO observations(
                         source_id, publisher, dedupe_scope, external_id,
-                        published_at, fetched_at, title, summary, url, attributes_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        published_at, fetched_at, title, summary, url, attributes_json,
+                        importance, urgency, relevance, confidence, region, topic,
+                        source_tier, information_type, handling, processing_state
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         observation.source_id,
@@ -1078,6 +1335,16 @@ class Database:
                         observation.summary,
                         observation.url,
                         json.dumps(observation.attributes, ensure_ascii=False, sort_keys=True),
+                        analysis.importance,
+                        analysis.urgency,
+                        analysis.relevance,
+                        analysis.confidence,
+                        analysis.region,
+                        analysis.topic,
+                        analysis.source_tier,
+                        analysis.information_type,
+                        analysis.handling,
+                        observation.processing_state,
                     ),
                 )
                 if cursor.rowcount != 1:
@@ -1820,6 +2087,637 @@ class Database:
             raise RuntimeError("stored configuration revision must be an object")
         return result
 
+    def get_prompt(self, prompt_id: str, version: int | None = None) -> dict[str, Any] | None:
+        if not prompt_id or len(prompt_id) > 64:
+            raise ValueError("prompt ID is invalid")
+        if version is not None and version < 1:
+            raise ValueError("prompt version is invalid")
+        if version is None:
+            row = self.connection.execute(
+                "SELECT * FROM prompts WHERE prompt_id = ? AND active = 1 "
+                "ORDER BY version DESC LIMIT 1", (prompt_id,)
+            ).fetchone()
+        else:
+            row = self.connection.execute(
+                "SELECT * FROM prompts WHERE prompt_id = ? AND version = ?",
+                (prompt_id, version),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_prompts(self, prompt_id: str | None = None) -> list[dict[str, Any]]:
+        if prompt_id is None:
+            rows = self.connection.execute(
+                "SELECT * FROM prompts ORDER BY prompt_id, version DESC"
+            )
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM prompts WHERE prompt_id = ? ORDER BY version DESC",
+                (prompt_id,),
+            )
+        return [dict(row) for row in rows]
+
+    def save_prompt(
+        self,
+        prompt_id: str,
+        version: int,
+        system_text: str,
+        actor: str,
+        now: int,
+        *,
+        active: bool = True,
+    ) -> None:
+        template = PromptTemplate(prompt_id, version, system_text)
+        if len(actor.strip()) > 128:
+            raise ValueError("prompt actor is too long")
+        with self.connection:
+            if active:
+                self.connection.execute(
+                    "UPDATE prompts SET active = 0 WHERE prompt_id = ?", (prompt_id,)
+                )
+            self.connection.execute(
+                """
+                INSERT INTO prompts(prompt_id, version, system_text, active, actor, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(prompt_id, version) DO UPDATE SET
+                    system_text = excluded.system_text,
+                    active = excluded.active,
+                    actor = excluded.actor,
+                    created_at = excluded.created_at
+                """,
+                (template.prompt_id, template.version, template.system_text,
+                 int(active), actor.strip()[:128], int(now)),
+            )
+
+    def list_observations(
+        self,
+        since: int,
+        until: int,
+        *,
+        handling: str | None = None,
+        region: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Read normalized observations through the repository boundary."""
+        if since < 0 or until < since:
+            raise ValueError("observation time range is invalid")
+        if not 1 <= limit <= 5000:
+            raise ValueError("observation limit is out of range")
+        clauses = ["published_at >= ?", "published_at < ?"]
+        params: list[Any] = [since, until]
+        if handling is not None:
+            if handling not in {"immediate", "digest", "archive"}:
+                raise ValueError("observation handling is invalid")
+            clauses.append("handling = ?")
+            params.append(handling)
+        if region is not None:
+            if not region or len(region) > 16:
+                raise ValueError("observation region is invalid")
+            clauses.append("region = ?")
+            params.append(region.upper())
+        params.append(limit)
+        rows = self.connection.execute(
+            "SELECT id, source_id, publisher, published_at, fetched_at, title, summary, "
+            "url, attributes_json, importance, urgency, relevance, confidence, region, "
+            "topic, source_tier, information_type, handling, processing_state "
+            f"FROM observations WHERE {' AND '.join(clauses)} "
+            "ORDER BY published_at DESC, id DESC LIMIT ?",
+            params,
+        )
+        observations: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["attributes"] = json.loads(item.pop("attributes_json"))
+            except (TypeError, ValueError):
+                item["attributes"] = {}
+            observations.append(item)
+        return observations
+
+    def claim_analysis_observations(
+        self, now: int, *, limit: int, lease_seconds: int
+    ) -> list[AnalysisWorkItem]:
+        """Lease unprocessed observations without holding a transaction during inference."""
+        if now < 0:
+            raise ValueError("analysis claim time is invalid")
+        if not 1 <= limit <= 500:
+            raise ValueError("analysis claim limit is out of range")
+        if not 10 <= lease_seconds <= 3600:
+            raise ValueError("analysis lease is out of range")
+        token = uuid.uuid4().hex
+        with self.unit_of_work():
+            rows = list(self.connection.execute(
+                """
+                SELECT id FROM observations
+                WHERE processing_state = 'new'
+                   OR (
+                       processing_state = 'processing'
+                       AND COALESCE(analysis_lease_until, 0) <= ?
+                   )
+                ORDER BY fetched_at, id
+                LIMIT ?
+                """,
+                (now, limit),
+            ))
+            ids = [int(row["id"]) for row in rows]
+            if not ids:
+                return []
+            placeholders = ",".join("?" for _ in ids)
+            self.connection.execute(
+                f"""
+                UPDATE observations
+                SET processing_state = 'processing', analysis_lease_token = ?,
+                    analysis_lease_until = ?, analysis_attempts = analysis_attempts + 1,
+                    analysis_error = NULL
+                WHERE id IN ({placeholders})
+                """,
+                (token, now + lease_seconds, *ids),
+            )
+            leased = list(self.connection.execute(
+                f"""
+                SELECT id, source_id, publisher, dedupe_scope, external_id,
+                       published_at, fetched_at, title, summary, url, attributes_json,
+                       importance, urgency, relevance, confidence, region, topic,
+                       source_tier, information_type, handling, processing_state,
+                       analysis_lease_token, analysis_attempts
+                FROM observations
+                WHERE id IN ({placeholders}) AND analysis_lease_token = ?
+                ORDER BY fetched_at, id
+                """,
+                (*ids, token),
+            ))
+
+        items: list[AnalysisWorkItem] = []
+        for row in leased:
+            try:
+                attributes = json.loads(row["attributes_json"])
+            except (TypeError, ValueError):
+                attributes = {}
+            if not isinstance(attributes, dict):
+                attributes = {}
+            observation = Observation(
+                source_id=str(row["source_id"]),
+                publisher=str(row["publisher"]),
+                dedupe_scope=str(row["dedupe_scope"]),
+                external_id=str(row["external_id"]),
+                published_at=datetime.fromtimestamp(int(row["published_at"]), UTC),
+                title=str(row["title"]),
+                summary=str(row["summary"]),
+                url=str(row["url"]),
+                attributes=attributes,
+                importance=int(row["importance"]),
+                urgency=int(row["urgency"]),
+                relevance=int(row["relevance"]),
+                confidence=float(row["confidence"]),
+                region=str(row["region"]),
+                topic=str(row["topic"]),
+                source_tier=str(row["source_tier"]),
+                information_type=str(row["information_type"]),
+                handling=str(row["handling"]),
+                processing_state=str(row["processing_state"]),
+            )
+            items.append(AnalysisWorkItem(
+                observation_id=int(row["id"]),
+                observation=observation,
+                lease_token=str(row["analysis_lease_token"]),
+                fetched_at=int(row["fetched_at"]),
+                attempts=int(row["analysis_attempts"]),
+            ))
+        return items
+
+    def reserve_analysis_api_call(
+        self, budget_day: str, *, limit: int, now: int
+    ) -> bool:
+        """Atomically reserve one remote analysis call against a UTC-day budget."""
+        try:
+            parsed_day = datetime.strptime(budget_day, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise ValueError("analysis budget day is invalid") from exc
+        if parsed_day.isoformat() != budget_day:
+            raise ValueError("analysis budget day is invalid")
+        if not 0 <= limit <= 1000:
+            raise ValueError("analysis API budget is out of range")
+        if limit == 0:
+            return False
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT calls FROM analysis_api_usage WHERE budget_day = ?",
+                (budget_day,),
+            ).fetchone()
+            used = int(row["calls"]) if row is not None else 0
+            if used >= limit:
+                return False
+            self.connection.execute(
+                """
+                INSERT INTO analysis_api_usage(budget_day, calls, updated_at)
+                VALUES (?, 1, ?)
+                ON CONFLICT(budget_day) DO UPDATE SET
+                    calls = analysis_api_usage.calls + 1,
+                    updated_at = excluded.updated_at
+                """,
+                (budget_day, now),
+            )
+        return True
+
+    def save_analysis_result(
+        self,
+        observation_id: int,
+        lease_token: str,
+        analysis: InformationAnalysis,
+        attempts: list[AnalysisAttempt] | tuple[AnalysisAttempt, ...],
+        *,
+        processing_state: str,
+        now: int,
+        error: str | None = None,
+    ) -> None:
+        """Persist the final classification and its stage-by-stage audit trail."""
+        if processing_state not in {"analyzed", "degraded"}:
+            raise ValueError("analysis processing state is invalid")
+        if not lease_token or len(lease_token) > 128:
+            raise ValueError("analysis lease token is invalid")
+        encoded_attempts: list[tuple[AnalysisAttempt, str | None, str | None]] = []
+        for attempt in attempts:
+            advisory_json = (
+                json.dumps(attempt.advisory, ensure_ascii=False, sort_keys=True)
+                if attempt.advisory is not None
+                else None
+            )
+            encoded_attempts.append(
+                (attempt, advisory_json, sanitize_error(attempt.error) if attempt.error else None)
+            )
+        with self.unit_of_work():
+            updated = self.connection.execute(
+                """
+                UPDATE observations
+                SET importance = ?, urgency = ?, relevance = ?, confidence = ?,
+                    region = ?, topic = ?, source_tier = ?, information_type = ?,
+                    handling = ?, processing_state = ?, analysis_lease_token = NULL,
+                    analysis_lease_until = NULL, analysis_error = ?, analyzed_at = ?
+                WHERE id = ? AND processing_state = 'processing'
+                  AND analysis_lease_token = ?
+                """,
+                (
+                    analysis.importance,
+                    analysis.urgency,
+                    analysis.relevance,
+                    analysis.confidence,
+                    analysis.region,
+                    analysis.topic,
+                    analysis.source_tier,
+                    analysis.information_type,
+                    analysis.handling,
+                    processing_state,
+                    sanitize_error(error) if error else None,
+                    now,
+                    observation_id,
+                    lease_token,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("analysis lease is stale or observation does not exist")
+            for attempt, advisory_json, attempt_error in encoded_attempts:
+                self.connection.execute(
+                    """
+                    INSERT INTO analysis_runs(
+                        observation_id, analyzer, outcome, shadow, advisory_json,
+                        error, duration_ms, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        observation_id,
+                        attempt.analyzer[:64],
+                        attempt.outcome,
+                        int(attempt.shadow),
+                        advisory_json,
+                        attempt_error,
+                        max(0, int(attempt.duration_ms)),
+                        now,
+                    ),
+                )
+
+    def list_source_coverage(
+        self,
+        since: int,
+        until: int,
+        *,
+        source_ids: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return source health and period coverage without exposing SQL upstream."""
+        if since < 0 or until < since:
+            raise ValueError("source coverage time range is invalid")
+        requested: list[str] | None = None
+        if source_ids is not None:
+            requested = list(dict.fromkeys(str(item).strip() for item in source_ids))
+            if any(not item or len(item) > 128 for item in requested):
+                raise ValueError("source coverage contains an invalid source ID")
+            if len(requested) > 1000:
+                raise ValueError("source coverage source limit is out of range")
+            if not requested:
+                return []
+            placeholders = ",".join("?" for _ in requested)
+            state_rows = self.connection.execute(
+                "SELECT c.source_id, c.last_attempt_at, c.last_success_at, "
+                "c.consecutive_failures, r.configured_enabled, r.runtime_status "
+                "FROM collector_state AS c LEFT JOIN source_runtime AS r "
+                "ON r.source_id = c.source_id "
+                f"WHERE c.source_id IN ({placeholders})",
+                requested,
+            )
+        else:
+            state_rows = self.connection.execute(
+                "SELECT c.source_id, c.last_attempt_at, c.last_success_at, "
+                "c.consecutive_failures, r.configured_enabled, r.runtime_status "
+                "FROM collector_state AS c LEFT JOIN source_runtime AS r "
+                "ON r.source_id = c.source_id"
+            )
+        states = {str(row["source_id"]): dict(row) for row in state_rows}
+        expected = requested if requested is not None else sorted(states)
+        counts: dict[str, int] = {}
+        if expected:
+            placeholders = ",".join("?" for _ in expected)
+            rows = self.connection.execute(
+                "SELECT source_id, COUNT(*) AS observation_count FROM observations "
+                "WHERE published_at >= ? AND published_at < ? "
+                f"AND source_id IN ({placeholders}) GROUP BY source_id",
+                [since, until, *expected],
+            )
+            counts = {str(row["source_id"]): int(row["observation_count"]) for row in rows}
+
+        result: list[dict[str, Any]] = []
+        for source_id in expected:
+            state = states.get(source_id, {})
+            count = counts.get(source_id, 0)
+            enabled = state.get("configured_enabled")
+            runtime_status = state.get("runtime_status")
+            failures = int(state.get("consecutive_failures") or 0)
+            last_success = state.get("last_success_at")
+            if enabled == 0:
+                status = "disabled"
+            elif runtime_status in {"invalid", "degraded"} or failures > 0:
+                status = "degraded"
+            elif runtime_status == "stale":
+                status = "stale"
+            elif count:
+                status = "covered"
+            elif last_success is not None and int(last_success) >= since:
+                status = "quiet"
+            elif last_success is not None:
+                status = "stale"
+            else:
+                status = "unknown"
+            result.append(
+                {
+                    "source_id": source_id,
+                    "status": status,
+                    "observation_count": count,
+                    "last_attempt_at": state.get("last_attempt_at"),
+                    "last_success_at": last_success,
+                    "consecutive_failures": failures,
+                }
+            )
+        return result
+
+    def save_digest(self, digest: DigestDocument) -> DigestDocument:
+        """Allocate and store the next immutable version of a digest."""
+        if digest.version != 0 or digest.status != "draft" or digest.published_at is not None:
+            raise ValueError("new digest must be an unversioned draft")
+        if len({item.cluster_key for item in digest.items}) != len(digest.items):
+            raise ValueError("digest contains duplicate cluster keys")
+        if len({item.source_id for item in digest.coverage}) != len(digest.coverage):
+            raise ValueError("digest contains duplicate source coverage")
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT version, period_start, period_end, timezone FROM digests "
+                "WHERE digest_key = ? ORDER BY version DESC LIMIT 1",
+                (digest.digest_key,),
+            ).fetchone()
+            if row is not None and (
+                int(row["period_start"]) != digest.period_start
+                or int(row["period_end"]) != digest.period_end
+                or str(row["timezone"]) != digest.timezone
+            ):
+                raise ValueError("digest revisions must describe the same period")
+            version = int(row["version"]) + 1 if row is not None else 1
+            cursor = self.connection.execute(
+                """
+                INSERT INTO digests(
+                    digest_key, version, period_start, period_end, timezone, title,
+                    summary, generation_kind, status, created_at, published_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, NULL)
+                """,
+                (
+                    digest.digest_key,
+                    version,
+                    digest.period_start,
+                    digest.period_end,
+                    digest.timezone,
+                    digest.title,
+                    digest.summary,
+                    digest.generation_kind,
+                    digest.created_at,
+                ),
+            )
+            digest_id = int(cursor.lastrowid)
+            for position, item in enumerate(digest.items):
+                self.connection.execute(
+                    """
+                    INSERT INTO digest_items(
+                        digest_id, position, cluster_key, title, summary, score,
+                        importance, urgency, relevance, confidence, published_at,
+                        regions_json, topics_json, source_ids_json,
+                        observation_ids_json, links_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        digest_id,
+                        position,
+                        item.cluster_key,
+                        item.title,
+                        item.summary,
+                        item.score,
+                        item.importance,
+                        item.urgency,
+                        item.relevance,
+                        item.confidence,
+                        item.published_at,
+                        json.dumps(item.regions, ensure_ascii=False),
+                        json.dumps(item.topics, ensure_ascii=False),
+                        json.dumps(item.source_ids, ensure_ascii=False),
+                        json.dumps(item.observation_ids),
+                        json.dumps(item.links, ensure_ascii=False),
+                    ),
+                )
+            for item in digest.coverage:
+                self.connection.execute(
+                    """
+                    INSERT INTO digest_source_coverage(
+                        digest_id, source_id, status, observation_count,
+                        last_attempt_at, last_success_at, consecutive_failures
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        digest_id,
+                        item.source_id,
+                        item.status,
+                        item.observation_count,
+                        item.last_attempt_at,
+                        item.last_success_at,
+                        item.consecutive_failures,
+                    ),
+                )
+        saved = self.get_digest(digest.digest_key, version)
+        assert saved is not None
+        return saved
+
+    def publish_digest(self, digest_key: str, version: int, now: int) -> DigestDocument:
+        """Atomically publish one version and supersede the previous publication."""
+        if not digest_key or version < 1 or now < 0:
+            raise ValueError("digest publication request is invalid")
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT id, status FROM digests WHERE digest_key = ? AND version = ?",
+                (digest_key, version),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"digest does not exist: {digest_key}@{version}")
+            if row["status"] != "published":
+                self.connection.execute(
+                    "UPDATE digests SET status = 'superseded' "
+                    "WHERE digest_key = ? AND status = 'published' AND version != ?",
+                    (digest_key, version),
+                )
+                self.connection.execute(
+                    "UPDATE digests SET status = 'published', published_at = ? WHERE id = ?",
+                    (now, int(row["id"])),
+                )
+        published = self.get_digest(digest_key, version)
+        assert published is not None
+        return published
+
+    def enqueue_digest_notification(
+        self,
+        digest: DigestDocument,
+        *,
+        topic: str,
+        click_url: str,
+        now: int,
+    ) -> bool:
+        if digest.status != "published":
+            raise ValueError("only a published digest can be notified")
+        candidate = AlertCandidate(
+            rule_id="digest.daily",
+            dedupe_key=f"digest:{digest.digest_key}:{digest.version}",
+            title=digest.title,
+            message=digest.summary,
+            priority=3,
+            tags=("newspaper", "eye"),
+            click_url=click_url,
+            topic=topic,
+            confidence=1.0,
+            evidence=(f"digest {digest.digest_key}@{digest.version}",),
+        )
+        with self.connection:
+            return self._insert_alert(candidate, None, now)
+
+    def get_digest(
+        self,
+        digest_key: str,
+        version: int | None = None,
+        *,
+        published_only: bool = False,
+    ) -> DigestDocument | None:
+        clauses = ["digest_key = ?"]
+        params: list[Any] = [digest_key]
+        if version is not None:
+            if version < 1:
+                raise ValueError("digest version is invalid")
+            clauses.append("version = ?")
+            params.append(version)
+        if published_only:
+            clauses.append("status = 'published'")
+        row = self.connection.execute(
+            f"SELECT * FROM digests WHERE {' AND '.join(clauses)} "
+            "ORDER BY version DESC LIMIT 1",
+            params,
+        ).fetchone()
+        return self._digest_from_row(row) if row is not None else None
+
+    def list_digests(
+        self, *, status: str | None = None, limit: int = 30
+    ) -> list[DigestDocument]:
+        if status is not None and status not in {"draft", "published", "superseded"}:
+            raise ValueError("digest status is invalid")
+        if not 1 <= limit <= 500:
+            raise ValueError("digest limit is out of range")
+        if status is None:
+            rows = self.connection.execute(
+                "SELECT * FROM digests ORDER BY period_start DESC, digest_key, version DESC LIMIT ?",
+                (limit,),
+            )
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM digests WHERE status = ? "
+                "ORDER BY period_start DESC, digest_key, version DESC LIMIT ?",
+                (status, limit),
+            )
+        return [self._digest_from_row(row) for row in rows]
+
+    def _digest_from_row(self, row: sqlite3.Row) -> DigestDocument:
+        digest_id = int(row["id"])
+        items = []
+        for item in self.connection.execute(
+            "SELECT * FROM digest_items WHERE digest_id = ? ORDER BY position", (digest_id,)
+        ):
+            try:
+                items.append(
+                    DigestCluster(
+                        cluster_key=str(item["cluster_key"]),
+                        title=str(item["title"]),
+                        summary=str(item["summary"]),
+                        score=float(item["score"]),
+                        importance=int(item["importance"]),
+                        urgency=int(item["urgency"]),
+                        relevance=int(item["relevance"]),
+                        confidence=float(item["confidence"]),
+                        published_at=int(item["published_at"]),
+                        regions=tuple(json.loads(item["regions_json"])),
+                        topics=tuple(json.loads(item["topics_json"])),
+                        source_ids=tuple(json.loads(item["source_ids_json"])),
+                        observation_ids=tuple(int(value) for value in json.loads(item["observation_ids_json"])),
+                        links=tuple(json.loads(item["links_json"])),
+                    )
+                )
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"digest item {item['id']} is corrupt") from exc
+        coverage = tuple(
+            SourceCoverage(
+                source_id=str(item["source_id"]),
+                status=str(item["status"]),
+                observation_count=int(item["observation_count"]),
+                last_attempt_at=item["last_attempt_at"],
+                last_success_at=item["last_success_at"],
+                consecutive_failures=int(item["consecutive_failures"]),
+            )
+            for item in self.connection.execute(
+                "SELECT * FROM digest_source_coverage WHERE digest_id = ? ORDER BY source_id",
+                (digest_id,),
+            )
+        )
+        return DigestDocument(
+            digest_key=str(row["digest_key"]),
+            version=int(row["version"]),
+            period_start=int(row["period_start"]),
+            period_end=int(row["period_end"]),
+            timezone=str(row["timezone"]),
+            title=str(row["title"]),
+            summary=str(row["summary"]),
+            generation_kind=str(row["generation_kind"]),
+            items=tuple(items),
+            coverage=coverage,
+            created_at=int(row["created_at"]),
+            status=str(row["status"]),
+            published_at=row["published_at"],
+        )
+
     def get_active_config_revision(self) -> dict[str, Any] | None:
         row = self.connection.execute(
             "SELECT * FROM config_revisions WHERE active = 1 ORDER BY revision DESC LIMIT 1"
@@ -1967,6 +2865,9 @@ class Database:
                     "DELETE FROM admin_jobs WHERE completed_at IS NOT NULL AND completed_at < ?",
                     (audit_cutoff,),
                 )
+                self.connection.execute(
+                    "DELETE FROM analysis_api_usage WHERE updated_at < ?", (audit_cutoff,)
+                )
         return int(deleted_alerts), int(deleted_observations)
 
     def status(self) -> dict[str, Any]:
@@ -2002,6 +2903,17 @@ class Database:
             ).fetchone()[0]),
         }
         observations = int(self.connection.execute("SELECT COUNT(*) FROM observations").fetchone()[0])
+        analysis_states = {
+            str(row["processing_state"]): int(row["count"])
+            for row in self.connection.execute(
+                "SELECT processing_state, COUNT(*) AS count FROM observations "
+                "GROUP BY processing_state"
+            )
+        }
+        budget_day = datetime.fromtimestamp(now, UTC).date().isoformat()
+        usage_row = self.connection.execute(
+            "SELECT calls FROM analysis_api_usage WHERE budget_day = ?", (budget_day,)
+        ).fetchone()
         incidents = {
             str(row["status"]): int(row["count"])
             for row in self.connection.execute("SELECT status, COUNT(*) AS count FROM incidents GROUP BY status")
@@ -2025,6 +2937,11 @@ class Database:
         return {
             "database_schema": SCHEMA_VERSION,
             "observations": observations,
+            "analysis": {
+                "states": analysis_states,
+                "api_calls_today": int(usage_row["calls"]) if usage_row is not None else 0,
+                "budget_day": budget_day,
+            },
             "outbox": outbox,
             "outbox_metrics": outbox_metrics,
             "incidents": incidents,

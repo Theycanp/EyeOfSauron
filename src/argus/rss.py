@@ -74,12 +74,14 @@ def _safe_link(value: str | None, allowed_hosts: tuple[str, ...]) -> str:
         parsed.port
     except ValueError:
         return ""
-    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password
             or any(ord(char) < 32 for char in value)):
         return ""
     hostname = parsed.hostname.lower()
     if hostname not in allowed_hosts:
         return ""
+    if parsed.scheme == "http":
+        return parsed._replace(scheme="https").geturl()
     return value.strip()
 
 

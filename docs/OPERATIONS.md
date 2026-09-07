@@ -49,14 +49,33 @@ service. SQLite stores the authoritative immutable revision; the old JSON file
 is a one-time migration input, not a live export. Argus notices a desired
 revision change, exits with status 75, and systemd starts a fresh process that
 loads it. The UI may briefly show “waiting for Argus” until the new process
-reports the revision as applied. The listener is loopback-only and must not be
-reverse proxied to the public ntfy endpoint.
+reports the revision as applied. The listener stays loopback-only. For ordinary
+maintenance, keep using the SSH tunnel. To make digest links usable remotely,
+publish it only through a dedicated HTTPS virtual host (or an authenticated
+Cloudflare Access route) that reverse-proxies to `127.0.0.1:18080`; do not merge
+it into the ntfy location or open port 18080 in UFW. The edge must preserve the
+application bearer login, rate-limit login/API failures, set HSTS, and cap
+request bodies. Treat the admin Token as a password even when an upstream
+identity gate is present.
 
 The same API also provides `POST /api/validate`, `POST /api/test-source`,
 `GET /api/revisions`, `POST /api/revisions/<id>/rollback`,
 `POST /api/sources/<id>/enable|disable`, `GET /api/incidents`, and `/metrics`.
 Every accepted change receives a revision and audit record; rollback creates a
 new revision rather than mutating history.
+
+Analysis policy uses `POST /api/analysis`; Prompt versions use
+`GET/POST /api/prompts`. Daily publication policy uses
+`POST /api/digest-config`. The authenticated read surface is
+`GET /api/digests` and `GET /api/digests/<digest-key>`; browser routes under
+`/digests` support direct refresh. Configure `[digest].public_base_url` as the
+externally reachable HTTPS origin before enabling notifications.
+
+Model secrets remain in `/etc/argus/providers.env`; configuration stores only
+the variable name. Local model HTTP endpoints are restricted to loopback.
+Remote endpoints require HTTPS. The default `shadow_mode = true` records model
+advice without changing the deterministic result; disable shadow mode only
+after reviewing model behavior and false positives.
 
 The browser UI is compiled from `frontend/` with Node/Vite. Node and npm are
 not required on the production host: the running service serves the compiled

@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from . import __version__
-from .config import AdminConfig, ConfigError, _parse_rule, _parse_source
+from .config import AdminConfig, ConfigError, _parse_analysis, _parse_digest, _parse_rule, _parse_source
+from .digest import DigestDocument
 from .news_catalog import NEWS_SOURCE_CATALOG
 from .persistence import ControlPlaneRepository, ManagedConfigRepository, RevisionConflictError
 from .providers import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
@@ -99,6 +100,10 @@ class ManagedConfigStore:
             "sources": list(envelope.get("sources", [])),
             "rules": list(envelope.get("rules", [])),
         }
+        if isinstance(envelope.get("analysis"), Mapping):
+            payload["analysis"] = dict(envelope["analysis"])
+        if isinstance(envelope.get("digest"), Mapping):
+            payload["digest"] = dict(envelope["digest"])
         self.validate(payload)
         revision = max(1, int(envelope.get("revision", 1)))
         self.database.record_config_revision(
@@ -127,6 +132,10 @@ class ManagedConfigStore:
             "sources": list(data["sources"]),
             "rules": list(data["rules"]),
         }
+        if isinstance(data.get("analysis"), Mapping):
+            envelope["analysis"] = dict(data["analysis"])
+        if isinstance(data.get("digest"), Mapping):
+            envelope["digest"] = dict(data["digest"])
         payload = json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary.write_text(payload, encoding="utf-8")
@@ -135,16 +144,21 @@ class ManagedConfigStore:
         snapshot = self.history_path / f"{revision:08d}.json"
         snapshot.write_text(payload, encoding="utf-8")
         os.chmod(snapshot, 0o600)
-    def read(self) -> dict[str, list[dict[str, Any]]]:
+    def read(self) -> dict[str, Any]:
         if self.database is not None:
             active = self.database.get_active_config_revision()
             data = active.get("payload", {}) if active is not None else {}
         else:
             data = self._read_file_envelope() or {}
-        return {
+        result: dict[str, Any] = {
             "sources": list(data.get("sources", [])) if isinstance(data.get("sources", []), list) else [],
             "rules": list(data.get("rules", [])) if isinstance(data.get("rules", []), list) else [],
         }
+        if isinstance(data.get("analysis"), Mapping):
+            result["analysis"] = _public(dict(data["analysis"]))
+        if isinstance(data.get("digest"), Mapping):
+            result["digest"] = _public(dict(data["digest"]))
+        return result
 
     def metadata(self) -> dict[str, Any]:
         if self.database is not None:
@@ -177,6 +191,16 @@ class ManagedConfigStore:
         rules = data.get("rules", [])
         if not isinstance(sources, list) or not isinstance(rules, list):
             raise AdminError("managed configuration sources and rules must be arrays")
+        if "analysis" in data:
+            try:
+                _parse_analysis(data["analysis"])
+            except (ConfigError, TypeError) as exc:
+                raise AdminError(str(exc)) from exc
+        if "digest" in data:
+            try:
+                _parse_digest(data["digest"])
+            except (ConfigError, TypeError) as exc:
+                raise AdminError(str(exc)) from exc
         parsed_sources = tuple(
             _parse_source(item, index, provider_registry=self.provider_registry)
             for index, item in enumerate(sources)
@@ -193,7 +217,7 @@ class ManagedConfigStore:
             raise AdminError(f"rule references unknown sources: {', '.join(unknown)}")
         return {"sources": len(parsed_sources), "rules": len(parsed_rules), "source_ids": sorted(source_ids), "rule_ids": sorted(rule_ids)}
 
-    def _snapshot(self) -> tuple[dict[str, list[dict[str, Any]]], int]:
+    def _snapshot(self) -> tuple[dict[str, Any], int]:
         if self.database is not None:
             active = self.database.get_active_config_revision()
             payload = active["payload"] if active is not None else {}
@@ -201,10 +225,15 @@ class ManagedConfigStore:
         else:
             payload = self._read_file_envelope() or {}
             revision = int(payload.get("revision", 0))
-        return {
+        result: dict[str, Any] = {
             "sources": list(payload.get("sources", [])),
             "rules": list(payload.get("rules", [])),
-        }, revision
+        }
+        if isinstance(payload.get("analysis"), Mapping):
+            result["analysis"] = dict(payload["analysis"])
+        if isinstance(payload.get("digest"), Mapping):
+            result["digest"] = dict(payload["digest"])
+        return result, revision
 
     def write(
         self,
@@ -232,6 +261,49 @@ class ManagedConfigStore:
         except OSError as exc:
             LOGGER.warning("managed_config_materialize_failed revision=%d error=%s", revision, exc)
         return revision
+
+    def set_analysis(
+        self,
+        value: Mapping[str, Any],
+        actor: str = "admin",
+        *,
+        expected_revision: int | None = None,
+    ) -> int:
+        """Replace only the analysis policy without overwriting sources or rules."""
+        _reject_secret_values(value, "analysis")
+        try:
+            _parse_analysis(value)
+        except (ConfigError, TypeError) as exc:
+            raise AdminError(str(exc)) from exc
+        current, revision = self._snapshot()
+        current["analysis"] = dict(value)
+        return self.write(
+            current,
+            actor,
+            "analysis policy update",
+            expected_revision=revision if expected_revision is None else expected_revision,
+        )
+
+    def set_digest(
+        self,
+        value: Mapping[str, Any],
+        actor: str = "admin",
+        *,
+        expected_revision: int | None = None,
+    ) -> int:
+        _reject_secret_values(value, "digest")
+        try:
+            _parse_digest(value)
+        except (ConfigError, TypeError) as exc:
+            raise AdminError(str(exc)) from exc
+        current, revision = self._snapshot()
+        current["digest"] = dict(value)
+        return self.write(
+            current,
+            actor,
+            "digest policy update",
+            expected_revision=revision if expected_revision is None else expected_revision,
+        )
 
     def upsert(
         self,
@@ -448,7 +520,10 @@ _STATIC_CONTENT_TYPES = {
 
 def _static_file(request_path: str) -> Path | None:
     path = urllib.parse.urlsplit(request_path).path
-    relative = "index.html" if path in {"/", "/index.html"} else path.lstrip("/")
+    is_spa_route = path == "/digests" or path.startswith("/digests/")
+    relative = (
+        "index.html" if path in {"/", "/index.html"} or is_spa_route else path.lstrip("/")
+    )
     if not relative or relative.startswith("."):
         return None
     candidate = (_WEB_ROOT / relative).resolve()
@@ -457,6 +532,59 @@ def _static_file(request_path: str) -> Path | None:
     except ValueError:
         return None
     return candidate if candidate.is_file() else None
+
+
+def _digest_payload(digest: DigestDocument, *, details: bool) -> dict[str, Any]:
+    """Build the stable HTTP representation without exposing persistence details."""
+    payload: dict[str, Any] = {
+        "digest_key": digest.digest_key,
+        "version": digest.version,
+        "period_start": digest.period_start,
+        "period_end": digest.period_end,
+        "timezone": digest.timezone,
+        "title": digest.title,
+        "summary": digest.summary,
+        "generation_kind": digest.generation_kind,
+        "status": digest.status,
+        "created_at": digest.created_at,
+        "published_at": digest.published_at,
+        "item_count": len(digest.items),
+        "source_count": len(digest.coverage),
+        "web_path": f"/digests/{urllib.parse.quote(digest.digest_key, safe='')}",
+    }
+    if not details:
+        return payload
+    payload["items"] = [
+        {
+            "cluster_key": item.cluster_key,
+            "title": item.title,
+            "summary": item.summary,
+            "score": item.score,
+            "importance": item.importance,
+            "urgency": item.urgency,
+            "relevance": item.relevance,
+            "confidence": item.confidence,
+            "published_at": item.published_at,
+            "regions": list(item.regions),
+            "topics": list(item.topics),
+            "source_ids": list(item.source_ids),
+            "observation_ids": list(item.observation_ids),
+            "links": list(item.links),
+        }
+        for item in digest.items
+    ]
+    payload["coverage"] = [
+        {
+            "source_id": item.source_id,
+            "status": item.status,
+            "observation_count": item.observation_count,
+            "last_attempt_at": item.last_attempt_at,
+            "last_success_at": item.last_success_at,
+            "consecutive_failures": item.consecutive_failures,
+        }
+        for item in digest.coverage
+    ]
+    return payload
 
 
 def make_handler(
@@ -631,6 +759,70 @@ def make_handler(
             if path == "/api/news-catalog":
                 self._json(HTTPStatus.OK, {"sources": NEWS_SOURCE_CATALOG.describe()})
                 return
+            if path == "/api/prompts":
+                self._json(HTTPStatus.OK, {"prompts": _public(database.list_prompts())})
+                return
+            if path == "/api/digests":
+                status_filter = query.get("status", ["published"])[0]
+                try:
+                    limit = int(query.get("limit", ["30"])[0])
+                    if status_filter not in {"published", "draft", "superseded", "all"}:
+                        raise ValueError("digest status is invalid")
+                    if not 1 <= limit <= 100:
+                        raise ValueError("digest limit is out of range")
+                    rows = database.list_digests(
+                        status=None if status_filter == "all" else status_filter,
+                        limit=limit + 1,
+                    )
+                except ValueError as exc:
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc), "code": "invalid_query"},
+                    )
+                    return
+                truncated = len(rows) > limit
+                visible = rows[:limit]
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "digests": [
+                            _digest_payload(digest, details=False) for digest in visible
+                        ],
+                        "pagination": {"total": len(visible), "truncated": truncated},
+                    },
+                )
+                return
+            if path.startswith("/api/digests/"):
+                digest_key = urllib.parse.unquote(path[len("/api/digests/") :])
+                try:
+                    if not digest_key or "/" in digest_key or len(digest_key) > 128:
+                        raise ValueError("digest key is invalid")
+                    raw_version = query.get("version", [None])[0]
+                    version = int(raw_version) if raw_version is not None else None
+                    if version is not None and version < 1:
+                        raise ValueError("digest version is invalid")
+                    digest = database.get_digest(
+                        digest_key,
+                        version,
+                        published_only=version is None,
+                    )
+                except ValueError as exc:
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc), "code": "invalid_query"},
+                    )
+                    return
+                if digest is None:
+                    self._json(
+                        HTTPStatus.NOT_FOUND,
+                        {"error": "digest not found", "code": "not_found"},
+                    )
+                else:
+                    self._json(
+                        HTTPStatus.OK,
+                        {"digest": _digest_payload(digest, details=True)},
+                    )
+                return
             if path == "/api/revisions":
                 rows = database.list_config_revisions()
                 self._json(HTTPStatus.OK, {"revisions": rows, "pagination": {"total": len(rows)}})
@@ -706,6 +898,37 @@ def make_handler(
                     reminder = parse_reminder(data, now)
                     saved = database.upsert_reminder(reminder, actor, now)
                     self._json(HTTPStatus.OK, {"saved": saved, "restart_required": False})
+                    return
+                if path == "/api/prompts":
+                    prompt_id = data.get("prompt_id")
+                    version = data.get("version")
+                    system_text = data.get("system_text")
+                    if not isinstance(prompt_id, str) or not isinstance(version, int) or isinstance(version, bool) or not isinstance(system_text, str):
+                        raise AdminError("prompt requires prompt_id, integer version, and system_text")
+                    database.save_prompt(prompt_id, version, system_text, actor, int(time.time()))
+                    self._json(HTTPStatus.OK, {"saved": _public(database.get_prompt(prompt_id, version)), "restart_required": False})
+                    return
+                if path == "/api/analysis":
+                    revision = store.set_analysis(
+                        data,
+                        actor=actor,
+                        expected_revision=expected_revision,
+                    )
+                    self._json(HTTPStatus.OK, {
+                        "saved": _public(store.read().get("analysis", {})),
+                        "revision": revision,
+                        "restart_required": True,
+                    })
+                    return
+                if path == "/api/digest-config":
+                    revision = store.set_digest(
+                        data, actor=actor, expected_revision=expected_revision
+                    )
+                    self._json(HTTPStatus.OK, {
+                        "saved": _public(store.read().get("digest", {})),
+                        "revision": revision,
+                        "restart_required": True,
+                    })
                     return
                 if path.startswith("/api/reminders/") and path.endswith(("/enable", "/disable")):
                     parts = path.strip("/").split("/")

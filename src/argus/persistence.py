@@ -4,6 +4,13 @@ import sqlite3
 from types import TracebackType
 from typing import Any, Mapping, Protocol, runtime_checkable
 
+from .analysis_orchestrator import AnalysisRepository
+from .digest import (
+    DigestInputRepository,
+    DigestNotificationRepository,
+    DigestReaderRepository,
+    DigestRepository,
+)
 from .models import FeedFetchResult, IngestReport, OutboxMessage, SourceState
 from .reminders import ReminderSpec
 from .rules import RuleSet
@@ -48,7 +55,9 @@ class SQLiteUnitOfWork:
 
 
 @runtime_checkable
-class RuntimeRepository(Protocol):
+class RuntimeRepository(
+    AnalysisRepository, DigestInputRepository, DigestRepository, DigestNotificationRepository, Protocol
+):
     """Persistence port used by the always-on application service."""
 
     def get_source_state(self, source_id: str) -> SourceState: ...
@@ -170,7 +179,29 @@ class ManagedConfigRepository(Protocol):
 
 
 @runtime_checkable
-class ControlPlaneRepository(ManagedConfigRepository, Protocol):
+class PromptRepository(Protocol):
+    """Versioned prompt storage kept behind the persistence boundary."""
+
+    def get_prompt(self, prompt_id: str, version: int | None = None) -> dict[str, Any] | None: ...
+
+    def list_prompts(self, prompt_id: str | None = None) -> list[dict[str, Any]]: ...
+
+    def save_prompt(
+        self,
+        prompt_id: str,
+        version: int,
+        system_text: str,
+        actor: str,
+        now: int,
+        *,
+        active: bool = True,
+    ) -> None: ...
+
+
+@runtime_checkable
+class ControlPlaneRepository(
+    ManagedConfigRepository, PromptRepository, DigestReaderRepository, Protocol
+):
     """Narrow persistence port used by the local administration API."""
 
     def status(self) -> dict[str, Any]: ...

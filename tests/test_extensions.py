@@ -311,7 +311,7 @@ class ExtensionTests(unittest.TestCase):
             """)
             connection.close()
             database = Database(path)
-            self.assertEqual(7, database.status()["database_schema"])
+            self.assertEqual(11, database.status()["database_schema"])
             self.assertTrue(database.get_source_state("legacy").initialized)
             columns = {row[1] for row in database.connection.execute("PRAGMA table_info(alerts)")}
             self.assertIn("confidence", columns)

@@ -6,10 +6,10 @@ async function mockAdminApi(page: Page) {
     const now = Math.floor(Date.now() / 1000)
     const bodies: Record<string, unknown> = {
       '/api/config': {
-        managed: { sources: [], rules: [] },
+        managed: { sources: [], rules: [], analysis: { enabled: false, shadow_mode: true }, digest: { enabled: false } },
         revision: { revision: 1, updated_at: now },
         status: {
-          database_schema: 7,
+          database_schema: 11,
           observations: 0,
           sources: [],
           incidents: { open: 0 },
@@ -22,6 +22,8 @@ async function mockAdminApi(page: Page) {
       '/api/incidents': { incidents: [], pagination: { total: 0 } },
       '/api/news-catalog': { sources: [{ id: 'wsj', publisher: 'The Wall Street Journal', homepage_url: 'https://www.wsj.com', access_model: 'mixed', integration_mode: 'verified_rss', notes: 'Headlines and original links.', feeds: [{ id: 'markets', label: 'Markets', section: 'Markets', url: 'https://feeds.a.dj.com/rss/RSSMarketsMain.xml', allowed_hosts: ['feeds.a.dj.com'] }] }] },
       '/api/outbox': { alerts: [], pagination: { next_cursor: null } },
+      '/api/prompts': { prompts: [] },
+      '/api/digests': { digests: [], pagination: { total: 0, truncated: false } },
     }
     const body = bodies[path]
     if (body) await route.fulfill({ json: body })
@@ -97,7 +99,7 @@ test('catalog creates a disabled draft and saves with its opening revision', asy
   let backgroundRefreshed = false
   await page.route('**/api/config', (route) => {
     backgroundRefreshed = true
-    return route.fulfill({ json: { managed: { sources: [], rules: [] }, revision: { revision: 2 }, status: { runtime: { heartbeat_at: Math.floor(Date.now() / 1_000), applied_revision: 1 } } } })
+    return route.fulfill({ json: { managed: { sources: [], rules: [], analysis: { enabled: false, shadow_mode: true }, digest: { enabled: false } }, revision: { revision: 2 }, status: { runtime: { heartbeat_at: Math.floor(Date.now() / 1_000), applied_revision: 1 } } } })
   })
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await expect.poll(() => backgroundRefreshed).toBe(true)

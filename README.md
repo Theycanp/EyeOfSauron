@@ -5,6 +5,11 @@ Argus, its always-on watcher engine. Argus collects data from adapters,
 normalizes and deduplicates observations, evaluates rules, and delivers durable
 notifications through ntfy.
 
+Observations carry explicit importance, urgency, relevance, confidence,
+region, topic, source tier, information type, handling route, and processing
+state. Deterministic triage remains authoritative; optional local and remote
+model adapters provide bounded, audited advice through one analyzer contract.
+
 The first production adapter monitors Bloomberg's official RSS feeds. A
 configurable weighted headline rule emits a high-priority notification for
 likely breaking or market-moving news. The project is intentionally not tied to
@@ -24,13 +29,17 @@ event, rule, state, and delivery contracts.
 - The service runs as a dedicated unprivileged account with systemd hardening.
 - Its ntfy identity has write-only access to the single `eos` topic.
 - No secret is stored in this repository, SQLite, or application logs.
+- Daily digests are clustered across sources, versioned, and published through
+  the same durable notification outbox.
 
 ## Management backend
 
 The optional `admin` command serves a React/Vite-built management UI and a JSON
 API. The production template binds it to `127.0.0.1:18080`; access it remotely
 with an SSH tunnel, for example `ssh -N -L 18080:127.0.0.1:18080 joker@host`.
-It does not add a public firewall rule. The UI is a static build: Node is used
+For remote digest links it can sit behind a dedicated HTTPS authenticated
+reverse proxy while the application listener remains loopback-only; port 18080
+must never be exposed directly. The UI is a static build: Node is used
 only during development/build and is never a production runtime dependency.
 Source and rule changes are validated and committed as versioned SQLite
 configuration snapshots. The engine detects a new revision within five seconds
@@ -52,9 +61,16 @@ disabled. Do not use display names as identity for X or other accounts.
 
 Failed notifications have explicit retryable, dead-letter, and cancelled states.
 Operators can retry a dead letter or cancel a pending message from the UI.
-The reviewed news catalog includes Bloomberg, WSJ, The Economist, FT, and
-official central-bank/regulator feeds; licensed-only providers are labeled
-unavailable rather than using an unofficial scraping endpoint.
+The reviewed news catalog includes Bloomberg, WSJ, The Economist, FT, official
+Chinese, Japanese, US and international primary sources, and disaster/health/
+science feeds. Licensed-only providers are labeled unavailable rather than
+using an unofficial scraping endpoint.
+
+The authenticated reader provides responsive digest list/detail views and
+read-only APIs. Daily generation is disabled by default. When enabled, Argus
+uses the configured IANA timezone and wall-clock time, catches up one missed
+publication after downtime, publishes one immutable version per local day, and
+sends its HTTPS reader URL through the notifier port.
 
 ## Naming
 

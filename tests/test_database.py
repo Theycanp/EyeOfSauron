@@ -83,6 +83,40 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(0, second.inserted_observations)
         self.assertEqual(1, self.database.status()["outbox"]["pending"])
 
+    def test_observation_analysis_is_persisted_behind_repository(self) -> None:
+        item = observation("primary-policy", "官方紧急公告", timestamp=NOW)
+        item = item.__class__(
+            **{
+                **{field: getattr(item, field) for field in item.__dataclass_fields__},
+                "attributes": {
+                    "source_tier": "primary",
+                    "region": "JP",
+                    "importance": 4,
+                    "urgency": 4,
+                    "topic": "policy",
+                },
+            }
+        )
+        self._success("bloomberg_markets", item)
+        rows = self.database.list_observations(NOW - 1, NOW + 1, handling="immediate", region="jp")
+        self.assertEqual(1, len(rows))
+        self.assertEqual("JP", rows[0]["region"])
+        self.assertEqual("primary", rows[0]["source_tier"])
+        self.assertEqual("policy", rows[0]["topic"])
+
+    def test_prompt_versions_are_stored_and_only_one_is_active(self) -> None:
+        self.assertEqual(11, self.database.status()["database_schema"])
+        self.assertEqual(1, len(self.database.list_prompts("triage")))
+        self.database.save_prompt("triage", 2, "Return JSON only.", "test", NOW)
+        self.assertEqual("Return JSON only.", self.database.get_prompt("triage")["system_text"])
+        rows = self.database.list_prompts("triage")
+        self.assertEqual([2, 1], [row["version"] for row in rows])
+        self.assertEqual([2], [row["version"] for row in rows if row["active"]])
+        # A failed template is rejected before it can change the active version.
+        with self.assertRaises(ValueError):
+            self.database.save_prompt("triage", 3, "", "test", NOW)
+        self.assertEqual(2, self.database.get_prompt("triage")["version"])
+
     def test_outbox_lease_retry_and_delivery(self) -> None:
         self.assertTrue(self.database.enqueue_test_alert("eos", NOW))
         claimed = self.database.claim_due_alert(NOW, lease_seconds=60)

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BellRing, CircleAlert, Inbox, LayoutDashboard, LockKeyhole, LogOut, Menu, Moon, Radar, RefreshCw, Settings2, ShieldCheck, Sun, X } from 'lucide-react'
+import { BellRing, CircleAlert, FileText, Inbox, LayoutDashboard, LockKeyhole, LogOut, Menu, Moon, Radar, RefreshCw, Settings2, ShieldCheck, Sun, X } from 'lucide-react'
 import { AdminApi, ApiError } from '../shared/api'
-import type { AdminResourceName, ConfigRevision, ManagedSource, NewsCatalogEntry, NewsCatalogFeed, OutboxAlert, Reminder, SourceKind } from '../shared/types'
+import type { AdminResourceName, AnalysisConfig, ConfigRevision, DigestConfig, ManagedSource, NewsCatalogEntry, NewsCatalogFeed, OutboxAlert, Reminder, SourceKind } from '../shared/types'
 import { deriveHealth, formatDate } from '../shared/utils'
 import { Brand, EyeMark } from '../shared/ui/Brand'
 import { ConfirmDialog, type Confirmation } from '../shared/ui/ConfirmDialog'
@@ -12,6 +12,7 @@ import { emptyReminderDraft, reminderDraft, reminderPayload, type ReminderDraft 
 import { catalogSourceDraft, createSourceDraft, editSourceDraft, ruleForSource, serializeSimpleRule, serializeSource, type SourceDraft } from '../features/sources/providers'
 import { SourceDialog, SourcesPage } from '../features/sources/Sources'
 import { EventsPage } from '../features/events/EventsPage'
+import { DigestsPage } from '../features/digests/DigestsPage'
 import { OutboxPanel } from '../features/settings/OutboxPanel'
 import { SettingsPage } from '../features/settings/SettingsPage'
 
@@ -20,6 +21,7 @@ const pages = [
   { id: 'reminders', label: '提醒', subtitle: '安排未来要发送的消息', icon: BellRing },
   { id: 'sources', label: '监测来源', subtitle: '决定 EyeOfSauron 要观察什么', icon: Radar },
   { id: 'events', label: '事件', subtitle: '异常、恢复和重要动态', icon: Inbox },
+  { id: 'digests', label: '日报', subtitle: '阅读每日汇总的重要信息', icon: FileText },
   { id: 'settings', label: '设置', subtitle: '通知渠道、运行事实和高级选项', icon: Settings2 },
 ] as const
 
@@ -32,6 +34,7 @@ export default function AdminApp() {
   const [loginError, setLoginError] = useState('')
   const [loginBusy, setLoginBusy] = useState(Boolean(auth))
   const [page, setPage] = useState<PageId>(() => {
+    if (window.location.pathname.startsWith('/digests')) return 'digests'
     const value = window.location.hash.replace('#/', '')
     return pages.some((item) => item.id === value) ? value as PageId : 'overview'
   })
@@ -109,12 +112,13 @@ export default function AdminApp() {
   const revisions = resources.revisions.data?.revisions || []
   const incidents = resources.incidents.data?.incidents || []
   const newsCatalog = resources.newsCatalog.data?.sources || []
+  const prompts = resources.prompts.data?.prompts || []
   const sourceStates = status.sources || []
   const health = useMemo(() => deriveHealth(config), [config])
   const openIncidents = Number(status.incidents?.open || 0)
   const pending = Number(status.outbox?.pending || 0) + Number(status.outbox?.sending || 0)
   const currentPage = pages.find((item) => item.id === page) || pages[0]
-  const resourceNames: AdminResourceName[] = ['config', 'reminders', 'revisions', 'incidents', 'newsCatalog']
+  const resourceNames: AdminResourceName[] = ['config', 'reminders', 'revisions', 'incidents', 'newsCatalog', 'prompts']
   const partialErrors = resourceNames.flatMap((name) => resources[name].error ? [`${name}: ${resources[name].error}`] : [])
   const expectedRevision = Number.isInteger(Number(config?.revision?.revision)) ? Number(config?.revision?.revision) : -1
   const effectivePendingRevision = pendingRevision && health.appliedRevision !== null && health.appliedRevision >= pendingRevision ? null : pendingRevision
@@ -406,6 +410,35 @@ export default function AdminApp() {
     } catch (error) { await reportMutationError(error, '高级 JSON 无效') } finally { setBusy(false) }
   }
 
+  const saveAnalysis = async (analysis: AnalysisConfig) => {
+    setBusy(true)
+    try {
+      const response = await api.configMutate('/api/analysis', 'POST', expectedRevision, analysis)
+      markRestart(response.revision)
+      await refresh(true)
+      notify('分析策略已保存；等待 Argus 应用')
+    } catch (error) { await reportMutationError(error, '无法保存分析策略') } finally { setBusy(false) }
+  }
+
+  const savePrompt = async (prompt: { prompt_id: string; version: number; system_text: string }) => {
+    setBusy(true)
+    try {
+      await api.mutate('/api/prompts', 'POST', prompt)
+      await refresh(true)
+      notify(`Prompt ${prompt.prompt_id}@${prompt.version} 已保存`)
+    } catch (error) { await reportMutationError(error, '无法保存 Prompt') } finally { setBusy(false) }
+  }
+
+  const saveDigest = async (digest: DigestConfig) => {
+    setBusy(true)
+    try {
+      const response = await api.configMutate('/api/digest-config', 'POST', expectedRevision, digest)
+      markRestart(response.revision)
+      await refresh(true)
+      notify('日报配置已保存；等待 Argus 应用')
+    } catch (error) { await reportMutationError(error, '无法保存日报配置') } finally { setBusy(false) }
+  }
+
   if (!authenticated) return <Login token={loginToken} setToken={setLoginToken} login={login} loading={loginBusy} error={loginError || resources.config.error || ''} />
 
   return <div className="app-shell">
@@ -419,7 +452,8 @@ export default function AdminApp() {
         {page === 'reminders' && <RemindersPage reminders={reminders} total={resources.reminders.data?.pagination?.total} busy={busy} onOpen={openReminder} onToggle={(item) => { void toggleReminder(item) }} onDelete={deleteReminder} />}
         {page === 'sources' && <SourcesPage sources={managedSources} sourceStates={sourceStates} busy={busy} query={sourceQuery} onQuery={setSourceQuery} onCreate={openSource} catalog={newsCatalog} catalogError={resources.newsCatalog.error} onCatalogFeed={prepareCatalogFeed} onEdit={editSource} onToggle={(source) => { void toggleSource(source) }} onDelete={deleteSource} />}
         {page === 'events' && <EventsPage incidents={incidents} managedSources={managedSources} total={resources.incidents.data?.pagination?.total} health={health} openCount={openIncidents} />}
-        {page === 'settings' && <><SettingsPage status={status} health={health} revisions={revisions} revisionTotal={resources.revisions.data?.pagination?.total} busy={busy} advancedKind={advancedKind} advancedJson={advancedJson} onAdvancedKind={setAdvancedKind} onAdvancedJson={setAdvancedJson} onLoadExample={loadAdvancedExample} onSaveAdvanced={() => { void saveAdvanced() }} onRollback={rollback} /><OutboxPanel status={outboxStatus} alerts={outboxAlerts} loading={outboxLoading} error={outboxError} nextCursor={outboxNextCursor} busy={busy} onStatus={changeOutboxStatus} onReload={() => { void loadOutbox(outboxStatus) }} onLoadMore={() => { void loadOutbox(outboxStatus, true, outboxNextCursor) }} onRetry={retryOutbox} onCancel={cancelOutbox} onDelete={discardOutbox} /></>}
+        {page === 'digests' && <DigestsPage api={api} onUnauthorized={logout} initialKey={window.location.pathname.startsWith('/digests/') ? decodeURIComponent(window.location.pathname.slice('/digests/'.length)) : undefined} />}
+        {page === 'settings' && <><SettingsPage status={status} health={health} revisions={revisions} revisionTotal={resources.revisions.data?.pagination?.total} busy={busy} analysis={config?.managed.analysis} digest={config?.managed.digest} prompts={prompts} analysisError={resources.prompts.error} onSaveAnalysis={(value) => { void saveAnalysis(value) }} onSaveDigest={(value) => { void saveDigest(value) }} onSavePrompt={(value) => { void savePrompt(value) }} advancedKind={advancedKind} advancedJson={advancedJson} onAdvancedKind={setAdvancedKind} onAdvancedJson={setAdvancedJson} onLoadExample={loadAdvancedExample} onSaveAdvanced={() => { void saveAdvanced() }} onRollback={rollback} /><OutboxPanel status={outboxStatus} alerts={outboxAlerts} loading={outboxLoading} error={outboxError} nextCursor={outboxNextCursor} busy={busy} onStatus={changeOutboxStatus} onReload={() => { void loadOutbox(outboxStatus) }} onLoadMore={() => { void loadOutbox(outboxStatus, true, outboxNextCursor) }} onRetry={retryOutbox} onCancel={cancelOutbox} onDelete={discardOutbox} /></>}
       </>}</main>
     </section>
     <ReminderDialog ref={reminderDialog} draft={reminderForm} setDraft={setReminderForm} busy={busy} dirty={Boolean(reminderSnapshot && reminderSnapshot !== JSON.stringify(reminderForm))} onClose={closeReminder} onSubmit={() => { void saveReminder() }} />

@@ -1,12 +1,15 @@
 import type {
   AdminJob,
   ConfigResponse,
+  DigestDetailResponse,
+  DigestListResponse,
   IncidentResponse,
   JobResponse,
   MutationResponse,
   NewsCatalogResponse,
   OutboxResponse,
   OutboxStatus,
+  PromptResponse,
   ReminderResponse,
   RevisionResponse,
   SourceTestResult,
@@ -130,6 +133,14 @@ export class AdminApi {
   revisions(): Promise<RevisionResponse> { return this.request('/api/revisions') }
   incidents(): Promise<IncidentResponse> { return this.request('/api/incidents') }
   newsCatalog(): Promise<NewsCatalogResponse> { return this.request('/api/news-catalog') }
+  prompts(): Promise<PromptResponse> { return this.request('/api/prompts') }
+  digests(status: 'published' | 'draft' | 'superseded' | 'all' = 'published'): Promise<DigestListResponse> {
+    return this.request(`/api/digests?${new URLSearchParams({ status, limit: '30' })}`)
+  }
+  digest(key: string, version?: number): Promise<DigestDetailResponse> {
+    const query = version ? `?${new URLSearchParams({ version: String(version) })}` : ''
+    return this.request(`/api/digests/${encodeURIComponent(key)}${query}`)
+  }
 
   outbox(status: Extract<OutboxStatus, 'dead' | 'pending'>, beforeId?: number): Promise<OutboxResponse> {
     const query = new URLSearchParams({ status, limit: '50' })

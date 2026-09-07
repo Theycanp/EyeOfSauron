@@ -11,8 +11,12 @@ from pathlib import Path
 from .config import ConfigError, load_config
 from .adapters import AdapterError, build_collector
 from .admin import ManagedConfigStore, serve
+from .analysis_orchestrator import AnalysisOrchestrator
 from .database import Database, read_active_config
-from .notifier import NtfyNotifier, NotifyError
+from .digest import DigestScheduler
+from .model_analyzers import AnalyzerSettings, LocalModelAnalyzer, OpenAICompatibleAnalyzer
+from .notifier import DEFAULT_NOTIFIER_REGISTRY, NotifyError
+from .prompts import PromptTemplate
 from .rules import RuleSet
 from .service import AlreadyRunningError, ProcessLock, ArgusService
 from .util import now_epoch
@@ -56,9 +60,81 @@ def _build_service(
         if collector is not None:
             collectors[source.id] = collector
     rules = RuleSet.from_config(config.rules, config.ntfy.default_topic)
-    notifier = NtfyNotifier.from_config(config.ntfy) if config.ntfy.enabled else None
+    notifier = (
+        DEFAULT_NOTIFIER_REGISTRY.build("ntfy", config=config.ntfy)
+        if config.ntfy.enabled else None
+    )
+    analysis_orchestrator = None
+    if config.analysis.enabled:
+        stored_prompt = database.get_prompt(
+            config.analysis.prompt_id, config.analysis.prompt_version
+        )
+        if stored_prompt is None:
+            raise ConfigError(
+                "configured analysis prompt version does not exist: "
+                f"{config.analysis.prompt_id}@{config.analysis.prompt_version}"
+            )
+        prompt = PromptTemplate(
+            str(stored_prompt["prompt_id"]),
+            int(stored_prompt["version"]),
+            str(stored_prompt["system_text"]),
+        )
+        common = {
+            "timeout_seconds": config.analysis.timeout_seconds,
+            "max_input_chars": config.analysis.max_input_chars,
+            "max_response_bytes": config.analysis.max_response_bytes,
+            "max_tokens": config.analysis.max_tokens,
+            "prompt_id": config.analysis.prompt_id,
+            "prompt_version": config.analysis.prompt_version,
+        }
+        local_analyzer = (
+            LocalModelAnalyzer(
+                AnalyzerSettings(
+                    config.analysis.local_base_url,
+                    config.analysis.local_model,
+                    **common,
+                ),
+                prompt=prompt,
+            )
+            if config.analysis.local_enabled else None
+        )
+        api_analyzer = (
+            OpenAICompatibleAnalyzer(
+                AnalyzerSettings(
+                    config.analysis.api_base_url,
+                    config.analysis.api_model,
+                    **common,
+                ),
+                api_key_env=config.analysis.api_key_env,
+                prompt=prompt,
+            )
+            if config.analysis.api_enabled else None
+        )
+        analysis_orchestrator = AnalysisOrchestrator(
+            config.analysis,
+            database,
+            local_analyzer=local_analyzer,
+            api_analyzer=api_analyzer,
+        )
+    digest_scheduler = (
+        DigestScheduler(
+            config.digest,
+            database,
+            topic=config.ntfy.default_topic,
+            source_ids=[source.id for source in config.sources if source.enabled],
+            region_weights=config.analysis.region_weights,
+        )
+        if config.digest.enabled else None
+    )
     return ArgusService(
-        config, database, collectors, rules, notifier, config_revision=config_revision
+        config,
+        database,
+        collectors,
+        rules,
+        notifier,
+        config_revision=config_revision,
+        analysis_orchestrator=analysis_orchestrator,
+        digest_scheduler=digest_scheduler,
     )
 
 

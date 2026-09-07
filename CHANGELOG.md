@@ -5,6 +5,18 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-06
+
+### Added
+
+- Durable information triage fields and an audited deterministic/local/API
+  analysis pipeline with shadow mode, leases, versioned Prompts, and daily API budgets.
+- Versioned cross-source daily digests, source coverage reporting, authenticated
+  responsive reading views, and idempotent timezone-aware publication notices.
+- Official Bank of Japan, JMA, NDRC, WHO, NASA, and USGS source templates with
+  region, source-tier, topic, and default-importance metadata.
+- Dedicated analysis and digest management APIs with revision conflict protection.
+
 ### Changed
 
 - Adopt Apache-2.0 for the project, synchronize Python/frontend metadata and
@@ -64,7 +76,8 @@ Semantic Versioning and the Keep a Changelog structure.
 - Initial Bloomberg RSS monitoring, weighted alert rules, SQLite outbox, ntfy
   delivery, failure/recovery notifications, and baseline suppression.
 
-[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.3.0...v0.7.0
 [0.6.0]: https://github.com/Theycanp/EyeOfSauron/commits/1e12855
 [0.3.0]: https://github.com/Theycanp/EyeOfSauron/releases/tag/v0.3.0

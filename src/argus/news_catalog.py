@@ -68,6 +68,10 @@ class NewsSourceEntry:
     default_enabled: bool = False
     requires_user_confirmation: bool = True
     content_policy: str = "feed_metadata_and_original_link_only"
+    region: str = "GLOBAL"
+    source_tier: str = "secondary"
+    default_importance: int = 3
+    topic: str = "general"
 
     def __post_init__(self) -> None:
         if not _CATALOG_ID.fullmatch(self.id):
@@ -80,6 +84,12 @@ class NewsSourceEntry:
             raise NewsCatalogError("catalog entries must require explicit user confirmation")
         if self.integration_mode is IntegrationMode.VERIFIED_RSS and not self.feeds:
             raise NewsCatalogError(f"verified RSS entry {self.id} has no feed templates")
+        if self.region not in {"CN", "JP", "US", "GLOBAL", "OTHER"}:
+            raise NewsCatalogError(f"invalid catalog region: {self.region}")
+        if self.source_tier not in {"primary", "secondary", "social"}:
+            raise NewsCatalogError(f"invalid catalog source tier: {self.source_tier}")
+        if not 1 <= self.default_importance <= 5:
+            raise NewsCatalogError("catalog default importance must be between 1 and 5")
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -95,6 +105,10 @@ class NewsSourceEntry:
             "default_enabled": self.default_enabled,
             "requires_user_confirmation": self.requires_user_confirmation,
             "content_policy": self.content_policy,
+            "region": self.region,
+            "source_tier": self.source_tier,
+            "default_importance": self.default_importance,
+            "topic": self.topic,
         }
 
 
@@ -163,7 +177,11 @@ class NewsSourceCatalog:
                 "catalog_feed": feed.id,
                 "content_policy": entry.content_policy,
                 "max_content_age_seconds": feed.max_content_age_seconds,
+                "topic": entry.topic,
             },
+            "region": entry.region,
+            "source_tier": entry.source_tier,
+            "default_importance": entry.default_importance,
         }
 
     def user_url_template(
@@ -262,6 +280,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         ),
         "https://feeds.bloomberg.com/markets/news.rss",
         "Official feed metadata only; individual articles may require a Bloomberg subscription.",
+        region="US", source_tier="secondary", default_importance=3, topic="markets",
     ),
     NewsSourceEntry(
         "wall_street_journal",
@@ -338,6 +357,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         ),
         "https://www.federalreserve.gov/feeds/feeds.htm",
         "Official Federal Reserve RSS feeds for public releases.",
+        region="US", source_tier="primary", default_importance=4, topic="policy",
     ),
     NewsSourceEntry(
         "sec",
@@ -350,6 +370,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         ),
         "https://www.sec.gov/news/pressreleases.rss",
         "Official SEC press-release feed. Respect SEC fair-access guidance and use a conservative polling interval.",
+        region="US", source_tier="primary", default_importance=4, topic="finance",
     ),
     NewsSourceEntry(
         "ecb",
@@ -362,5 +383,72 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         ),
         "https://www.ecb.europa.eu/rss/press.html",
         "Official ECB press-release RSS feed.",
+        region="GLOBAL", source_tier="primary", default_importance=4, topic="policy",
+    ),
+    NewsSourceEntry(
+        "bank_of_japan",
+        "Bank of Japan",
+        "https://www.boj.or.jp/en/",
+        AccessModel.PUBLIC,
+        IntegrationMode.VERIFIED_RSS,
+        (_feed("whats_new", "What's New", "Monetary Policy and Markets", "https://www.boj.or.jp/en/rss/whatsnew.xml", "www.boj.or.jp"),),
+        "https://www.boj.or.jp/en/rss/",
+        "Official Bank of Japan English RSS; article pages and PDFs remain on the BOJ site.",
+        region="JP", source_tier="primary", default_importance=4, topic="policy",
+    ),
+    NewsSourceEntry(
+        "japan_meteorological_agency",
+        "Japan Meteorological Agency",
+        "https://www.jma.go.jp/jma/indexe.html",
+        AccessModel.PUBLIC,
+        IntegrationMode.VERIFIED_RSS,
+        (_feed("high_frequency", "High-frequency alerts", "Disaster and Weather", "https://www.data.jma.go.jp/developer/xml/feed/extra.xml", "www.data.jma.go.jp"),),
+        "https://www.data.jma.go.jp/developer/xml/feed/",
+        "Official JMAXML Atom feed for high-frequency weather and disaster information.",
+        region="JP", source_tier="primary", default_importance=5, topic="disaster",
+    ),
+    NewsSourceEntry(
+        "china_ndrc",
+        "National Development and Reform Commission",
+        "https://www.ndrc.gov.cn/",
+        AccessModel.PUBLIC,
+        IntegrationMode.VERIFIED_RSS,
+        (_feed("press_releases", "Press releases", "Policy and Economy", "https://www.ndrc.gov.cn/xwdt/xwfb/rss.xml", "www.ndrc.gov.cn"),),
+        "https://www.ndrc.gov.cn/xwdt/xwfb/rss.xml",
+        "Official NDRC RSS endpoint; publication cadence varies by announcement schedule.",
+        region="CN", source_tier="primary", default_importance=4, topic="policy",
+    ),
+    NewsSourceEntry(
+        "world_health_organization",
+        "World Health Organization",
+        "https://www.who.int/",
+        AccessModel.PUBLIC,
+        IntegrationMode.VERIFIED_RSS,
+        (_feed("news_english", "News (English)", "Health", "https://www.who.int/rss-feeds/news-english.xml", "www.who.int"),),
+        "https://www.who.int/rss-feeds",
+        "Official WHO news releases, statements, and media notes.",
+        region="GLOBAL", source_tier="primary", default_importance=4, topic="health",
+    ),
+    NewsSourceEntry(
+        "nasa",
+        "NASA",
+        "https://www.nasa.gov/",
+        AccessModel.PUBLIC,
+        IntegrationMode.VERIFIED_RSS,
+        (_feed("news_releases", "News releases", "Science and Space", "https://www.nasa.gov/news-release/feed/", "www.nasa.gov"),),
+        "https://www.nasa.gov/rss-feeds/",
+        "Official NASA news-release feed.",
+        region="US", source_tier="primary", default_importance=3, topic="science",
+    ),
+    NewsSourceEntry(
+        "usgs_earthquakes",
+        "U.S. Geological Survey",
+        "https://earthquake.usgs.gov/",
+        AccessModel.PUBLIC,
+        IntegrationMode.VERIFIED_RSS,
+        (_feed("significant_month", "Significant earthquakes", "Disaster", "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/significant_month.atom", "earthquake.usgs.gov"),),
+        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/atom.php",
+        "Official USGS significant-earthquake Atom feed. Consumers still apply age and deduplication policy.",
+        region="GLOBAL", source_tier="primary", default_importance=5, topic="disaster",
     ),
 ))

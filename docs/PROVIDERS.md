@@ -86,6 +86,12 @@ fetch article pages or circumvent publisher access controls.
 | Federal Reserve Board | all press releases, monetary policy, speeches | public official RSS |
 | U.S. SEC | press releases | public official RSS; use conservative polling |
 | European Central Bank | press releases | public official RSS |
+| Bank of Japan | official updates | public official RSS; primary source, Japan priority 4 |
+| Japan Meteorological Agency | high-frequency disaster and weather notices | public official JMAXML Atom |
+| National Development and Reform Commission (China) | press releases | public official RSS; primary source |
+| World Health Organization | news releases and statements | public official RSS |
+| NASA | news releases | public official RSS |
+| U.S. Geological Survey | significant earthquakes | public official Atom |
 
 Publisher endpoints and terms can change after the verification date. Before
 activation, review the catalog evidence URL, confirm the exact feed URL and host
@@ -105,6 +111,10 @@ enabled, conditional caching is bypassed so repeated 304 responses cannot hide
 stale content. Catalog news templates carry conservative publisher-specific
 limits; infrequent central-bank and regulator announcements leave it disabled.
 The connection test checks content freshness as well as transport/parsing.
+Some legacy official feeds, including BOJ, still emit HTTP article links. The
+RSS adapter upgrades a stored article link to HTTPS only when its hostname is
+already in the exact source allowlist; it never fetches the article as part of
+that conversion.
 
 The catalog distinguishes three integration modes:
 
