@@ -4,11 +4,16 @@ export PYTHONDONTWRITEBYTECODE=1
 
 release_root=${1:-}
 config_path=${2:-/etc/argus/config.toml}
+python_bin=${ARGUS_PYTHON:-/usr/bin/python3}
 if [[ -z "$release_root" ]]; then
   echo "usage: $0 RELEASE_DIRECTORY [CONFIG_PATH]" >&2
   exit 2
 fi
 release_root=$(realpath "$release_root")
+if [[ "$python_bin" != /* || ! -x "$python_bin" ]]; then
+  echo "preflight: ARGUS_PYTHON must be an absolute path to an executable" >&2
+  exit 2
+fi
 
 required=(
   RELEASE.json
@@ -46,7 +51,7 @@ if find "$release_root" -xdev -perm /022 -print -quit | grep -q .; then
   exit 1
 fi
 
-/usr/bin/python3 - "$release_root" <<'PY'
+"$python_bin" - "$release_root" <<'PY'
 import json
 import re
 import sys
@@ -81,9 +86,9 @@ if project.get("version") != __version__:
 if not re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("commit", ""))):
     raise SystemExit("preflight: RELEASE.json does not contain a full Git commit SHA")
 PY
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$release_root/src" /usr/bin/python3 \
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$release_root/src" "$python_bin" \
   -m argus --config "$config_path" check-config >/dev/null
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$release_root/src" /usr/bin/python3 \
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$release_root/src" "$python_bin" \
   -m argus.backup --help >/dev/null
 unit_stage=$(mktemp -d)
 trap 'rm -rf -- "$unit_stage"' EXIT

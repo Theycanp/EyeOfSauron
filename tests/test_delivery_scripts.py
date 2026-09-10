@@ -3,9 +3,11 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -161,10 +163,11 @@ class ArchiveSafetyTests(unittest.TestCase):
                 "license": tomllib.loads((root / "pyproject.toml").read_text())["project"]["license"],
             }))
             before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            preflight_env = {**os.environ, "ARGUS_PYTHON": sys.executable}
             for _ in range(2):
                 result = subprocess.run(
                     ["bash", str(root / "scripts/release/preflight.sh"), str(root), str(config)],
-                    text=True, capture_output=True, timeout=30,
+                    text=True, capture_output=True, timeout=30, env=preflight_env,
                 )
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             after = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
@@ -175,7 +178,7 @@ class ArchiveSafetyTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest))
             result = subprocess.run(
                 ["bash", str(root / "scripts/release/preflight.sh"), str(root), str(config)],
-                text=True, capture_output=True, timeout=30,
+                text=True, capture_output=True, timeout=30, env=preflight_env,
             )
             self.assertNotEqual(0, result.returncode)
             self.assertIn("RELEASE.json license", result.stderr)
