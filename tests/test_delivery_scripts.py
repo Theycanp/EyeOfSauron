@@ -40,6 +40,47 @@ daily_backup = importlib.util.module_from_spec(DAILY_SPEC)
 DAILY_SPEC.loader.exec_module(daily_backup)
 
 
+class CiGateTests(unittest.TestCase):
+    def test_frontend_gate_stops_after_the_first_failed_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts/ci").mkdir(parents=True)
+            shutil.copy2(ROOT / "scripts/ci/check.sh", root / "scripts/ci/check.sh")
+            assets = root / "src/argus/admin_web/assets"
+            assets.mkdir(parents=True)
+            (root / "src/argus/admin_web/index.html").write_text("index")
+            (assets / "app.js").write_text("javascript")
+            (assets / "app.css").write_text("css")
+            (root / "frontend").mkdir()
+            binaries = root / "bin"
+            binaries.mkdir()
+            node = binaries / "node"
+            node.write_text("#!/bin/sh\nexit 0\n")
+            node.chmod(0o755)
+            npm = binaries / "npm"
+            npm.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = --version ]; then exit 0; fi\n"
+                "if [ \"$1\" = run ] && [ \"$2\" = lint ]; then exit 9; fi\n"
+                "touch \"$CI_LATER_COMMAND_MARKER\"\n"
+            )
+            npm.chmod(0o755)
+            marker = root / "later-command-ran"
+            environment = dict(os.environ)
+            environment["PATH"] = f"{binaries}:{environment['PATH']}"
+            environment["CI_LATER_COMMAND_MARKER"] = str(marker)
+
+            result = subprocess.run(
+                ["bash", str(root / "scripts/ci/check.sh"), "frontend"],
+                text=True,
+                capture_output=True,
+                env=environment,
+                timeout=10,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse(marker.exists())
+
+
 class DailyBackupTests(unittest.TestCase):
     def test_watchdog_start_limit_allows_its_normal_timer_cadence(self):
         import configparser

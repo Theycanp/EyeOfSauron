@@ -12,6 +12,7 @@ from .digest import (
     DigestRepository,
 )
 from .models import FeedFetchResult, IngestReport, OutboxMessage, SourceState
+from .manual_events import ManualEventSpec
 from .reminders import ReminderSpec
 from .rules import RuleSet
 
@@ -215,6 +216,13 @@ class ControlPlaneRepository(
         self, limit: int = 100, status: str | None = None
     ) -> list[dict[str, Any]]: ...
     def get_alert_detail(self, alert_id: int) -> dict[str, Any] | None: ...
+    def create_manual_event(
+        self,
+        event: ManualEventSpec,
+        actor: str,
+        now: int,
+        topic: str,
+    ) -> dict[str, Any]: ...
     def get_reminder(self, reminder_id: str) -> dict[str, Any] | None: ...
     def list_reminders(self, limit: int = 500) -> list[dict[str, Any]]: ...
     def upsert_reminder(

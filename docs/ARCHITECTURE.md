@@ -39,6 +39,15 @@ collectors -> normalized observations -> triage -> rules -> incidents -> SQLite 
 These contracts allow future adapters for market APIs, X, host events, webhooks,
 and MQTT without changing delivery reliability.
 
+Administrator-created events are a control-plane input to the same durable
+domain pipeline. The API validates a `ManualEventSpec`, then creates its
+immutable observation, `event / recorded` incident, and pending alert in one
+repository transaction. It records the authenticated actor in observation
+attributes, marks the observation analyzed so an optional model cannot rewrite
+the operator's classification, and uses `handling = immediate`; the event is
+therefore both notified and eligible for the daily digest. The API cannot write
+an isolated display row or call ntfy directly.
+
 Semantic enrichment depends only on the `Analyzer.analyze` port. Prompt text is
 versioned configuration owned by the analysis subsystem, never concatenated
 from article instructions or accepted from an untrusted feed. Remote API and

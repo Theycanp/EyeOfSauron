@@ -168,6 +168,15 @@ export interface AlertDetailResponse {
   incident?: Incident | null
 }
 
+export interface ManualEventDraft {
+  title: string
+  summary: string
+  importance: number
+  region: string
+  topic: string
+  source_url: string
+}
+
 export interface ConfigRevision extends JsonRecord {
   id?: number
   revision: number

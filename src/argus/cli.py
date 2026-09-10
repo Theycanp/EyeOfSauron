@@ -231,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
                     heartbeat_timeout_seconds=max(
                         60, config.service.heartbeat_interval_seconds * 4
                     ),
+                    notification_topic=config.ntfy.default_topic,
                 )
                 return 0
 

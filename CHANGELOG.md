@@ -5,6 +5,23 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-10
+
+### Added
+
+- Add administrator-created events with strict validation, dedicated RBAC,
+  creator attribution, and atomic observation/incident/outbox persistence.
+- Add a responsive event dialog that opens the saved detail immediately and
+  exercises the same ntfy and daily-digest path as collected intelligence.
+- Add backend transaction, validation, CSRF, role, and digest tests plus desktop
+  and mobile browser coverage for the complete manual-event workflow.
+
+### Fixed
+
+- Make the local and GitHub frontend quality gate stop on its first failed
+  lint, type, unit, browser, or build command instead of allowing a later
+  successful command to mask the failure.
+
 ## [0.11.0] - 2026-09-10
 
 ### Added
@@ -150,7 +167,8 @@ Semantic Versioning and the Keep a Changelog structure.
 - Initial Bloomberg RSS monitoring, weighted alert rules, SQLite outbox, ntfy
   delivery, failure/recovery notifications, and baseline suppression.
 
-[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/Theycanp/EyeOfSauron/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/Theycanp/EyeOfSauron/compare/v0.10.0...v0.10.1

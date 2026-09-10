@@ -9,6 +9,7 @@ import type {
   DigestListResponse,
   IncidentResponse,
   JobResponse,
+  ManualEventDraft,
   MutationResponse,
   NewsCatalogResponse,
   OutboxResponse,
@@ -164,6 +165,9 @@ export class AdminApi {
   revisions(): Promise<RevisionResponse> { return this.request('/api/revisions') }
   incidents(): Promise<IncidentResponse> { return this.request('/api/incidents') }
   alert(id: number): Promise<AlertDetailResponse> { return this.request(`/api/alerts/${id}`) }
+  createEvent(body: ManualEventDraft): Promise<AlertDetailResponse> {
+    return this.request('/api/events', { method: 'POST', body: JSON.stringify(body) })
+  }
   newsCatalog(): Promise<NewsCatalogResponse> { return this.request('/api/news-catalog') }
   prompts(): Promise<PromptResponse> { return this.request('/api/prompts') }
   sourceQuality(): Promise<SourceQualityResponse> { return this.request('/api/source-quality') }

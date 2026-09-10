@@ -16,6 +16,7 @@ from . import __version__
 from .auth import AdminAuth, AuthContext, AuthError, LoginBlockedError
 from .config import AdminConfig, ConfigError, _parse_analysis, _parse_digest, _parse_rule, _parse_source
 from .digest import DigestDocument
+from .manual_events import ManualEventError, parse_manual_event
 from .news_catalog import NEWS_SOURCE_CATALOG
 from .persistence import ControlPlaneRepository, ManagedConfigRepository, RevisionConflictError
 from .providers import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
@@ -598,6 +599,7 @@ def make_handler(
     *,
     heartbeat_timeout_seconds: int = 90,
     provider_registry: ProviderRegistry | None = None,
+    notification_topic: str = "eos",
 ):
     registry = provider_registry or store.provider_registry
     authenticator = AdminAuth(database, auth_token)
@@ -665,6 +667,8 @@ def make_handler(
                 return "users:manage"
             if path.startswith("/api/reminders"):
                 return "reminders:write"
+            if path == "/api/events":
+                return "events:write"
             if path.startswith("/api/source-quality"):
                 return "quality:write"
             if path.startswith(("/api/outbox", "/api/jobs")):
@@ -1104,6 +1108,14 @@ def make_handler(
                     saved = database.upsert_reminder(reminder, actor, now)
                     self._json(HTTPStatus.OK, {"saved": saved, "restart_required": False})
                     return
+                if path == "/api/events":
+                    now = int(time.time())
+                    event = parse_manual_event(data)
+                    detail = database.create_manual_event(
+                        event, actor, now, notification_topic
+                    )
+                    self._json(HTTPStatus.CREATED, detail)
+                    return
                 if path == "/api/prompts":
                     prompt_id = data.get("prompt_id")
                     version = data.get("version")
@@ -1279,7 +1291,10 @@ def make_handler(
                 self._json(HTTPStatus.CONFLICT, {"error": str(exc), "code": "revision_conflict"})
             except LoginBlockedError as exc:
                 self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(exc), "code": "login_blocked"})
-            except (AdminError, AuthError, ConfigError, ReminderError, KeyError, ValueError, TypeError) as exc:
+            except (
+                AdminError, AuthError, ConfigError, ManualEventError, ReminderError,
+                KeyError, ValueError, TypeError,
+            ) as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), "code": "invalid_request"})
             except (OSError, RuntimeError) as exc:
                 LOGGER.error("admin_request_failed request_id=%s error=%s", self.request_id, sanitize_error(exc))
@@ -1376,6 +1391,7 @@ def serve(
     environment: Mapping[str, str] | None = None,
     *,
     heartbeat_timeout_seconds: int = 90,
+    notification_topic: str = "eos",
 ) -> None:
     env = os.environ if environment is None else environment
     token = env.get(config.auth_token_env, "") if config.auth_token_env else None
@@ -1390,6 +1406,7 @@ def serve(
             database,
             token,
             heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            notification_topic=notification_topic,
         ),
     )
     try:

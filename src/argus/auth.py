@@ -21,11 +21,14 @@ USERNAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_.-]{2,31}$")
 ROLE_PERMISSIONS = {
     "viewer": frozenset({"read"}),
     "operator": frozenset(
-        {"read", "sources:write", "reminders:write", "quality:write", "operations:write"}
+        {
+            "read", "sources:write", "reminders:write", "events:write",
+            "quality:write", "operations:write",
+        }
     ),
     "admin": frozenset(
         {
-            "read", "sources:write", "reminders:write", "quality:write",
+            "read", "sources:write", "reminders:write", "events:write", "quality:write",
             "operations:write", "settings:write", "users:manage",
         }
     ),
