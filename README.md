@@ -74,6 +74,13 @@ uses the configured IANA timezone and wall-clock time, catches up one missed
 publication after downtime, publishes one immutable version per local day, and
 sends its HTTPS reader URL through the notifier port.
 
+Event-backed ntfy notifications open an authenticated EyeOfSauron detail page
+instead of sending the browser directly to the publisher. The page displays the
+summary and analysis context already saved at collection time, so it remains
+useful when Bloomberg or another publisher is slow or unavailable. The original
+article remains available as a secondary action. This routing applies only to
+newly delivered notifications; previously delivered ntfy messages are immutable.
+
 ## Naming
 
 - **EyeOfSauron** is the product and whole system; **EOS** is its short name.
@@ -93,9 +100,15 @@ uses `argon2-cffi`.
 
 ```bash
 cd /home/joker/services/eyeofsauron
-PYTHONPATH=src python3 -m unittest discover -s tests -v
-PYTHONPATH=src python3 -m argus --config config/argus.example.toml check-config
+scripts/ci/check.sh backend
+scripts/ci/check.sh frontend
 ```
+
+These are the same core checks used by GitHub Actions. The backend uses Python's
+built-in `unittest` runner; `pytest` is intentionally not required. The scripts
+prefer the repository `.venv` when present. Dependency installation and online
+vulnerability audits remain explicit CI setup steps rather than hidden test
+network access.
 
 See `docs/ARCHITECTURE.md` for design decisions, `docs/PROVIDERS.md` for the
 provider capability contract and reviewed news catalog, and `docs/OPERATIONS.md`

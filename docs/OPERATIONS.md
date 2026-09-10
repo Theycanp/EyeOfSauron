@@ -95,6 +95,15 @@ Analysis policy uses `POST /api/analysis`; Prompt versions use
 `/digests` support direct refresh. Configure `[digest].public_base_url` as the
 externally reachable HTTPS origin before enabling notifications.
 
+Set `[admin].public_base_url` to the externally reachable, credential-free HTTPS
+origin of the administration service. Event-backed ntfy messages then use
+`/events/<alert-id>` as their primary click target and expose the publisher URL
+as a secondary `查看原文` action. The reader requires a normal administration
+session; after login the original deep link is retained. Alerts without event
+context, including reminders and digest publication notices, keep their existing
+click targets. Changing this setting affects future deliveries only because ntfy
+messages already accepted by the server cannot be rewritten.
+
 Model secrets remain in `/etc/argus/providers.env`; configuration stores only
 the variable name. Local model HTTP endpoints are restricted to loopback.
 Remote endpoints require HTTPS. The default `shadow_mode = true` records model

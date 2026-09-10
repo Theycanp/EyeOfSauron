@@ -43,7 +43,10 @@ class AdminAuthHttpTests(unittest.TestCase):
 
             thread = threading.Thread(target=run_server, daemon=True)
             thread.start()
-            server, port = ready.get(timeout=5)
+            # Argon2id initialization intentionally performs a memory-hard hash
+            # before the server is ready. Shared CI runners can take longer
+            # than five seconds without indicating a functional failure.
+            server, port = ready.get(timeout=30)
             base_url = f"http://127.0.0.1:{port}"
             try:
                 bad_login = urllib.request.Request(

@@ -2,6 +2,7 @@ import type {
   AdminJob,
   AdminAuthAuditResponse,
   AdminUserResponse,
+  AlertDetailResponse,
   AuthResponse,
   ConfigResponse,
   DigestDetailResponse,
@@ -162,6 +163,7 @@ export class AdminApi {
   reminders(): Promise<ReminderResponse> { return this.request('/api/reminders') }
   revisions(): Promise<RevisionResponse> { return this.request('/api/revisions') }
   incidents(): Promise<IncidentResponse> { return this.request('/api/incidents') }
+  alert(id: number): Promise<AlertDetailResponse> { return this.request(`/api/alerts/${id}`) }
   newsCatalog(): Promise<NewsCatalogResponse> { return this.request('/api/news-catalog') }
   prompts(): Promise<PromptResponse> { return this.request('/api/prompts') }
   sourceQuality(): Promise<SourceQualityResponse> { return this.request('/api/source-quality') }

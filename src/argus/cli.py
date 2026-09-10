@@ -61,7 +61,11 @@ def _build_service(
             collectors[source.id] = collector
     rules = RuleSet.from_config(config.rules, config.ntfy.default_topic)
     notifier = (
-        DEFAULT_NOTIFIER_REGISTRY.build("ntfy", config=config.ntfy)
+        DEFAULT_NOTIFIER_REGISTRY.build(
+            "ntfy",
+            config=config.ntfy,
+            detail_base_url=config.admin.public_base_url or config.digest.public_base_url,
+        )
         if config.ntfy.enabled else None
     )
     analysis_orchestrator = None

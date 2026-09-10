@@ -115,6 +115,7 @@ export interface Incident extends JsonRecord {
   id: string | number
   status: IncidentStatus
   source_ids?: string[]
+  latest_alert_id?: number | null
   latest_title?: string | null
   latest_message?: string | null
   latest_click_url?: string | null
@@ -122,6 +123,49 @@ export interface Incident extends JsonRecord {
   observation_count?: number
   confidence?: number
   last_seen_at?: number | null
+}
+
+export interface AlertDetailRecord extends JsonRecord {
+  id: number
+  observation_id?: number | null
+  incident_id?: number | null
+  title: string
+  message: string
+  priority: number
+  confidence: number
+  evidence?: string[]
+  tags?: string[]
+  source_url?: string | null
+  status: OutboxStatus
+  created_at: number
+  delivered_at?: number | null
+}
+
+export interface ObservationDetail extends JsonRecord {
+  id: number
+  source_id: string
+  publisher: string
+  published_at: number
+  fetched_at: number
+  title: string
+  summary: string
+  url: string
+  attributes?: JsonRecord
+  importance: number
+  urgency: number
+  relevance: number
+  confidence: number
+  region: string
+  topic: string
+  source_tier: string
+  information_type: string
+  handling: string
+}
+
+export interface AlertDetailResponse {
+  alert: AlertDetailRecord
+  observation?: ObservationDetail | null
+  incident?: Incident | null
 }
 
 export interface ConfigRevision extends JsonRecord {

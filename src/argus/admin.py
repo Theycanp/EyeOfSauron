@@ -521,7 +521,9 @@ _STATIC_CONTENT_TYPES = {
 
 def _static_file(request_path: str) -> Path | None:
     path = urllib.parse.urlsplit(request_path).path
-    is_spa_route = path == "/digests" or path.startswith("/digests/")
+    is_spa_route = any(
+        path == root or path.startswith(f"{root}/") for root in ("/digests", "/events")
+    )
     relative = (
         "index.html" if path in {"/", "/index.html"} or is_spa_route else path.lstrip("/")
     )
@@ -923,6 +925,29 @@ def make_handler(
             if path == "/api/incidents":
                 rows = database.list_incidents()
                 self._json(HTTPStatus.OK, {"incidents": rows, "pagination": {"total": len(rows)}})
+                return
+            if path.startswith("/api/alerts/"):
+                raw_alert_id = path[len("/api/alerts/") :]
+                try:
+                    if not raw_alert_id.isdigit():
+                        raise ValueError("alert ID is invalid")
+                    alert_id = int(raw_alert_id)
+                    if alert_id < 1:
+                        raise ValueError("alert ID is invalid")
+                except ValueError as exc:
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc), "code": "invalid_query"},
+                    )
+                    return
+                detail = database.get_alert_detail(alert_id)
+                if detail is None:
+                    self._json(
+                        HTTPStatus.NOT_FOUND,
+                        {"error": "notification not found", "code": "not_found"},
+                    )
+                else:
+                    self._json(HTTPStatus.OK, detail)
                 return
             if path == "/api/reminders":
                 rows = database.list_reminders()
