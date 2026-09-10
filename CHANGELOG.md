@@ -27,6 +27,10 @@ Semantic Versioning and the Keep a Changelog structure.
 - Keep the strict mypy gate scoped to its declared type-checking islands while
   retaining imported type information, instead of reporting unrelated legacy
   modules reached transitively.
+- Remove a five-second CPU-speed assumption from memory-hard Argon2 HTTP tests,
+  add actionable failure annotations, and use one shared local/Actions check
+  entry point so CI failures are reproducible instead of opaque.
+- Upgrade official Actions to their Node 24-compatible major versions.
 
 ## [0.10.2] - 2026-09-07
 

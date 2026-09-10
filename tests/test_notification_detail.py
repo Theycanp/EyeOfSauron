@@ -190,7 +190,7 @@ class NotificationDetailHTTPTests(unittest.TestCase):
 
         self.thread = threading.Thread(target=run_server, daemon=True)
         self.thread.start()
-        self.server = ready.get(timeout=5)
+        self.server = ready.get(timeout=30)
         self.database = Database(self.root / "state.db")
         self.alert_id = int(self.database.list_alerts()[0]["id"])
 
