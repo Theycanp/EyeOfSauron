@@ -1,4 +1,4 @@
-import { Mail, Rss, TrendingUp, Twitter, Youtube, type LucideIcon } from 'lucide-react'
+import { AtSign, Mail, Rss, TrendingUp, Video, type LucideIcon } from 'lucide-react'
 import type { JsonRecord, ManagedRule, ManagedSource, NewsCatalogEntry, NewsCatalogFeed, SourceKind } from '../../shared/types'
 import { browserZone, escapeRegex, splitWords } from '../../shared/utils'
 
@@ -14,8 +14,8 @@ export interface ProviderDefinition {
 
 export const providerRegistry: Record<SourceKind, ProviderDefinition> = {
   rss: { kind: 'rss', label: 'RSS / Atom', description: '新闻网站、博客和公告', defaultSection: 'News', targetLabel: '官方 RSS / Atom 地址', targetHint: '只接受 HTTPS；付费墙来源只保存标题、摘要和链接。', icon: Rss },
-  youtube: { kind: 'youtube', label: 'YouTube', description: '频道发布新视频时提醒', defaultSection: 'Videos', targetLabel: 'YouTube 频道 ID', targetHint: '使用 UC 开头的稳定频道 ID，不使用显示名或 @handle。', icon: Youtube },
-  x: { kind: 'x', label: 'X 账号', description: '指定账号发布内容时提醒', defaultSection: 'Social', targetLabel: 'X 账号数字 ID', targetHint: '使用平台数字 user ID，避免账号改名后监控错人。', icon: Twitter },
+  youtube: { kind: 'youtube', label: 'YouTube', description: '频道发布新视频时提醒', defaultSection: 'Videos', targetLabel: 'YouTube 频道 ID', targetHint: '使用 UC 开头的稳定频道 ID，不使用显示名或 @handle。', icon: Video },
+  x: { kind: 'x', label: 'X 账号', description: '指定账号发布内容时提醒', defaultSection: 'Social', targetLabel: 'X 账号数字 ID', targetHint: '使用平台数字 user ID，避免账号改名后监控错人。', icon: AtSign },
   market: { kind: 'market', label: '股票', description: '美股价格或成交量异动', defaultSection: 'Markets', targetLabel: '股票代码', targetHint: '当前 Alpaca 适配器适合美股和美股 ETF。', icon: TrendingUp },
   imap: { kind: 'imap', label: '邮箱', description: '符合搜索条件的新邮件', defaultSection: 'Inbox', targetLabel: 'IMAP 主机', targetHint: '凭据通过服务器环境变量提供，不在这里保存密码。', icon: Mail },
 }
