@@ -167,6 +167,22 @@ every important event and may produce false positives. Later improvements can ad
 an optional semantic classifier as a second opinion while retaining deterministic
 rules as the reliable fallback.
 
+## Content documents
+
+Observations own zero or more immutable `content_documents`. The normalized levels
+are `metadata`, `excerpt`, `full_text`, `document`, and `analysis`. RSS/Atom parsing
+stores only what the configured policy permits. Commercial-media templates use
+`feed_metadata_and_original_link_only`; an explicitly authorized Feed can use
+`feed_full_text_allowed`; public first-party sources can use
+`public_document_full_text`.
+
+Public-document enrichment is a separate durable job queue. New observations are
+leased to a bounded HTTPS fetcher with exact-host allowlists, public-DNS checks,
+manual redirect validation, MIME/size/time limits, and sandboxed `pdftotext` resource
+limits. The initial source baseline never schedules historical page fetches. Fetch
+failure retries independently and cannot change collector health. Raw HTML and PDF
+bytes are discarded after plain-text extraction.
+
 ## Configurable sources
 
 `kind = "rss"` is the generic HTTPS RSS/Atom adapter, so publisher-specific

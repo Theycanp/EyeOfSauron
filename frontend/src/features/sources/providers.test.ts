@@ -67,4 +67,18 @@ describe('source provider registry', () => {
     expect(serializeSource(edited).settings?.max_content_age_seconds).toBe(0)
     expect(serializeSource(catalogSourceDraft(entry, { ...feed, max_content_age_seconds: undefined }, [])).settings?.max_content_age_seconds).toBe(0)
   })
+
+  it('serializes and preserves the explicit RSS content policy', () => {
+    const draft = createSourceDraft('rss', 'typed')
+    draft.publisher = 'Official agency'
+    draft.target = 'https://official.example/feed.xml'
+    draft.contentPolicy = 'public_document_full_text'
+    const source = serializeSource(draft)
+    expect(source.settings?.content_policy).toBe('public_document_full_text')
+    expect(editSourceDraft(source, null).contentPolicy).toBe('public_document_full_text')
+
+    const feed: NewsCatalogFeed = { id: 'releases', label: 'Releases', section: 'Policy', url: 'https://official.example/feed.xml', allowed_hosts: ['official.example'] }
+    const entry = { id: 'agency', publisher: 'Agency', content_policy: 'public_document_full_text' } as NewsCatalogEntry
+    expect(catalogSourceDraft(entry, feed, []).contentPolicy).toBe('public_document_full_text')
+  })
 })

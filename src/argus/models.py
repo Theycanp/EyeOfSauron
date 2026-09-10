@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from .content import ContentDocumentDraft, ContentFetchRequest
+
 
 @dataclass(frozen=True, slots=True)
 class Observation:
@@ -26,6 +28,8 @@ class Observation:
     information_type: str = "report"
     handling: str = "digest"
     processing_state: str = "new"
+    content_documents: tuple[ContentDocumentDraft, ...] = ()
+    content_fetch: ContentFetchRequest | None = None
 
 
 @dataclass(frozen=True, slots=True)

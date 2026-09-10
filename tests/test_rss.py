@@ -9,6 +9,7 @@ from email.message import Message
 from unittest.mock import Mock, patch
 
 from argus.config import load_config
+from argus.content import ContentLevel
 from argus.models import SourceState
 from argus.rss import FeedError, RssCollector, parse_feed
 
@@ -26,6 +27,55 @@ class RssTests(unittest.TestCase):
         self.assertEqual(["routine-guid", "breaking-guid"], [item.external_id for item in observations])
         self.assertEqual("Routine market coverage with daily analysis.", observations[0].summary)
         self.assertEqual("Markets", observations[0].attributes["section"])
+        self.assertEqual(ContentLevel.EXCERPT, observations[0].content_documents[0].level)
+        self.assertIsNone(observations[0].content_fetch)
+
+    def test_commercial_feed_never_schedules_article_scraping(self) -> None:
+        payload = b"""<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel>
+        <item><title>Paid article</title><link>https://www.bloomberg.com/news/articles/paid</link>
+        <description>Allowed excerpt</description><content:encoded><![CDATA[<p>Long body</p>]]></content:encoded>
+        </item></channel></rss>"""
+        item = parse_feed(payload, self.source)[0]
+        self.assertEqual([ContentLevel.EXCERPT], [doc.level for doc in item.content_documents])
+        self.assertIsNone(item.content_fetch)
+
+    def test_authorized_feed_full_text_and_public_document_policy(self) -> None:
+        payload = b"""<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel>
+        <item><title>Official release</title><link>https://www.bloomberg.com/news/articles/release</link>
+        <description>Short excerpt</description><content:encoded><![CDATA[<article><p>Full authorized body</p></article>]]></content:encoded>
+        </item></channel></rss>"""
+        authorized = replace(
+            self.source, settings={**self.source.settings, "content_policy": "feed_full_text_allowed"}
+        )
+        item = parse_feed(payload, authorized)[0]
+        self.assertEqual(
+            [ContentLevel.EXCERPT, ContentLevel.FULL_TEXT],
+            [doc.level for doc in item.content_documents],
+        )
+        self.assertIsNone(item.content_fetch)
+
+        public = replace(
+            self.source, settings={**self.source.settings, "content_policy": "public_document_full_text"}
+        )
+        without_full = payload.replace(
+            b"<content:encoded><![CDATA[<article><p>Full authorized body</p></article>]]></content:encoded>",
+            b"",
+        )
+        item = parse_feed(without_full, public)[0]
+        self.assertIsNotNone(item.content_fetch)
+        assert item.content_fetch is not None
+        self.assertIn("www.bloomberg.com", item.content_fetch.allowed_hosts)
+
+    def test_atom_content_obeys_full_text_policy(self) -> None:
+        payload = b"""<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>x</id>
+        <title>Official release</title><link href="https://www.bloomberg.com/news/articles/atom"/>
+        <summary>Short excerpt</summary><content type="html">&lt;p&gt;Full atom body&lt;/p&gt;</content>
+        </entry></feed>"""
+        source = replace(
+            self.source, settings={**self.source.settings, "content_policy": "feed_full_text_allowed"}
+        )
+        item = parse_feed(payload, source)[0]
+        self.assertEqual("Full atom body", item.content_documents[-1].body)
 
     def test_rejects_empty_feed(self) -> None:
         with self.assertRaisesRegex(FeedError, "no usable entries"):

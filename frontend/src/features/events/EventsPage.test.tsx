@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AdminApi } from '../../shared/api'
-import type { AlertDetailResponse, HealthSummary } from '../../shared/types'
+import type { AlertDetailResponse, ContentDocument, HealthSummary } from '../../shared/types'
 import { EventsPage } from './EventsPage'
 
 const health: HealthSummary = {
@@ -60,6 +60,19 @@ const detail: AlertDetailResponse = {
     status: 'recorded',
     source_ids: ['bloomberg_markets'],
   },
+  documents: [{
+    id: 1,
+    observation_id: 42,
+    level: 'excerpt',
+    source_method: 'rss_description',
+    body: 'Saved detailed RSS summary available without reopening Bloomberg.',
+    media_type: 'text/plain',
+    canonical_url: 'https://www.bloomberg.com/news/articles/test',
+    content_hash: 'abc',
+    rights_policy: 'source_terms_apply',
+    fetched_at: 1_788_363_000,
+    created_at: 1_788_363_000,
+  }],
 }
 
 afterEach(() => {
@@ -87,11 +100,38 @@ describe('EventsPage detail reader', () => {
     await waitFor(() => expect(screen.getByText('Prime Minister Resigns')).toBeVisible())
     expect(loadAlert).toHaveBeenCalledWith(17)
     expect(screen.getByText(/Saved detailed RSS summary/)).toBeVisible()
+    expect(screen.getByText('摘要')).toBeVisible()
+    expect(screen.getByText(/取得方式：RSS description/)).toBeVisible()
     expect(screen.getByText('breaking')).toBeVisible()
     expect(screen.getByRole('link', { name: '查看原文' })).toHaveAttribute(
       'href',
       'https://www.bloomberg.com/news/articles/test',
     )
+  })
+
+  it('prefers a fetched public document over the feed excerpt', async () => {
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    const publicDetail: AlertDetailResponse = {
+      ...detail,
+      documents: [
+        {
+          ...(detail.documents![0] as ContentDocument),
+          id: 2,
+          level: 'document',
+          source_method: 'public_pdf',
+          body: 'The complete text extracted from the official public PDF.',
+          rights_policy: 'public_official_document',
+        },
+        detail.documents![0] as ContentDocument,
+      ],
+      content_fetch: { status: 'completed', attempts: 1, updated_at: 1_788_363_001 },
+    }
+    const api = { alert: vi.fn().mockResolvedValue(publicDetail) } as unknown as AdminApi
+    render(<EventsPage api={api} onUnauthorized={vi.fn()} initialAlertId="17" incidents={[]} managedSources={[]} health={health} openCount={0} />)
+    expect(await screen.findByText(/complete text extracted/)).toBeVisible()
+    expect(screen.getByText('文档全文')).toBeVisible()
+    expect(screen.getByText(/公开 PDF 文本提取/)).toBeVisible()
+    expect(screen.queryByText(/Saved detailed RSS summary available/)).not.toBeInTheDocument()
   })
 
   it('creates a manual event through the real event API and opens its detail', async () => {

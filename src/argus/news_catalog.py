@@ -7,6 +7,8 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlsplit
 
+from .content import ContentPolicy
+
 
 _CATALOG_ID = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _VERIFIED_ON = "2026-09-05"
@@ -90,6 +92,10 @@ class NewsSourceEntry:
             raise NewsCatalogError(f"invalid catalog source tier: {self.source_tier}")
         if not 1 <= self.default_importance <= 5:
             raise NewsCatalogError("catalog default importance must be between 1 and 5")
+        try:
+            ContentPolicy(self.content_policy)
+        except ValueError as exc:
+            raise NewsCatalogError("catalog content policy is invalid") from exc
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -357,6 +363,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         ),
         "https://www.federalreserve.gov/feeds/feeds.htm",
         "Official Federal Reserve RSS feeds for public releases.",
+        content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
         region="US", source_tier="primary", default_importance=4, topic="policy",
     ),
     NewsSourceEntry(
@@ -370,6 +377,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         ),
         "https://www.sec.gov/news/pressreleases.rss",
         "Official SEC press-release feed. Respect SEC fair-access guidance and use a conservative polling interval.",
+        content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
         region="US", source_tier="primary", default_importance=4, topic="finance",
     ),
     NewsSourceEntry(
@@ -383,6 +391,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         ),
         "https://www.ecb.europa.eu/rss/press.html",
         "Official ECB press-release RSS feed.",
+        content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
         region="GLOBAL", source_tier="primary", default_importance=4, topic="policy",
     ),
     NewsSourceEntry(
@@ -394,6 +403,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         (_feed("whats_new", "What's New", "Monetary Policy and Markets", "https://www.boj.or.jp/en/rss/whatsnew.xml", "www.boj.or.jp"),),
         "https://www.boj.or.jp/en/rss/",
         "Official Bank of Japan English RSS; article pages and PDFs remain on the BOJ site.",
+        content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
         region="JP", source_tier="primary", default_importance=4, topic="policy",
     ),
     NewsSourceEntry(
@@ -405,6 +415,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         (_feed("high_frequency", "High-frequency alerts", "Disaster and Weather", "https://www.data.jma.go.jp/developer/xml/feed/extra.xml", "www.data.jma.go.jp"),),
         "https://www.data.jma.go.jp/developer/xml/feed/",
         "Official JMAXML Atom feed for high-frequency weather and disaster information.",
+        content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
         region="JP", source_tier="primary", default_importance=5, topic="disaster",
     ),
     NewsSourceEntry(
@@ -416,6 +427,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         (_feed("press_releases", "Press releases", "Policy and Economy", "https://www.ndrc.gov.cn/xwdt/xwfb/rss.xml", "www.ndrc.gov.cn"),),
         "https://www.ndrc.gov.cn/xwdt/xwfb/rss.xml",
         "Official NDRC RSS endpoint; publication cadence varies by announcement schedule.",
+        content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
         region="CN", source_tier="primary", default_importance=4, topic="policy",
     ),
     NewsSourceEntry(
@@ -427,6 +439,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         (_feed("news_english", "News (English)", "Health", "https://www.who.int/rss-feeds/news-english.xml", "www.who.int"),),
         "https://www.who.int/rss-feeds",
         "Official WHO news releases, statements, and media notes.",
+        content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
         region="GLOBAL", source_tier="primary", default_importance=4, topic="health",
     ),
     NewsSourceEntry(
@@ -438,6 +451,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         (_feed("news_releases", "News releases", "Science and Space", "https://www.nasa.gov/news-release/feed/", "www.nasa.gov"),),
         "https://www.nasa.gov/rss-feeds/",
         "Official NASA news-release feed.",
+        content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
         region="US", source_tier="primary", default_importance=3, topic="science",
     ),
     NewsSourceEntry(
@@ -449,6 +463,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         (_feed("significant_month", "Significant earthquakes", "Disaster", "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/significant_month.atom", "earthquake.usgs.gov"),),
         "https://earthquake.usgs.gov/earthquakes/feed/v1.0/atom.php",
         "Official USGS significant-earthquake Atom feed. Consumers still apply age and deduplication policy.",
+        content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
         region="GLOBAL", source_tier="primary", default_importance=5, topic="disaster",
     ),
 ))

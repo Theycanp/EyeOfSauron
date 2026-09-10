@@ -5,6 +5,22 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-10
+
+### Added
+
+- Add policy-aware content documents with Feed excerpts, authorized Feed full text,
+  and bounded public official HTML/PDF extraction.
+- Add a durable content-fetch queue with leases, retry/dead states, SSRF defenses,
+  MIME/size/time limits, and isolated source-health reporting.
+- Show the best available saved content and its provenance in notification details;
+  commercial publishers remain metadata/excerpt-only by default.
+
+### Changed
+
+- Upgrade SQLite schema to 14 and include content tables in verified backups.
+- Add explicit content-policy controls to the RSS source editor with copyright guidance.
+
 ## [0.12.0] - 2026-09-10
 
 ### Added
@@ -167,7 +183,8 @@ Semantic Versioning and the Keep a Changelog structure.
 - Initial Bloomberg RSS monitoring, weighted alert rules, SQLite outbox, ntfy
   delivery, failure/recovery notifications, and baseline suppression.
 
-[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/Theycanp/EyeOfSauron/compare/v0.10.1...v0.10.2

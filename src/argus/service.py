@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from . import __version__
 from .adapters import build_collector
 from .analysis_orchestrator import AnalysisOrchestrator
+from .content import ContentFetchError, PublicDocumentFetcher
 from .digest import DigestScheduler
 from .config import AppConfig, parse_source_config
 from .persistence import RuntimeRepository
@@ -89,6 +90,7 @@ class ArgusService:
         config_revision: int | None = None,
         analysis_orchestrator: AnalysisOrchestrator | None = None,
         digest_scheduler: DigestScheduler | None = None,
+        content_fetcher: PublicDocumentFetcher | None = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -99,6 +101,7 @@ class ArgusService:
         self.config_revision = config_revision
         self.analysis_orchestrator = analysis_orchestrator
         self.digest_scheduler = digest_scheduler
+        self.content_fetcher = content_fetcher
         self.instance_id = uuid.uuid4().hex
         self._source_slots = asyncio.Semaphore(config.service.max_source_concurrency)
         self._jitter = random.SystemRandom()
@@ -252,6 +255,75 @@ class ArgusService:
             LOGGER.info("reminders_queued count=%d", queued)
         return queued
 
+    async def process_content_fetch_once(self) -> bool:
+        if self.content_fetcher is None:
+            return False
+        item = self.database.claim_content_fetch(now_epoch(), lease_seconds=180)
+        if item is None:
+            return False
+        try:
+            document = await asyncio.to_thread(self.content_fetcher.fetch, item)
+        except asyncio.CancelledError:
+            raise
+        except ContentFetchError as exc:
+            failed_at = now_epoch()
+            state = self.database.fail_content_fetch(
+                item,
+                exc,
+                failed_at,
+                failed_at + retry_delay(item.attempts, 3600),
+                retryable=exc.retryable,
+                failure_kind=exc.kind,
+                max_attempts=5,
+            )
+            log = LOGGER.error if state == "dead" else LOGGER.warning
+            log(
+                "content_fetch_failed job_id=%d observation_id=%d attempts=%d state=%s "
+                "kind=%s error=%s",
+                item.id,
+                item.observation_id,
+                item.attempts,
+                state,
+                exc.kind,
+                sanitize_error(exc),
+            )
+            return True
+        except Exception as exc:
+            failed_at = now_epoch()
+            state = self.database.fail_content_fetch(
+                item,
+                exc,
+                failed_at,
+                failed_at + retry_delay(item.attempts, 3600),
+                retryable=True,
+                failure_kind=type(exc).__name__.lower(),
+                max_attempts=5,
+            )
+            LOGGER.warning(
+                "content_fetch_failed job_id=%d observation_id=%d attempts=%d state=%s "
+                "kind=unexpected error=%s",
+                item.id,
+                item.observation_id,
+                item.attempts,
+                state,
+                sanitize_error(exc),
+            )
+            return True
+        if self.database.complete_content_fetch(item, document, now_epoch()):
+            LOGGER.info(
+                "content_fetch_completed job_id=%d observation_id=%d level=%s",
+                item.id,
+                item.observation_id,
+                document.level.value,
+            )
+        else:
+            LOGGER.warning(
+                "content_fetch_lease_lost job_id=%d observation_id=%d",
+                item.id,
+                item.observation_id,
+            )
+        return True
+
     async def _source_loop(
         self, source_id: str, interval: int, initial_delay: float = 0.0
     ) -> None:
@@ -297,6 +369,22 @@ class ArgusService:
             self.process_reminders_once()
             try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=1.0)
+            except TimeoutError:
+                pass
+
+    async def _content_fetch_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                processed = await self.process_content_fetch_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.error("content_fetch_worker_failed error=%s", sanitize_error(exc))
+                processed = False
+            if processed:
+                continue
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=2.0)
             except TimeoutError:
                 pass
 
@@ -483,6 +571,8 @@ class ArgusService:
                         )
                 group.create_task(self._delivery_loop(), name="delivery")
                 group.create_task(self._reminder_loop(), name="reminders")
+                if self.content_fetcher is not None:
+                    group.create_task(self._content_fetch_loop(), name="content-fetch")
                 if self.analysis_orchestrator is not None:
                     group.create_task(self._analysis_loop(), name="analysis")
                 if self.digest_scheduler is not None:
@@ -509,6 +599,8 @@ class ArgusService:
         await asyncio.gather(*(self.poll_source_once(source.id) for source in self.config.sources if source.id in self.collectors))
         if self.analysis_orchestrator is not None:
             await self.analysis_orchestrator.process_once()
+        while await self.process_content_fetch_once():
+            pass
         if self.digest_scheduler is not None:
             await asyncio.to_thread(self.digest_scheduler.process_once, now_epoch())
         self.process_reminders_once()

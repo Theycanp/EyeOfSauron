@@ -83,6 +83,8 @@ class ManualEventPersistenceTests(unittest.TestCase):
         self.assertEqual(["manual"], detail["incident"]["source_ids"])
         observation = detail["observation"]
         self.assertEqual("manual", observation["source_id"])
+        self.assertEqual("manual_entry", detail["documents"][0]["source_method"])
+        self.assertEqual(event.summary, detail["documents"][0]["body"])
         self.assertEqual("analyzed", self.database.list_observations(NOW, NOW + 1)[0]["processing_state"])
         self.assertEqual("immediate", observation["handling"])
         self.assertEqual("operator", observation["attributes"]["actor"])

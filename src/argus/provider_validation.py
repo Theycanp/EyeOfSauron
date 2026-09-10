@@ -13,6 +13,7 @@ from .providers import (
     ProviderRegistry,
     UrlMode,
 )
+from .content import parse_content_policy
 
 
 _ENV_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -282,6 +283,21 @@ def validate_provider_configuration(
     if kind == "rss":
         normalized["max_content_age_seconds"] = _setting_int(
             settings, "max_content_age_seconds", 0, location, 0, 31536000
+        )
+        try:
+            normalized["content_policy"] = parse_content_policy(
+                settings.get("content_policy")
+            ).value
+        except ValueError as exc:
+            raise ProviderConfigError(f"{location}.content_policy is invalid") from exc
+        normalized["content_max_characters"] = _setting_int(
+            settings, "content_max_characters", 100000, location, 1000, 200000
+        )
+        normalized["content_max_response_bytes"] = _setting_int(
+            settings, "content_max_response_bytes", 4194304, location, 1024, 10485760
+        )
+        normalized["content_timeout_seconds"] = _setting_int(
+            settings, "content_timeout_seconds", 20, location, 1, 120
         )
     if enabled:
         _validate_declared_settings(spec, settings, location)
