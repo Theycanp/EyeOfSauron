@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, CheckCircle2, CircleAlert, Clock3, ExternalLink, Gauge, Newspaper, RefreshCw, ShieldCheck } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, CheckCircle2, CircleAlert, Clock3, ExternalLink, Gauge, Newspaper, Plus, RefreshCw, ShieldCheck } from 'lucide-react'
 import type { AdminApi } from '../../shared/api'
 import { ApiError } from '../../shared/api'
-import type { AlertDetailResponse, HealthSummary, Incident, IncidentStatus, ManagedSource } from '../../shared/types'
+import type { AlertDetailResponse, HealthSummary, Incident, IncidentStatus, ManagedSource, ManualEventDraft } from '../../shared/types'
 import { formatDate, incidentMeta, knownSources, pageSlice } from '../../shared/utils'
 import { Pagination } from '../../shared/ui/Pagination'
+import { ManualEventDialog } from './ManualEventDialog'
+import { emptyManualEventDraft } from './manualEventModel'
 
 type EventFilter = 'all' | IncidentStatus
 
@@ -17,14 +19,21 @@ interface EventsPageProps {
   total?: number
   health: HealthSummary
   openCount: number
+  canCreate?: boolean
+  onCreated?: () => void
+  notify?: (message: string, tone?: 'success' | 'error') => void
 }
 
-export function EventsPage({ api, onUnauthorized, initialAlertId, incidents, managedSources, total, health, openCount }: EventsPageProps) {
+export function EventsPage({ api, onUnauthorized, initialAlertId, incidents, managedSources, total, health, openCount, canCreate = false, onCreated, notify }: EventsPageProps) {
   const [filter, setFilter] = useState<EventFilter>('all')
   const [page, setPage] = useState(1)
   const [selected, setSelected] = useState<AlertDetailResponse | null>(null)
   const [detailLoading, setDetailLoading] = useState(Boolean(initialAlertId))
   const [detailError, setDetailError] = useState<string | null>(null)
+  const [eventDraft, setEventDraft] = useState<ManualEventDraft>(emptyManualEventDraft)
+  const [eventBusy, setEventBusy] = useState(false)
+  const [eventError, setEventError] = useState<string | null>(null)
+  const eventDialog = useRef<HTMLDialogElement>(null)
   const pageSize = 15
   const filtered = useMemo(() => incidents.filter((incident) => filter === 'all' || incident.status === filter), [filter, incidents])
   const visible = pageSlice(filtered, page, pageSize)
@@ -72,10 +81,40 @@ export function EventsPage({ api, onUnauthorized, initialAlertId, incidents, man
     window.scrollTo({ top: 0, behavior: 'auto' })
   }
 
+  const openEventDialog = () => {
+    setEventDraft({ ...emptyManualEventDraft })
+    setEventError(null)
+    eventDialog.current?.showModal()
+  }
+
+  const closeEventDialog = () => {
+    eventDialog.current?.close()
+    setEventError(null)
+  }
+
+  const createEvent = async () => {
+    setEventBusy(true)
+    setEventError(null)
+    try {
+      const detail = await api.createEvent(eventDraft)
+      closeEventDialog()
+      setSelected(detail)
+      window.history.pushState(null, '', `/events/${detail.alert.id}`)
+      window.scrollTo({ top: 0, behavior: 'auto' })
+      onCreated?.()
+      notify?.('事件已创建，正在通过 ntfy 发送')
+    } catch (failure) {
+      if (failure instanceof ApiError && failure.status === 401) onUnauthorized()
+      else setEventError(failure instanceof Error ? failure.message : '无法创建事件')
+    } finally {
+      setEventBusy(false)
+    }
+  }
+
   if (selected) return <EventReader detail={selected} onBack={closeDetail} sourceName={sourceName} />
 
   return <>
-    <div className="page-actions"><div><h2>事件</h2><p>清楚区分一次性重要动态与能够自动恢复的异常。</p></div></div>
+    <div className="page-actions"><div><h2>事件</h2><p>清楚区分一次性重要动态与能够自动恢复的异常。</p></div>{canCreate && <button className="button primary" onClick={openEventDialog}><Plus size={18} />添加事件</button>}</div>
     {detailError && <div className="inline-error"><CircleAlert size={17} />{detailError}</div>}
     {detailLoading && <div className="loading-state"><RefreshCw className="spin" size={24} />正在读取消息详情…</div>}
     <section className={`event-summary ${health.level === 'healthy' ? 'positive' : health.level === 'unknown' ? 'neutral' : 'warning'}`}>
@@ -88,11 +127,13 @@ export function EventsPage({ api, onUnauthorized, initialAlertId, incidents, man
       return <article key={incident.id} className="event-row"><div className={`event-icon ${meta.tone}`}><Newspaper size={20} /></div><div className="event-copy"><div className="row-title"><h3>{incident.latest_alert_id ? <button className="event-title-button" onClick={() => { void openDetail(Number(incident.latest_alert_id)) }}>{title(incident)}</button> : title(incident)}</h3><span className={`status-pill ${meta.tone}`}>{meta.label}</span></div><p>{incident.latest_message || (incident.evidence || []).slice(0, 2).join(' · ') || `累计 ${incident.observation_count || 0} 条相关记录`}</p><div className="meta-line"><Clock3 size={15} />{formatDate(incident.last_seen_at)}<span>·</span>置信度 {Math.round(Number(incident.confidence || 0) * 100)}%</div></div></article>
     })}</section> : <section className="empty-state"><div className="empty-icon positive"><CheckCircle2 size={29} /></div><h3>这个范围内没有事件</h3><p>EyeOfSauron 会记录重要动态；只有可恢复异常才会出现“进行中”和“已恢复”。</p></section>}
     <Pagination page={page} pageSize={pageSize} loaded={filtered.length} total={filter === 'all' ? total : undefined} onPage={setPage} noun="条事件" />
+    <ManualEventDialog ref={eventDialog} draft={eventDraft} setDraft={setEventDraft} busy={eventBusy} error={eventError} dirty={JSON.stringify(eventDraft) !== JSON.stringify(emptyManualEventDraft)} onClose={closeEventDialog} onSubmit={() => { void createEvent() }} />
   </>
 }
 
 function EventReader({ detail, onBack, sourceName }: { detail: AlertDetailResponse; onBack: () => void; sourceName: (id: string) => string }) {
   const { alert, observation, incident } = detail
+  const isManual = observation?.source_id === 'manual'
   const displayTitle = observation?.title || alert.title
   const sourceLabel = observation ? sourceName(observation.source_id) : (incident?.source_ids || []).map(sourceName).join('、') || 'EyeOfSauron'
   const rawSection = observation?.attributes?.section
@@ -104,10 +145,10 @@ function EventReader({ detail, onBack, sourceName }: { detail: AlertDetailRespon
     </header>
     <section className="event-detail-grid">
       <div className="event-detail-main">
-        <section className="panel event-detail-section"><div className="panel-header"><div><h2>已采集内容</h2><p>这是 EyeOfSauron 从来源 Feed 保存的内容，不依赖再次打开原站。</p></div></div><div className="event-detail-copy"><p>{observation?.summary || alert.message || '该来源没有提供摘要。'}</p></div></section>
+        <section className="panel event-detail-section"><div className="panel-header"><div><h2>{isManual ? '事件内容' : '已采集内容'}</h2><p>{isManual ? '这是后台提交并由 EyeOfSauron 保存的原始内容。' : '这是 EyeOfSauron 从来源 Feed 保存的内容，不依赖再次打开原站。'}</p></div></div><div className="event-detail-copy"><p>{observation?.summary || alert.message || '该来源没有提供摘要。'}</p></div></section>
         {alert.message && alert.message !== observation?.summary && <section className="panel event-detail-section"><div className="panel-header"><div><h2>通知说明</h2><p>发送到 ntfy 的消息正文。</p></div></div><div className="event-detail-copy preserve-lines"><p>{alert.message}</p></div></section>}
       </div>
-      <aside className="panel event-facts"><div className="panel-header"><div><h2>判断依据</h2><p>通知触发时保存的可审计事实。</p></div></div><dl><div><dt>来源</dt><dd>{sourceLabel}</dd></div><div><dt>主题</dt><dd>{observation?.topic || 'general'}</dd></div><div><dt>地区</dt><dd>{observation?.region || 'GLOBAL'}</dd></div><div><dt>通知状态</dt><dd>{alert.status}</dd></div><div><dt>抓取时间</dt><dd>{formatDate(observation?.fetched_at || alert.created_at)}</dd></div></dl>{(alert.evidence || []).length > 0 && <div className="event-evidence">{(alert.evidence || []).map((item) => <span key={item}>{item}</span>)}</div>}{alert.source_url && <a className="button subtle wide" href={alert.source_url} target="_blank" rel="noreferrer"><ExternalLink size={16} />查看原文</a>}</aside>
+      <aside className="panel event-facts"><div className="panel-header"><div><h2>判断依据</h2><p>通知触发时保存的可审计事实。</p></div></div><dl><div><dt>来源</dt><dd>{sourceLabel}</dd></div><div><dt>主题</dt><dd>{observation?.topic || 'general'}</dd></div><div><dt>地区</dt><dd>{observation?.region || 'GLOBAL'}</dd></div><div><dt>通知状态</dt><dd>{alert.status}</dd></div><div><dt>{isManual ? '记录时间' : '抓取时间'}</dt><dd>{formatDate(observation?.fetched_at || alert.created_at)}</dd></div></dl>{(alert.evidence || []).length > 0 && <div className="event-evidence">{(alert.evidence || []).map((item) => <span key={item}>{item}</span>)}</div>}{alert.source_url && <a className="button subtle wide" href={alert.source_url} target="_blank" rel="noreferrer"><ExternalLink size={16} />查看原文</a>}</aside>
     </section>
   </article>
 }

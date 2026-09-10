@@ -3,6 +3,7 @@ import type { AdminStatus, ConfigResponse, HealthSummary, Incident, Reminder, To
 export const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
 
 export const knownSources: Record<string, string> = {
+  manual: '人工录入',
   bloomberg_markets: 'Bloomberg Markets',
   bloomberg_politics: 'Bloomberg Politics',
   bloomberg_technology: 'Bloomberg Technology',

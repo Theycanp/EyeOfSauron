@@ -23,6 +23,8 @@ event, rule, state, and delivery contracts.
 - Observations, durable incidents, and notifications are committed in one SQLite transaction.
 - Notifications use an at-least-once outbox with leases and exponential retry.
 - Manual one-time and daily reminders are durable, timezone-aware, and use the same outbox.
+- Administrator-created events atomically enter the event history, daily digest,
+  and normal notification outbox.
 - RSS requests use TLS validation, ETag/Last-Modified, bounded fast retries,
   timeouts, and a size cap.
 - Source failures alert only after a threshold; recovery is also reported.
@@ -56,6 +58,9 @@ bounded asynchronous source connection tests, enable/disable, rollback, incident
 Prometheus-compatible metrics. It also creates, edits, disables, and deletes
 one-time, countdown, and daily reminders without a service restart. Countdown
 input is persisted as an absolute time; daily reminders keep an IANA timezone.
+Operators and administrators can create a one-off event from the event page;
+viewers remain read-only. The saved creator identity and classification are
+auditable, and delivery uses the configured notifier rather than a UI-only test path.
 It can add custom stock symbols and thresholds, official RSS/Atom
 feeds (including WSJ, The Economist, blogs and YouTube channel feeds), X
 numeric user IDs, and IMAP searches. Sources without credentials remain

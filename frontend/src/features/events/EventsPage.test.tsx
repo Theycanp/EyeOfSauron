@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AdminApi } from '../../shared/api'
 import type { AlertDetailResponse, HealthSummary } from '../../shared/types'
@@ -91,5 +92,77 @@ describe('EventsPage detail reader', () => {
       'href',
       'https://www.bloomberg.com/news/articles/test',
     )
+  })
+
+  it('creates a manual event through the real event API and opens its detail', async () => {
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    const created = {
+      ...detail,
+      alert: { ...detail.alert, id: 23, title: 'EyeOfSauron 人工事件：政策更新' },
+      observation: {
+        ...detail.observation!,
+        source_id: 'manual',
+        publisher: '人工录入',
+        title: '政策更新',
+        summary: '人工录入的完整内容。',
+        region: 'JP',
+        topic: 'politics',
+      },
+    }
+    const createEvent = vi.fn().mockResolvedValue(created)
+    const onCreated = vi.fn()
+    const notify = vi.fn()
+    const api = { createEvent } as unknown as AdminApi
+    const user = userEvent.setup()
+    render(
+      <EventsPage
+        api={api}
+        onUnauthorized={vi.fn()}
+        incidents={[]}
+        managedSources={[]}
+        health={health}
+        openCount={0}
+        canCreate
+        onCreated={onCreated}
+        notify={notify}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: '添加事件' }))
+    await user.type(screen.getByLabelText('标题'), '政策更新')
+    await user.type(screen.getByLabelText('详细内容'), '人工录入的完整内容。')
+    await user.selectOptions(screen.getByLabelText('重要程度'), '4')
+    await user.selectOptions(screen.getByLabelText('地区'), 'JP')
+    await user.selectOptions(screen.getByLabelText('主题'), 'politics')
+    await user.type(screen.getByLabelText('来源链接（可选）'), 'https://example.com/report')
+    await user.click(screen.getByRole('button', { name: '创建并发送' }))
+
+    await waitFor(() => expect(screen.getByText('政策更新')).toBeVisible())
+    expect(createEvent).toHaveBeenCalledWith({
+      title: '政策更新',
+      summary: '人工录入的完整内容。',
+      importance: 4,
+      region: 'JP',
+      topic: 'politics',
+      source_url: 'https://example.com/report',
+    })
+    expect(onCreated).toHaveBeenCalledOnce()
+    expect(notify).toHaveBeenCalledWith('事件已创建，正在通过 ntfy 发送')
+    expect(window.location.pathname).toBe('/events/23')
+  })
+
+  it('does not expose the create action to a read-only viewer', () => {
+    const api = {} as AdminApi
+    render(
+      <EventsPage
+        api={api}
+        onUnauthorized={vi.fn()}
+        incidents={[]}
+        managedSources={[]}
+        health={health}
+        openCount={0}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: '添加事件' })).not.toBeInTheDocument()
   })
 })

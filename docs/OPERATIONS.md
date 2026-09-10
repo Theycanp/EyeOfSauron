@@ -63,7 +63,7 @@ session has a fixed 14-day lifetime. The session cookie uses the browser-enforce
 `__Host-` prefix and is Secure, HttpOnly, and SameSite Strict; changing a role,
 disabling a user, resetting a password, or
 using “force logout” revokes applicable sessions immediately. `admin` can manage
-users and every setting, `operator` can manage sources, reminders, source
+users and every setting, `operator` can manage sources, reminders, events, source
 quality, and queue operations, and `viewer` is read-only. The final enabled
 administrator cannot be disabled or demoted.
 
@@ -87,6 +87,15 @@ The same API also provides `POST /api/validate`, `POST /api/test-source`,
 `POST /api/sources/<id>/enable|disable`, `GET /api/incidents`, and `/metrics`.
 Every accepted change receives a revision and audit record; rollback creates a
 new revision rather than mutating history.
+
+`POST /api/events` accepts an authenticated manual event with a title, detailed
+summary, importance from 1 to 5, region, topic, and an optional credential-free
+HTTPS source URL. It requires `events:write` plus the normal same-origin and
+CSRF checks. The repository atomically stores the observation, recorded event,
+and pending outbox alert; a successful `201` response returns the same detail
+document used by `/events/<alert-id>`. These events are immediately eligible
+for ntfy delivery and remain available to the daily digest. Do not use this API
+for recurring reminders or recoverable health incidents.
 
 Analysis policy uses `POST /api/analysis`; Prompt versions use
 `GET/POST /api/prompts`. Daily publication policy uses

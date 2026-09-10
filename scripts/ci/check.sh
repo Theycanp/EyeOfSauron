@@ -67,13 +67,13 @@ run_frontend() {
   after_bundle="$(mktemp)"
   bundle_manifest > "$before_bundle"
   if ! (
-    cd frontend
-    node --version
-    npm --version
-    npm run lint
-    npm run typecheck
-    npm run test
-    npm run test:e2e
+    cd frontend &&
+    node --version &&
+    npm --version &&
+    npm run lint &&
+    npm run typecheck &&
+    npm run test &&
+    npm run test:e2e &&
     npm run build
   ); then
     rm -f "$before_bundle" "$after_bundle"

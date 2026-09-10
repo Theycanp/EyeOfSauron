@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 
 from .analysis import AnalysisAttempt, InformationAnalysis, analyze_observation
 from .digest import DigestCluster, DigestDocument, SourceCoverage
+from .manual_events import ManualEventSpec
 from .models import (
     AnalysisWorkItem,
     AlertCandidate,
@@ -2227,6 +2228,85 @@ class Database:
                         incident[field[:-5]] = []
 
         return {"alert": alert, "observation": observation, "incident": incident}
+
+    def create_manual_event(
+        self,
+        event: ManualEventSpec,
+        actor: str,
+        now: int,
+        topic: str,
+    ) -> dict[str, Any]:
+        """Persist an administrator event and its notification as one unit."""
+        actor_name = actor.strip()[:128] or "unknown"
+        notification_topic = topic.strip()
+        if not notification_topic:
+            raise ValueError("notification topic is required")
+        identity = uuid.uuid4().hex
+        dedupe_key = f"manual:{identity}"
+        with self.unit_of_work():
+            cursor = self.connection.execute(
+                """
+                INSERT INTO observations(
+                    source_id, publisher, dedupe_scope, external_id,
+                    published_at, fetched_at, title, summary, url, attributes_json,
+                    importance, urgency, relevance, confidence, region, topic,
+                    source_tier, information_type, handling, processing_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "manual",
+                    "人工录入",
+                    "manual",
+                    identity,
+                    now,
+                    now,
+                    event.title,
+                    event.summary,
+                    event.source_url,
+                    json.dumps(
+                        {"manual": True, "actor": actor_name, "submitted_via": "admin"},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    event.importance,
+                    event.importance,
+                    5,
+                    1.0,
+                    event.region,
+                    event.topic,
+                    "primary",
+                    "manual",
+                    "immediate",
+                    "analyzed",
+                ),
+            )
+            observation_id = int(cursor.lastrowid)
+            candidate = AlertCandidate(
+                rule_id="manual.admin",
+                dedupe_key=dedupe_key,
+                title=f"EyeOfSauron 人工事件：{event.title}",
+                message=event.summary,
+                priority=event.importance,
+                confidence=1.0,
+                evidence=("后台人工录入", f"提交者：{actor_name}"),
+                tags=("memo",),
+                click_url=event.source_url,
+                topic=notification_topic,
+                incident_key=f"manual:event:{identity}",
+                incident_kind="event",
+            )
+            if not self._insert_alert(candidate, observation_id, now):
+                raise RuntimeError("manual event notification could not be queued")
+            alert_row = self.connection.execute(
+                "SELECT id FROM alerts WHERE dedupe_key = ?", (dedupe_key,)
+            ).fetchone()
+            if alert_row is None:
+                raise RuntimeError("manual event notification was not persisted")
+            alert_id = int(alert_row["id"])
+        detail = self.get_alert_detail(alert_id)
+        if detail is None:
+            raise RuntimeError("manual event detail could not be loaded")
+        return detail
 
     def record_config_revision(
         self,

@@ -11,7 +11,7 @@ async function mockAdminApi(page: Page) {
       display_name: 'Owner',
       role: 'admin',
       permissions: [
-        'read', 'sources:write', 'reminders:write', 'quality:write',
+        'read', 'sources:write', 'reminders:write', 'events:write', 'quality:write',
         'operations:write', 'settings:write', 'users:manage',
       ],
     }
@@ -68,6 +68,50 @@ async function mockAdminApi(page: Page) {
             handling: 'immediate',
           },
           incident: { id: 7, status: 'recorded', source_ids: ['bloomberg_markets'] },
+        },
+      })
+      return
+    }
+    if (path === '/api/events' && route.request().method() === 'POST') {
+      const submitted = route.request().postDataJSON() as Record<string, unknown>
+      await route.fulfill({
+        status: 201,
+        json: {
+          alert: {
+            id: 23,
+            observation_id: 43,
+            incident_id: 8,
+            title: `EyeOfSauron 人工事件：${String(submitted.title)}`,
+            message: submitted.summary,
+            priority: submitted.importance,
+            confidence: 1,
+            evidence: ['后台人工录入', '提交者：owner'],
+            tags: ['memo'],
+            source_url: submitted.source_url,
+            status: 'pending',
+            created_at: now,
+          },
+          observation: {
+            id: 43,
+            source_id: 'manual',
+            publisher: '人工录入',
+            published_at: now,
+            fetched_at: now,
+            title: submitted.title,
+            summary: submitted.summary,
+            url: submitted.source_url,
+            attributes: { manual: true, actor: 'owner', submitted_via: 'admin' },
+            importance: submitted.importance,
+            urgency: submitted.importance,
+            relevance: 5,
+            confidence: 1,
+            region: submitted.region,
+            topic: submitted.topic,
+            source_tier: 'primary',
+            information_type: 'manual',
+            handling: 'immediate',
+          },
+          incident: { id: 8, status: 'recorded', source_ids: ['manual'] },
         },
       })
       return
@@ -142,6 +186,33 @@ test('notification deep link survives login and opens the saved article detail',
     await page.locator('body').evaluate((node) => node.clientWidth),
   )
   await page.screenshot({ path: testInfo.outputPath('notification-detail.png'), fullPage: true })
+})
+
+test('manual event form creates a durable event and opens its saved detail', async ({ page }, testInfo) => {
+  await mockAdminApi(page)
+  await login(page)
+  const menu = page.getByRole('button', { name: '打开导航' })
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('button', { name: '事件', exact: true }).click()
+  await page.getByRole('button', { name: '添加事件' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('标题').fill('东京政策更新')
+  await dialog.getByLabel('详细内容').fill('这是一次端到端人工事件测试。')
+  await dialog.getByLabel('重要程度').selectOption('4')
+  await dialog.getByLabel('地区').selectOption('JP')
+  await dialog.getByLabel('主题').selectOption('politics')
+  await dialog.getByLabel('来源链接（可选）').fill('https://example.com/report')
+  await dialog.getByRole('button', { name: '创建并发送' }).click()
+
+  await expect(page).toHaveURL(/\/events\/23$/)
+  await expect(page.getByRole('heading', { name: '东京政策更新' })).toBeVisible()
+  await expect(page.getByText('这是一次端到端人工事件测试。')).toBeVisible()
+  await expect(page.getByText('人工录入', { exact: true }).first()).toBeVisible()
+  await expect(page.locator('body')).toHaveJSProperty(
+    'scrollWidth',
+    await page.locator('body').evaluate((node) => node.clientWidth),
+  )
+  await page.screenshot({ path: testInfo.outputPath('manual-event-detail.png'), fullPage: true })
 })
 
 test('typed source entry never repeats the provider picker', async ({ page }) => {
