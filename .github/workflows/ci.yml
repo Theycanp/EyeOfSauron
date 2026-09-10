@@ -49,6 +49,7 @@ jobs:
           release_archive="$RUNNER_TEMP/eyeofsauron-${GITHUB_SHA}.tar.gz"
           scripts/release/package-release.sh "$release_archive" "$RELEASE_ID"
           sudo env \
+            ARGUS_PYTHON="$(command -v python)" \
             EOS_INSTALL_ROOT="$RUNNER_TEMP/eos-install" \
             ARGUS_CONFIG="$GITHUB_WORKSPACE/config/argus.example.toml" \
             scripts/release/install-release.sh \

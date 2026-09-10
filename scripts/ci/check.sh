@@ -12,20 +12,23 @@ annotate_failure() {
   local title="$1"
   local log_file="$2"
   local summary
-  summary="$(tail -n 100 "$log_file")"
+  summary="$(sed -n '/^======================================================================$/,$p' "$log_file")"
+  if [[ -z "$summary" ]]; then
+    summary="$(tail -n 40 "$log_file")"
+  fi
+  if [[ ${#summary} -gt 3500 ]]; then
+    summary="${summary: -3500}"
+  fi
   summary="${summary//'%'/'%25'}"
   summary="${summary//$'\r'/'%0D'}"
   summary="${summary//$'\n'/'%0A'}"
-  if [[ ${#summary} -gt 6000 ]]; then
-    summary="${summary: -6000}"
-  fi
   if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
     echo "::error title=${title}::${summary}"
     {
       echo "### ${title}"
       echo
       echo '```text'
-      tail -n 100 "$log_file"
+      sed -n '/^======================================================================$/,$p' "$log_file"
       echo '```'
     } >> "$GITHUB_STEP_SUMMARY"
   fi
