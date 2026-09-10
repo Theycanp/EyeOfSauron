@@ -5,6 +5,29 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-10
+
+### Added
+
+- Add authenticated, responsive notification detail pages that preserve the
+  exact observation, incident context, triage fields, and triggering evidence.
+- Add desktop and mobile integration coverage for notification deep links that
+  survive the login flow.
+
+### Changed
+
+- Route event-backed ntfy notification clicks to the saved EyeOfSauron detail
+  instead of the publisher website, while retaining the original article as a
+  secondary `查看原文` action.
+- Give the administration origin its own validated `admin.public_base_url`;
+  reminder and digest links retain their existing destinations.
+
+### Fixed
+
+- Keep the strict mypy gate scoped to its declared type-checking islands while
+  retaining imported type information, instead of reporting unrelated legacy
+  modules reached transitively.
+
 ## [0.10.2] - 2026-09-07
 
 ### Changed
@@ -123,7 +146,10 @@ Semantic Versioning and the Keep a Changelog structure.
 - Initial Bloomberg RSS monitoring, weighted alert rules, SQLite outbox, ntfy
   delivery, failure/recovery notifications, and baseline suppression.
 
-[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.10.2...v0.11.0
+[0.10.2]: https://github.com/Theycanp/EyeOfSauron/compare/v0.10.1...v0.10.2
+[0.10.1]: https://github.com/Theycanp/EyeOfSauron/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/Theycanp/EyeOfSauron/compare/v0.8.0...v0.9.1
 [0.8.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.7.0...v0.8.0

@@ -74,6 +74,13 @@ uses the configured IANA timezone and wall-clock time, catches up one missed
 publication after downtime, publishes one immutable version per local day, and
 sends its HTTPS reader URL through the notifier port.
 
+Event-backed ntfy notifications open an authenticated EyeOfSauron detail page
+instead of sending the browser directly to the publisher. The page displays the
+summary and analysis context already saved at collection time, so it remains
+useful when Bloomberg or another publisher is slow or unavailable. The original
+article remains available as a secondary action. This routing applies only to
+newly delivered notifications; previously delivered ntfy messages are immutable.
+
 ## Naming
 
 - **EyeOfSauron** is the product and whole system; **EOS** is its short name.

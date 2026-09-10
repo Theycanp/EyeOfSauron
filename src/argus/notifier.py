@@ -82,7 +82,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class NtfyNotifier:
-    def __init__(self, base_url: str, token: str, timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        timeout_seconds: int,
+        detail_base_url: str = "",
+    ) -> None:
         parsed = urlsplit(base_url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             raise NotifyError("ntfy base URL must be HTTPS without embedded credentials")
@@ -93,6 +99,21 @@ class NtfyNotifier:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout_seconds = timeout_seconds
+        self.detail_base_url = detail_base_url.rstrip("/")
+        if self.detail_base_url:
+            detail = urlsplit(self.detail_base_url)
+            if (
+                detail.scheme != "https"
+                or not detail.hostname
+                or detail.username
+                or detail.password
+                or detail.query
+                or detail.fragment
+            ):
+                raise NotifyError(
+                    "notification detail base URL must be credential-free HTTPS",
+                    failure_kind="invalid_config",
+                )
         self._opener = urllib.request.build_opener(_NoRedirect())
 
     @classmethod
@@ -100,6 +121,7 @@ class NtfyNotifier:
         cls,
         config: NtfyConfig,
         environment: Mapping[str, str] | None = None,
+        detail_base_url: str = "",
     ) -> "NtfyNotifier":
         env = os.environ if environment is None else environment
         base_url = env.get(config.base_url_env, "")
@@ -108,7 +130,7 @@ class NtfyNotifier:
             raise NotifyError(f"required environment variable {config.base_url_env} is missing")
         if not token:
             raise NotifyError(f"required environment variable {config.token_env} is missing")
-        return cls(base_url, token, config.timeout_seconds)
+        return cls(base_url, token, config.timeout_seconds, detail_base_url)
 
     def publish(self, alert: OutboxMessage) -> None:
         if not _TOPIC_RE.fullmatch(alert.topic):
@@ -122,8 +144,24 @@ class NtfyNotifier:
             "priority": alert.priority,
             "tags": list(alert.tags),
         }
-        if alert.click_url:
-            payload["click"] = alert.click_url
+        detail_url = (
+            f"{self.detail_base_url}/events/{alert.id}"
+            if self.detail_base_url
+            and (alert.observation_id is not None or alert.incident_id is not None)
+            else ""
+        )
+        target_url = detail_url or alert.click_url
+        if target_url:
+            payload["click"] = target_url
+        if detail_url and alert.click_url and alert.click_url != detail_url:
+            payload["actions"] = [
+                {
+                    "action": "view",
+                    "label": "查看原文",
+                    "url": alert.click_url,
+                    "clear": False,
+                }
+            ]
         request = urllib.request.Request(
             self.base_url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),

@@ -15,6 +15,7 @@ enabled = true
 bind = "127.0.0.1"
 port = 18080
 auth_token_env = "ARGUS_ADMIN_TOKEN"
+public_base_url = "https://eos.example.com"
 
 [ntfy]
 enabled = false

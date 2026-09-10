@@ -29,6 +29,49 @@ async function mockAdminApi(page: Page) {
       await route.fulfill({ json: { logged_out: true } })
       return
     }
+    if (path === '/api/alerts/17') {
+      await route.fulfill({
+        json: {
+          alert: {
+            id: 17,
+            observation_id: 42,
+            incident_id: 7,
+            title: 'Bloomberg breaking',
+            message: '来源：Bloomberg Markets\n\n判断依据：breaking',
+            priority: 5,
+            confidence: 0.92,
+            evidence: ['breaking', 'high-impact'],
+            tags: ['warning'],
+            source_url: 'https://www.bloomberg.com/news/articles/test',
+            status: 'delivered',
+            created_at: now,
+            delivered_at: now,
+          },
+          observation: {
+            id: 42,
+            source_id: 'bloomberg_markets',
+            publisher: 'Bloomberg',
+            published_at: now - 60,
+            fetched_at: now,
+            title: 'Prime Minister Resigns',
+            summary: 'Saved Bloomberg RSS summary that remains readable without opening the publisher website.',
+            url: 'https://www.bloomberg.com/news/articles/test',
+            attributes: { section: 'Markets' },
+            importance: 5,
+            urgency: 5,
+            relevance: 4,
+            confidence: 0.92,
+            region: 'GLOBAL',
+            topic: 'politics',
+            source_tier: 'secondary',
+            information_type: 'report',
+            handling: 'immediate',
+          },
+          incident: { id: 7, status: 'recorded', source_ids: ['bloomberg_markets'] },
+        },
+      })
+      return
+    }
     const bodies: Record<string, unknown> = {
       '/api/config': {
         managed: { sources: [], rules: [], analysis: { enabled: false, shadow_mode: true }, digest: { enabled: false } },
@@ -77,6 +120,28 @@ test('login screen exposes the EyeOfSauron identity and accessible account field
   await expect(page.getByRole('heading', { name: '欢迎回到 EyeOfSauron' })).toBeVisible()
   await expect(page.getByLabel('用户名')).toBeVisible()
   await expect(page.getByLabel('密码')).toBeVisible()
+})
+
+test('notification deep link survives login and opens the saved article detail', async ({ page }, testInfo) => {
+  await mockAdminApi(page)
+  await page.goto('/events/17')
+  await expect(page.getByRole('heading', { name: '欢迎回到 EyeOfSauron' })).toBeVisible()
+  await page.getByLabel('用户名').fill('owner')
+  await page.getByLabel('密码').fill('correct-horse-battery')
+  await page.getByRole('button', { name: '进入后台' }).click()
+
+  await expect(page.getByRole('heading', { name: 'Prime Minister Resigns' })).toBeVisible()
+  await expect(page.getByText(/Saved Bloomberg RSS summary/)).toBeVisible()
+  await expect(page.getByText('breaking', { exact: true })).toBeVisible()
+  await expect(page.getByRole('link', { name: '查看原文' })).toHaveAttribute(
+    'href',
+    'https://www.bloomberg.com/news/articles/test',
+  )
+  await expect(page.locator('body')).toHaveJSProperty(
+    'scrollWidth',
+    await page.locator('body').evaluate((node) => node.clientWidth),
+  )
+  await page.screenshot({ path: testInfo.outputPath('notification-detail.png'), fullPage: true })
 })
 
 test('typed source entry never repeats the provider picker', async ({ page }) => {

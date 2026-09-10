@@ -41,6 +41,7 @@ export default function AdminApp() {
   const [loginError, setLoginError] = useState('')
   const [loginBusy, setLoginBusy] = useState(false)
   const [page, setPage] = useState<PageId>(() => {
+    if (window.location.pathname.startsWith('/events')) return 'events'
     if (window.location.pathname.startsWith('/digests')) return 'digests'
     const value = window.location.hash.replace('#/', '')
     return pages.some((item) => item.id === value) ? value as PageId : 'overview'
@@ -488,7 +489,7 @@ export default function AdminApp() {
         {page === 'overview' && <OverviewPage health={health} pending={pending} observations={Number(status.observations || 0)} sourceStates={sourceStates} managedSources={managedSources} incidents={incidents} reminders={reminders} go={(value) => go(value as PageId)} onCreateReminder={() => openReminder()} />}
         {page === 'reminders' && <RemindersPage reminders={reminders} total={resources.reminders.data?.pagination?.total} busy={busy || !can('reminders:write')} onOpen={openReminder} onToggle={(item) => { void toggleReminder(item) }} onDelete={deleteReminder} />}
         {page === 'sources' && <SourcesPage sources={managedSources} sourceStates={sourceStates} busy={busy || !can('sources:write')} query={sourceQuery} onQuery={setSourceQuery} onCreate={openSource} catalog={newsCatalog} catalogError={resources.newsCatalog.error} onCatalogFeed={prepareCatalogFeed} onEdit={editSource} onToggle={(source) => { void toggleSource(source) }} onDelete={deleteSource} />}
-        {page === 'events' && <EventsPage incidents={incidents} managedSources={managedSources} total={resources.incidents.data?.pagination?.total} health={health} openCount={openIncidents} />}
+        {page === 'events' && <EventsPage api={api} onUnauthorized={logout} initialAlertId={/^\/events\/([1-9]\d*)$/.exec(window.location.pathname)?.[1]} incidents={incidents} managedSources={managedSources} total={resources.incidents.data?.pagination?.total} health={health} openCount={openIncidents} />}
         {page === 'digests' && <DigestsPage api={api} onUnauthorized={logout} initialKey={window.location.pathname.startsWith('/digests/') ? decodeURIComponent(window.location.pathname.slice('/digests/'.length)) : undefined} />}
         {page === 'source-quality' && <SourceQualityPage profiles={sourceQuality} busy={busy || !can('quality:write')} onFeedback={submitQualityFeedback} onOverride={setQualityOverride} onClearOverride={clearQualityOverride} />}
         {page === 'users' && identity?.permissions.includes('users:manage') && <UsersPage api={api} currentUserId={identity.id} notify={notify} onUnauthorized={clearSession} />}

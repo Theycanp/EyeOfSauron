@@ -1977,6 +1977,10 @@ class Database:
             tags=tags,
             click_url=str(row["click_url"]),
             attempts=attempts,
+            observation_id=(
+                int(row["observation_id"]) if row["observation_id"] is not None else None
+            ),
+            incident_id=int(row["incident_id"]) if row["incident_id"] is not None else None,
             confidence=float(row["confidence"]),
             evidence=evidence,
             created_at=int(row["created_at"]),
@@ -2134,6 +2138,8 @@ class Database:
         limit = max(1, min(int(limit), 500))
         query = """
             SELECT i.*,
+                (SELECT a.id FROM alerts AS a WHERE a.incident_id = i.id
+                 ORDER BY a.created_at DESC, a.id DESC LIMIT 1) AS latest_alert_id,
                 (SELECT a.title FROM alerts AS a WHERE a.incident_id = i.id
                  ORDER BY a.created_at DESC, a.id DESC LIMIT 1) AS latest_title,
                 (SELECT a.message FROM alerts AS a WHERE a.incident_id = i.id
@@ -2158,6 +2164,69 @@ class Database:
                     item[field[:-5]] = []
             rows.append(item)
         return rows
+
+    def get_alert_detail(self, alert_id: int) -> dict[str, Any] | None:
+        """Return one notification with its exact observation and incident context."""
+        if alert_id < 1:
+            return None
+        row = self.connection.execute(
+            """
+            SELECT id, observation_id, incident_id, title, message, priority,
+                   confidence, evidence_json, tags_json, click_url, status,
+                   created_at, delivered_at
+            FROM alerts WHERE id = ?
+            """,
+            (alert_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        alert = dict(row)
+        for field in ("evidence_json", "tags_json"):
+            try:
+                alert[field[:-5]] = json.loads(alert.pop(field))
+            except (TypeError, ValueError):
+                alert[field[:-5]] = []
+        alert["source_url"] = alert.pop("click_url")
+
+        observation = None
+        if row["observation_id"] is not None:
+            observation_row = self.connection.execute(
+                """
+                SELECT id, source_id, publisher, published_at, fetched_at, title,
+                       summary, url, attributes_json, importance, urgency, relevance,
+                       confidence, region, topic, source_tier, information_type, handling
+                FROM observations WHERE id = ?
+                """,
+                (row["observation_id"],),
+            ).fetchone()
+            if observation_row is not None:
+                observation = dict(observation_row)
+                try:
+                    observation["attributes"] = json.loads(
+                        observation.pop("attributes_json")
+                    )
+                except (TypeError, ValueError):
+                    observation["attributes"] = {}
+
+        incident = None
+        if row["incident_id"] is not None:
+            incident_row = self.connection.execute(
+                """
+                SELECT id, kind, status, first_seen_at, last_seen_at, recovered_at,
+                       confidence, evidence_json, source_ids_json, observation_count
+                FROM incidents WHERE id = ?
+                """,
+                (row["incident_id"],),
+            ).fetchone()
+            if incident_row is not None:
+                incident = dict(incident_row)
+                for field in ("evidence_json", "source_ids_json"):
+                    try:
+                        incident[field[:-5]] = json.loads(incident.pop(field))
+                    except (TypeError, ValueError):
+                        incident[field[:-5]] = []
+
+        return {"alert": alert, "observation": observation, "incident": incident}
 
     def record_config_revision(
         self,

@@ -98,6 +98,8 @@ class OutboxMessage:
     tags: tuple[str, ...]
     click_url: str
     attempts: int
+    observation_id: int | None = None
+    incident_id: int | None = None
     created_at: int = 0
     confidence: float = 0.5
     evidence: tuple[str, ...] = ()

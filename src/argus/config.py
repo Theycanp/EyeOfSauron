@@ -94,6 +94,7 @@ class AdminConfig:
     bind: str
     port: int
     auth_token_env: str | None = None
+    public_base_url: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,9 +392,9 @@ def parse_source_config(
 
 def _parse_admin(raw: Any) -> AdminConfig:
     if raw is None:
-        return AdminConfig(False, "127.0.0.1", 18080, None)
+        return AdminConfig(False, "127.0.0.1", 18080)
     data = _mapping(raw, "admin")
-    _reject_unknown(data, {"enabled", "bind", "port", "auth_token_env"}, "admin")
+    _reject_unknown(data, {"enabled", "bind", "port", "auth_token_env", "public_base_url"}, "admin")
     enabled = _required(data, "enabled", bool, "admin")
     bind = _required(data, "bind", str, "admin").strip()
     if not bind:
@@ -404,9 +405,17 @@ def _parse_admin(raw: Any) -> AdminConfig:
     auth_env = data.get("auth_token_env")
     if auth_env is not None and (not isinstance(auth_env, str) or not _ENV_RE.fullmatch(auth_env)):
         raise ConfigError("admin.auth_token_env is invalid")
+    public_base_url = data.get("public_base_url", "")
+    if not isinstance(public_base_url, str) or len(public_base_url) > 512:
+        raise ConfigError("admin.public_base_url is invalid")
+    if public_base_url:
+        public_base_url = _https_url(public_base_url.rstrip("/"), "admin.public_base_url")
+        parsed_public_url = urlsplit(public_base_url)
+        if parsed_public_url.path or parsed_public_url.query or parsed_public_url.fragment:
+            raise ConfigError("admin.public_base_url must be an HTTPS origin without a path")
     if enabled and auth_env is None:
         raise ConfigError("admin.auth_token_env is required when admin.enabled is true")
-    return AdminConfig(enabled, bind, port, auth_env)
+    return AdminConfig(enabled, bind, port, auth_env, public_base_url)
 
 
 def _parse_analysis(raw: Any) -> AnalysisConfig:
