@@ -504,6 +504,15 @@ h1, h2, h3, p { margin-top: 0; }
 .event-detail-copy { padding: 20px; }
 .event-detail-copy p { margin: 0; color: var(--text); font-size: 15px; line-height: 1.75; overflow-wrap: anywhere; }
 .event-detail-copy.preserve-lines p { white-space: pre-line; }
+.content-heading { align-items: flex-start; }
+.content-level { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border-radius: 6px; font-size: 10px; font-weight: 700; }
+.content-level.positive { color: var(--positive); background: var(--positive-soft); }
+.content-level.info { color: var(--accent); background: var(--accent-soft); }
+.content-level.warning { color: var(--warning); background: var(--warning-soft); }
+.content-level.neutral { color: var(--text-soft); background: var(--surface-soft); }
+.content-provenance { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 11px 20px; border-top: 1px solid var(--border); color: var(--text-faint); font-size: 10px; }
+.content-fetch-state { display: flex; align-items: center; gap: 8px; padding: 11px 13px; border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-soft); background: var(--surface-soft); font-size: 11px; }
+.content-fetch-state.negative { color: var(--negative); border-color: color-mix(in srgb, var(--negative) 28%, var(--border)); background: var(--negative-soft); }
 .event-facts { min-width: 0; }
 .event-facts dl { margin: 0; padding: 7px 17px 12px; }
 .event-facts dl > div { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 10px; padding: 10px 2px; border-bottom: 1px solid var(--border); }
@@ -636,6 +645,9 @@ input:disabled { background: var(--surface-soft); color: var(--text-faint); }
 .advanced-fields { display: grid; gap: 13px; padding: 14px; border-top: 1px solid var(--border); }
 .security-note { display: flex; align-items: flex-start; gap: 8px; margin: 0; padding: 10px 11px; border-radius: 9px; color: var(--positive); background: var(--positive-soft); font-size: 11px; }
 .security-note svg { flex: 0 0 auto; margin-top: 1px; }
+.content-policy-warning { display: flex; align-items: flex-start; gap: 8px; margin: 0; padding: 11px 12px; border: 1px solid color-mix(in srgb, var(--warning) 25%, var(--border)); border-radius: 8px; color: var(--warning); background: var(--warning-soft); font-size: 11px; line-height: 1.55; }
+.content-policy-warning svg { flex: 0 0 auto; margin-top: 1px; }
+.content-policy-warning strong { display: block; }
 .code-input { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; line-height: 1.55; }
 
 .confirm-body { padding: 28px 25px 22px; text-align: center; }

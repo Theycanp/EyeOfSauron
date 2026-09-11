@@ -30,6 +30,8 @@ _COUNTED_TABLES = (
     "reminder_audit",
     "config_revisions",
     "config_audit",
+    "content_documents",
+    "content_fetch_jobs",
 )
 
 

@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .analysis import AnalysisAttempt, InformationAnalysis, analyze_observation
+from .content import (
+    ContentDocumentDraft,
+    ContentFetchRequest,
+    ContentFetchWorkItem,
+    ContentLevel,
+)
 from .digest import DigestCluster, DigestDocument, SourceCoverage
 from .manual_events import ManualEventSpec
 from .models import (
@@ -29,7 +35,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 def read_active_config(path: Path) -> dict[str, Any] | None:
@@ -1038,11 +1044,295 @@ class Database:
                 raise
             version = 13
 
+        if version < 14:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 14:
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS content_documents (
+                            id INTEGER PRIMARY KEY,
+                            observation_id INTEGER NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+                            level TEXT NOT NULL CHECK (
+                                level IN ('metadata', 'excerpt', 'full_text', 'document', 'analysis')
+                            ),
+                            source_method TEXT NOT NULL,
+                            body TEXT NOT NULL,
+                            media_type TEXT NOT NULL,
+                            canonical_url TEXT NOT NULL DEFAULT '',
+                            content_hash TEXT NOT NULL,
+                            rights_policy TEXT NOT NULL,
+                            language TEXT NOT NULL DEFAULT '',
+                            metadata_json TEXT NOT NULL DEFAULT '{}',
+                            fetched_at INTEGER NOT NULL,
+                            created_at INTEGER NOT NULL,
+                            UNIQUE (observation_id, level, source_method, content_hash)
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS content_documents_observation_idx "
+                        "ON content_documents(observation_id, id)"
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS content_fetch_jobs (
+                            id INTEGER PRIMARY KEY,
+                            observation_id INTEGER NOT NULL UNIQUE
+                                REFERENCES observations(id) ON DELETE CASCADE,
+                            url TEXT NOT NULL,
+                            allowed_hosts_json TEXT NOT NULL,
+                            max_response_bytes INTEGER NOT NULL,
+                            timeout_seconds INTEGER NOT NULL,
+                            status TEXT NOT NULL CHECK (
+                                status IN ('pending', 'leased', 'retry', 'completed', 'dead')
+                            ),
+                            attempts INTEGER NOT NULL DEFAULT 0,
+                            next_attempt_at INTEGER NOT NULL,
+                            lease_token TEXT,
+                            lease_until INTEGER,
+                            last_error TEXT,
+                            failure_kind TEXT,
+                            created_at INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL,
+                            completed_at INTEGER,
+                            dead_at INTEGER
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        "CREATE INDEX IF NOT EXISTS content_fetch_jobs_due_idx "
+                        "ON content_fetch_jobs(status, next_attempt_at, id)"
+                    )
+                    self.connection.execute("PRAGMA user_version=14")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 14
+
     def close(self) -> None:
         self.connection.close()
 
     def unit_of_work(self, *, immediate: bool = True) -> SQLiteUnitOfWork:
         return SQLiteUnitOfWork(self.connection, immediate=immediate)
+
+    def _insert_content_document(
+        self,
+        observation_id: int,
+        document: ContentDocumentDraft,
+        now: int,
+    ) -> bool:
+        cursor = self.connection.execute(
+            """
+            INSERT OR IGNORE INTO content_documents(
+                observation_id, level, source_method, body, media_type, canonical_url,
+                content_hash, rights_policy, language, metadata_json, fetched_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                observation_id,
+                document.level.value,
+                document.source_method,
+                document.body,
+                document.media_type,
+                document.canonical_url,
+                document.sha256,
+                document.rights_policy,
+                document.language,
+                json.dumps(dict(document.metadata), ensure_ascii=False, sort_keys=True),
+                now,
+                now,
+            ),
+        )
+        return cursor.rowcount == 1
+
+    def _insert_default_content_document(
+        self,
+        observation_id: int,
+        observation: Observation,
+        now: int,
+    ) -> None:
+        level = ContentLevel.EXCERPT if observation.summary.strip() else ContentLevel.METADATA
+        document = ContentDocumentDraft(
+            level,
+            "normalized_observation",
+            observation.summary or observation.title,
+            canonical_url=observation.url,
+            rights_policy="source_terms_apply",
+        )
+        self._insert_content_document(observation_id, document, now)
+
+    def _enqueue_content_fetch(
+        self,
+        observation_id: int,
+        request: ContentFetchRequest,
+        now: int,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO content_fetch_jobs(
+                observation_id, url, allowed_hosts_json, max_response_bytes,
+                timeout_seconds, status, attempts, next_attempt_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+            """,
+            (
+                observation_id,
+                request.url,
+                json.dumps(list(request.allowed_hosts), ensure_ascii=False),
+                request.max_response_bytes,
+                request.timeout_seconds,
+                now,
+                now,
+                now,
+            ),
+        )
+
+    def claim_content_fetch(
+        self,
+        now: int,
+        lease_seconds: int = 60,
+    ) -> ContentFetchWorkItem | None:
+        if not 1 <= lease_seconds <= 3600:
+            raise ValueError("content fetch lease is out of range")
+        lease_token = uuid.uuid4().hex
+        with self.unit_of_work():
+            self.connection.execute(
+                """
+                UPDATE content_fetch_jobs
+                SET status = 'retry', lease_token = NULL, lease_until = NULL,
+                    next_attempt_at = ?, updated_at = ?,
+                    last_error = COALESCE(last_error, 'worker lease expired'),
+                    failure_kind = COALESCE(failure_kind, 'lease_expired')
+                WHERE status = 'leased' AND lease_until <= ?
+                """,
+                (now, now, now),
+            )
+            row = self.connection.execute(
+                """
+                SELECT id FROM content_fetch_jobs
+                WHERE status IN ('pending', 'retry') AND next_attempt_at <= ?
+                ORDER BY next_attempt_at, id LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+            if row is None:
+                return None
+            job_id = int(row["id"])
+            updated = self.connection.execute(
+                """
+                UPDATE content_fetch_jobs
+                SET status = 'leased', attempts = attempts + 1, lease_token = ?,
+                    lease_until = ?, updated_at = ?
+                WHERE id = ? AND status IN ('pending', 'retry')
+                """,
+                (lease_token, now + lease_seconds, now, job_id),
+            )
+            if updated.rowcount != 1:
+                return None
+            claimed = self.connection.execute(
+                "SELECT * FROM content_fetch_jobs WHERE id = ? AND lease_token = ?",
+                (job_id, lease_token),
+            ).fetchone()
+        if claimed is None:
+            return None
+        try:
+            allowed_hosts_value = json.loads(claimed["allowed_hosts_json"])
+            allowed_hosts = tuple(str(item) for item in allowed_hosts_value)
+        except (TypeError, ValueError):
+            allowed_hosts = ()
+        try:
+            request = ContentFetchRequest(
+                str(claimed["url"]),
+                allowed_hosts,
+                max_response_bytes=int(claimed["max_response_bytes"]),
+                timeout_seconds=int(claimed["timeout_seconds"]),
+            )
+        except (TypeError, ValueError) as exc:
+            with self.connection:
+                self.connection.execute(
+                    """
+                    UPDATE content_fetch_jobs
+                    SET status = 'dead', lease_token = NULL, lease_until = NULL,
+                        last_error = ?, failure_kind = 'invalid_job', updated_at = ?, dead_at = ?
+                    WHERE id = ? AND lease_token = ?
+                    """,
+                    (sanitize_error(exc), now, now, int(claimed["id"]), lease_token),
+                )
+            return None
+        return ContentFetchWorkItem(
+            id=int(claimed["id"]),
+            observation_id=int(claimed["observation_id"]),
+            request=request,
+            lease_token=lease_token,
+            attempts=int(claimed["attempts"]),
+        )
+
+    def complete_content_fetch(
+        self,
+        item: ContentFetchWorkItem,
+        document: ContentDocumentDraft,
+        now: int,
+    ) -> bool:
+        with self.unit_of_work():
+            active = self.connection.execute(
+                "SELECT 1 FROM content_fetch_jobs WHERE id = ? AND status = 'leased' "
+                "AND lease_token = ? AND observation_id = ?",
+                (item.id, item.lease_token, item.observation_id),
+            ).fetchone()
+            if active is None:
+                return False
+            self._insert_content_document(item.observation_id, document, now)
+            updated = self.connection.execute(
+                """
+                UPDATE content_fetch_jobs
+                SET status = 'completed', lease_token = NULL, lease_until = NULL,
+                    last_error = NULL, failure_kind = NULL, updated_at = ?, completed_at = ?
+                WHERE id = ? AND status = 'leased' AND lease_token = ?
+                """,
+                (now, now, item.id, item.lease_token),
+            )
+        return updated.rowcount == 1
+
+    def fail_content_fetch(
+        self,
+        item: ContentFetchWorkItem,
+        error: BaseException | str,
+        now: int,
+        next_attempt_at: int,
+        *,
+        retryable: bool,
+        failure_kind: str,
+        max_attempts: int = 5,
+    ) -> str | None:
+        if max_attempts < 1:
+            raise ValueError("content fetch attempt limit must be positive")
+        terminal = not retryable or item.attempts >= max_attempts
+        status = "dead" if terminal else "retry"
+        with self.connection:
+            updated = self.connection.execute(
+                """
+                UPDATE content_fetch_jobs
+                SET status = ?, lease_token = NULL, lease_until = NULL,
+                    next_attempt_at = ?, last_error = ?, failure_kind = ?, updated_at = ?,
+                    dead_at = CASE WHEN ? = 'dead' THEN ? ELSE NULL END
+                WHERE id = ? AND status = 'leased' AND lease_token = ?
+                """,
+                (
+                    status,
+                    next_attempt_at if not terminal else now,
+                    sanitize_error(error),
+                    failure_kind[:128],
+                    now,
+                    status,
+                    now,
+                    item.id,
+                    item.lease_token,
+                ),
+            )
+        return status if updated.rowcount == 1 else None
+
     def register_engine(
         self,
         instance_id: str,
@@ -1505,6 +1795,16 @@ class Database:
                     continue
                 inserted += 1
                 observation_id = int(cursor.lastrowid)
+                if observation.content_documents:
+                    for document in observation.content_documents:
+                        self._insert_content_document(observation_id, document, now)
+                else:
+                    self._insert_default_content_document(observation_id, observation, now)
+                # A first successful poll establishes the deduplication baseline.
+                # Persist feed-provided content, but do not unexpectedly crawl all
+                # historical article URLs from that initial batch.
+                if state.initialized and observation.content_fetch is not None:
+                    self._enqueue_content_fetch(observation_id, observation.content_fetch, now)
                 if state.initialized:
                     for candidate in rules.evaluate(observation, now):
                         if self._insert_alert(candidate, observation_id, now):
@@ -2209,6 +2509,42 @@ class Database:
                 except (TypeError, ValueError):
                     observation["attributes"] = {}
 
+        documents: list[dict[str, Any]] = []
+        content_fetch = None
+        if row["observation_id"] is not None:
+            for document_row in self.connection.execute(
+                """
+                SELECT id, observation_id, level, source_method, body, media_type,
+                       canonical_url, content_hash, rights_policy, language,
+                       metadata_json, fetched_at, created_at
+                FROM content_documents
+                WHERE observation_id = ?
+                ORDER BY CASE level
+                    WHEN 'document' THEN 1
+                    WHEN 'full_text' THEN 2
+                    WHEN 'analysis' THEN 3
+                    WHEN 'excerpt' THEN 4
+                    ELSE 5 END, id DESC
+                """,
+                (row["observation_id"],),
+            ):
+                document = dict(document_row)
+                try:
+                    document["metadata"] = json.loads(document.pop("metadata_json"))
+                except (TypeError, ValueError):
+                    document["metadata"] = {}
+                documents.append(document)
+            fetch_row = self.connection.execute(
+                """
+                SELECT status, attempts, next_attempt_at, last_error, failure_kind,
+                       updated_at, completed_at, dead_at
+                FROM content_fetch_jobs WHERE observation_id = ?
+                """,
+                (row["observation_id"],),
+            ).fetchone()
+            if fetch_row is not None:
+                content_fetch = dict(fetch_row)
+
         incident = None
         if row["incident_id"] is not None:
             incident_row = self.connection.execute(
@@ -2227,7 +2563,13 @@ class Database:
                     except (TypeError, ValueError):
                         incident[field[:-5]] = []
 
-        return {"alert": alert, "observation": observation, "incident": incident}
+        return {
+            "alert": alert,
+            "observation": observation,
+            "incident": incident,
+            "documents": documents,
+            "content_fetch": content_fetch,
+        }
 
     def create_manual_event(
         self,
@@ -2281,6 +2623,17 @@ class Database:
                 ),
             )
             observation_id = int(cursor.lastrowid)
+            self._insert_content_document(
+                observation_id,
+                ContentDocumentDraft(
+                    ContentLevel.FULL_TEXT,
+                    "manual_entry",
+                    event.summary,
+                    canonical_url=event.source_url,
+                    rights_policy="user_supplied",
+                ),
+                now,
+            )
             candidate = AlertCandidate(
                 rule_id="manual.admin",
                 dedupe_key=dedupe_key,
@@ -3456,6 +3809,18 @@ class Database:
                 "SELECT COUNT(*) FROM reminders WHERE enabled = 0"
             ).fetchone()[0]),
         }
+        content_documents = {
+            str(row["level"]): int(row["count"])
+            for row in self.connection.execute(
+                "SELECT level, COUNT(*) AS count FROM content_documents GROUP BY level"
+            )
+        }
+        content_fetch = {
+            str(row["status"]): int(row["count"])
+            for row in self.connection.execute(
+                "SELECT status, COUNT(*) AS count FROM content_fetch_jobs GROUP BY status"
+            )
+        }
         revisions = [dict(row) for row in self.connection.execute(
             "SELECT revision, created_at, active FROM config_revisions WHERE active = 1 ORDER BY revision DESC LIMIT 1"
         )]
@@ -3476,6 +3841,10 @@ class Database:
             "outbox_metrics": outbox_metrics,
             "incidents": incidents,
             "reminders": reminders,
+            "content": {
+                "documents": content_documents,
+                "fetch_jobs": content_fetch,
+            },
             "config_revision": revisions[0] if revisions else None,
             "desired_revision": revisions[0]["revision"] if revisions else None,
             "engine": engine,

@@ -96,14 +96,15 @@ class ProviderRegistryTests(unittest.TestCase):
 
 
 class NewsCatalogTests(unittest.TestCase):
-    def test_every_entry_is_disabled_confirmation_gated_and_metadata_only(self) -> None:
+    def test_every_entry_is_disabled_confirmation_gated_and_has_known_policy(self) -> None:
         rows = NEWS_SOURCE_CATALOG.describe()
         self.assertGreaterEqual(len(rows), 9)
         for row in rows:
             self.assertFalse(row["default_enabled"])
             self.assertTrue(row["requires_user_confirmation"])
-            self.assertEqual(
-                "feed_metadata_and_original_link_only", row["content_policy"]
+            self.assertIn(
+                row["content_policy"],
+                {"feed_metadata_and_original_link_only", "public_document_full_text"},
             )
             for feed in row["feeds"]:
                 self.assertTrue(feed["url"].startswith("https://"))

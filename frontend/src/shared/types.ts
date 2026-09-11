@@ -162,10 +162,41 @@ export interface ObservationDetail extends JsonRecord {
   handling: string
 }
 
+export type ContentLevel = 'metadata' | 'excerpt' | 'full_text' | 'document' | 'analysis'
+
+export interface ContentDocument extends JsonRecord {
+  id: number
+  observation_id: number
+  level: ContentLevel
+  source_method: string
+  body: string
+  media_type: string
+  canonical_url: string
+  content_hash: string
+  rights_policy: string
+  language?: string
+  metadata?: JsonRecord
+  fetched_at: number
+  created_at: number
+}
+
+export interface ContentFetchState extends JsonRecord {
+  status: 'pending' | 'leased' | 'retry' | 'completed' | 'dead'
+  attempts: number
+  next_attempt_at?: number | null
+  last_error?: string | null
+  failure_kind?: string | null
+  updated_at: number
+  completed_at?: number | null
+  dead_at?: number | null
+}
+
 export interface AlertDetailResponse {
   alert: AlertDetailRecord
   observation?: ObservationDetail | null
   incident?: Incident | null
+  documents?: ContentDocument[]
+  content_fetch?: ContentFetchState | null
 }
 
 export interface ManualEventDraft {

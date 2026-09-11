@@ -183,6 +183,12 @@ to be sent again. A publish acknowledged by ntfy immediately before a process
 crash can still be repeated after its lease expires, by the documented
 at-least-once policy.
 
+Content enrichment runs inside the Argus daemon but uses its own persisted queue.
+`argus status --json` reports `content.documents` by level and `content.fetch_jobs`
+by state. A `dead` content job means the Feed item and notification remain valid but
+the optional public-document body could not be retained. Correct the source URL or
+policy and wait for a newly observed item; do not treat this as an RSS outage.
+
 The main unit uses `Type=notify`: Argus declares readiness only after database
 setup and runtime registration, then emits watchdog heartbeats. Exit status 75
 is reserved for controlled configuration activation and is explicitly treated

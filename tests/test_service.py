@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from argus.database import Database
+from argus.content import ContentDocumentDraft, ContentFetchError, ContentFetchRequest, ContentLevel
 from argus.models import FeedFetchResult
 from argus.rules import RuleSet
 from argus.reminders import parse_reminder
@@ -49,6 +50,22 @@ class _FlakyCollector:
         return self.result
 
 
+class _ContentFetcher:
+    def __init__(self, error=None):  # type: ignore[no-untyped-def]
+        self.error = error
+
+    def fetch(self, item):  # type: ignore[no-untyped-def]
+        if self.error is not None:
+            raise self.error
+        return ContentDocumentDraft(
+            ContentLevel.DOCUMENT,
+            "public_text",
+            "Official public document content. " * 5,
+            canonical_url=item.request.url,
+            rights_policy="public_official_document",
+        )
+
+
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -77,6 +94,49 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.rules,
             notifier,
         )
+
+    def _queue_content_fetch(self) -> int:
+        baseline = FeedFetchResult((), None, None)
+        self.database.record_source_success(
+            self.source.id, baseline, self.rules, int(time.time()) - 2, self.config.ntfy.default_topic
+        )
+        item = observation("content", "Breaking: official release", "Feed excerpt", timestamp=int(time.time()))
+        item = replace(
+            item,
+            content_fetch=ContentFetchRequest(
+                item.url, ("www.bloomberg.com",), max_response_bytes=4096, timeout_seconds=10
+            ),
+        )
+        self.database.record_source_success(
+            self.source.id,
+            FeedFetchResult((item,), None, None),
+            self.rules,
+            int(time.time()),
+            self.config.ntfy.default_topic,
+        )
+        return int(self.database.list_alerts()[0]["id"])
+
+    async def test_content_enrichment_completes_without_changing_source_health(self) -> None:
+        alert_id = self._queue_content_fetch()
+        service = self._service(_Collector(FeedFetchResult((), None, None)), _Notifier())
+        service.content_fetcher = _ContentFetcher()
+        self.assertTrue(await service.process_content_fetch_once())
+        detail = self.database.get_alert_detail(alert_id)
+        assert detail is not None
+        self.assertEqual("document", detail["documents"][0]["level"])
+        self.assertEqual(0, self.database.get_source_state(self.source.id).consecutive_failures)
+
+    async def test_content_enrichment_failure_is_isolated_and_terminal(self) -> None:
+        alert_id = self._queue_content_fetch()
+        service = self._service(_Collector(FeedFetchResult((), None, None)), _Notifier())
+        service.content_fetcher = _ContentFetcher(
+            ContentFetchError("not public", retryable=False, kind="url_policy")
+        )
+        self.assertTrue(await service.process_content_fetch_once())
+        detail = self.database.get_alert_detail(alert_id)
+        assert detail is not None
+        self.assertEqual("dead", detail["content_fetch"]["status"])
+        self.assertEqual(0, self.database.get_source_state(self.source.id).consecutive_failures)
 
     async def test_poll_baseline_then_deliver_new_alert(self) -> None:
         recent = int(time.time()) - 60

@@ -16,6 +16,13 @@ likely breaking or market-moving news. The project is intentionally not tied to
 Bloomberg: stock, email, X, YouTube, host-health, and MQTT adapters use the same
 event, rule, state, and delivery contracts.
 
+Saved event details use a policy-aware content layer. Commercial publishers such
+as Bloomberg, WSJ, FT, and The Economist remain limited to the title, Feed excerpt,
+and original link. Public first-party sources such as governments, central banks,
+regulators, and scientific agencies may opt into bounded HTML/PDF text extraction.
+Only plain text is retained; the fetch queue is durable and independent from RSS
+source health.
+
 ## Reliability properties
 
 - First successful collection establishes a baseline and never floods old news.

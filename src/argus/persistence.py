@@ -5,6 +5,7 @@ from types import TracebackType
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 from .analysis_orchestrator import AnalysisRepository
+from .content import ContentDocumentDraft, ContentFetchWorkItem
 from .digest import (
     DigestInputRepository,
     DigestNotificationRepository,
@@ -119,6 +120,26 @@ class RuntimeRepository(
         error_kind: str | None = None,
         http_status: int | None = None,
     ) -> bool: ...
+
+    def claim_content_fetch(
+        self, now: int, lease_seconds: int = 60
+    ) -> ContentFetchWorkItem | None: ...
+
+    def complete_content_fetch(
+        self, item: ContentFetchWorkItem, document: ContentDocumentDraft, now: int
+    ) -> bool: ...
+
+    def fail_content_fetch(
+        self,
+        item: ContentFetchWorkItem,
+        error: BaseException | str,
+        now: int,
+        next_attempt_at: int,
+        *,
+        retryable: bool,
+        failure_kind: str,
+        max_attempts: int = 5,
+    ) -> str | None: ...
 
     def enqueue_due_reminders(self, now: int, topic: str, limit: int = 100) -> int: ...
     def claim_due_alert(self, now: int, lease_seconds: int) -> OutboxMessage | None: ...

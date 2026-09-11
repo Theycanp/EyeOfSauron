@@ -13,6 +13,7 @@ from .adapters import AdapterError, build_collector
 from .admin import ManagedConfigStore, serve
 from .analysis_orchestrator import AnalysisOrchestrator
 from .database import Database, read_active_config
+from .content import PublicDocumentFetcher
 from .digest import DigestScheduler
 from .model_analyzers import AnalyzerSettings, LocalModelAnalyzer, OpenAICompatibleAnalyzer
 from .notifier import DEFAULT_NOTIFIER_REGISTRY, NotifyError
@@ -139,6 +140,7 @@ def _build_service(
         config_revision=config_revision,
         analysis_orchestrator=analysis_orchestrator,
         digest_scheduler=digest_scheduler,
+        content_fetcher=PublicDocumentFetcher(),
     )
 
 

@@ -13,6 +13,14 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
 from .config import RssSourceConfig
+from .content import (
+    ContentDocumentDraft,
+    ContentFetchRequest,
+    ContentLevel,
+    ContentPolicy,
+    parse_content_policy,
+    plain_text,
+)
 from .models import FeedFetchResult, Observation, SourceState
 from .util import truncate
 
@@ -101,14 +109,72 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
         raise FeedError(f"invalid XML: {exc}") from exc
 
     observations: list[Observation] = []
+    policy = parse_content_policy(source.settings.get("content_policy"))
+    content_character_limit = int(source.settings.get("content_max_characters", 100_000))
+    content_response_limit = int(source.settings.get("content_max_response_bytes", 4 * 1024 * 1024))
+    content_timeout = int(source.settings.get("content_timeout_seconds", source.request_timeout_seconds))
+
+    def content_payloads(
+        summary_raw: str | None,
+        full_raw: str | None,
+        link: str,
+        *,
+        summary_method: str,
+        full_method: str,
+    ) -> tuple[tuple[ContentDocumentDraft, ...], ContentFetchRequest | None]:
+        documents: list[ContentDocumentDraft] = []
+        excerpt = _plain_text(summary_raw or full_raw, 4000)
+        if excerpt:
+            documents.append(ContentDocumentDraft(
+                ContentLevel.EXCERPT,
+                summary_method,
+                excerpt,
+                canonical_url=link,
+                rights_policy="source_terms_apply",
+            ))
+        has_feed_full_text = False
+        if policy in {ContentPolicy.FEED_FULL_TEXT, ContentPolicy.PUBLIC_DOCUMENT} and full_raw:
+            full_text = plain_text(full_raw, limit=content_character_limit)
+            if full_text:
+                documents.append(ContentDocumentDraft(
+                    ContentLevel.FULL_TEXT,
+                    full_method,
+                    full_text,
+                    canonical_url=link,
+                    rights_policy=(
+                        "public_official_document"
+                        if policy is ContentPolicy.PUBLIC_DOCUMENT
+                        else "source_authorized_feed"
+                    ),
+                ))
+                has_feed_full_text = True
+        fetch_request = None
+        if policy is ContentPolicy.PUBLIC_DOCUMENT and link and not has_feed_full_text:
+            fetch_request = ContentFetchRequest(
+                link,
+                source.allowed_hosts,
+                max_response_bytes=content_response_limit,
+                timeout_seconds=content_timeout,
+            )
+        return tuple(documents), fetch_request
+
     channel = root.find("channel")
     if channel is not None:
         for item in channel.findall("item"):
             title = _plain_text(item.findtext("title"), 1000)
             if not title:
                 continue
-            summary = _plain_text(item.findtext("description"), 4000)
+            summary_raw = item.findtext("description")
+            full_raw = item.findtext("{http://purl.org/rss/1.0/modules/content/}encoded")
+            summary = _plain_text(summary_raw or full_raw, 4000)
             link = _safe_link(item.findtext("link"), source.allowed_hosts)
+            documents, content_fetch = content_payloads(
+                summary_raw,
+                full_raw,
+                link,
+                summary_method="rss_description",
+                full_method="rss_content",
+            )
             parsed_date = _parse_datetime(item.findtext("pubDate"))
             published_at = parsed_date or datetime.now(UTC)
             guid = item.findtext("guid") or ""
@@ -124,6 +190,8 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
                 url=link,
                 attributes={"section": source.section, "creator": truncate(creator, 500),
                             "published_at_inferred": parsed_date is None},
+                content_documents=documents,
+                content_fetch=content_fetch,
             ))
     else:
         namespace = "{http://www.w3.org/2005/Atom}"
@@ -132,15 +200,22 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
             title = _plain_text(entry.findtext(f"{namespace}title"), 1000)
             if not title:
                 continue
-            summary = _plain_text(
-                entry.findtext(f"{namespace}summary") or entry.findtext(f"{namespace}content"), 4000
-            )
+            summary_raw = entry.findtext(f"{namespace}summary")
+            full_raw = entry.findtext(f"{namespace}content")
+            summary = _plain_text(summary_raw or full_raw, 4000)
             link_value = ""
             for link_node in entry.findall(f"{namespace}link"):
                 if link_node.attrib.get("rel", "alternate") == "alternate":
                     link_value = link_node.attrib.get("href", "")
                     break
             link = _safe_link(link_value, source.allowed_hosts)
+            documents, content_fetch = content_payloads(
+                summary_raw,
+                full_raw,
+                link,
+                summary_method="atom_summary",
+                full_method="atom_content",
+            )
             parsed_date = _parse_datetime(
                 entry.findtext(f"{namespace}published") or entry.findtext(f"{namespace}updated")
             )
@@ -156,6 +231,8 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
                 summary=summary,
                 url=link,
                 attributes={"section": source.section, "published_at_inferred": parsed_date is None},
+                content_documents=documents,
+                content_fetch=content_fetch,
             ))
 
     if not observations:

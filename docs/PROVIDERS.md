@@ -111,6 +111,17 @@ enabled, conditional caching is bypassed so repeated 304 responses cannot hide
 stale content. Catalog news templates carry conservative publisher-specific
 limits; infrequent central-bank and regulator announcements leave it disabled.
 The connection test checks content freshness as well as transport/parsing.
+
+RSS sources expose three content policies:
+
+- `feed_metadata_and_original_link_only`: store title, Feed excerpt, and link only;
+  this is mandatory for commercial or subscription publishers by default.
+- `feed_full_text_allowed`: store a full body only when the Feed itself explicitly
+  carries it and the operator has confirmed the right to retain it.
+- `public_document_full_text`: for government, central-bank, regulator, public-health,
+  and scientific first-party sources; new item links may be fetched as bounded public
+  HTML/PDF documents. It must not be used to bypass paywalls.
+
 Some legacy official feeds, including BOJ, still emit HTTP article links. The
 RSS adapter upgrades a stored article link to HTTPS only when its hostname is
 already in the exact source allowlist; it never fetches the article as part of

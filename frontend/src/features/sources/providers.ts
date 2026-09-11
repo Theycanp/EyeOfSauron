@@ -24,6 +24,7 @@ export const providerList = Object.values(providerRegistry)
 
 export type SourceEntryMode = 'generic' | 'typed' | 'edit'
 export type NotificationMode = 'preserve' | 'simple'
+export type ContentPolicy = 'feed_metadata_and_original_link_only' | 'feed_full_text_allowed' | 'public_document_full_text'
 
 export interface SourceDraft {
   entryMode: SourceEntryMode
@@ -35,6 +36,7 @@ export interface SourceDraft {
   enabled: boolean
   target: string
   maxContentAgeSeconds: number
+  contentPolicy: ContentPolicy
   keywords: string
   excludes: string
   notificationMode: NotificationMode
@@ -71,6 +73,7 @@ export function createSourceDraft(kind: SourceKind | null, entryMode: SourceEntr
     enabled: false,
     target: '',
     maxContentAgeSeconds: 0,
+    contentPolicy: 'feed_metadata_and_original_link_only',
     keywords: '',
     excludes: '',
     notificationMode: 'simple',
@@ -122,6 +125,10 @@ export function editSourceDraft(source: ManagedSource, rule: ManagedRule | null)
   if (source.kind === 'rss') {
     draft.target = source.url || ''
     draft.maxContentAgeSeconds = settingNumber(settings, 'max_content_age_seconds', 0)
+    const contentPolicy = setting(settings, 'content_policy')
+    if (contentPolicy === 'feed_full_text_allowed' || contentPolicy === 'public_document_full_text') {
+      draft.contentPolicy = contentPolicy
+    }
   }
   if (source.kind === 'youtube') draft.target = setting(settings, 'channel_id')
   if (source.kind === 'x') {
@@ -186,6 +193,7 @@ export function serializeSource(draft: SourceDraft): ManagedSource {
     source.url = target
     source.allowed_hosts = reference?.url === target && reference.allowed_hosts?.length ? [...reference.allowed_hosts] : [url.hostname]
     settings.max_content_age_seconds = Number(draft.maxContentAgeSeconds)
+    settings.content_policy = draft.contentPolicy
   } else if (draft.kind === 'youtube') {
     settings.channel_id = target
   } else if (draft.kind === 'x') {
@@ -293,6 +301,11 @@ export function catalogSourceDraft(entry: NewsCatalogEntry, feed: NewsCatalogFee
     section: feed.section,
     target: feed.url,
     maxContentAgeSeconds: feed.max_content_age_seconds ?? 0,
+    contentPolicy: entry.content_policy === 'public_document_full_text'
+      ? 'public_document_full_text'
+      : entry.content_policy === 'feed_full_text_allowed'
+        ? 'feed_full_text_allowed'
+        : 'feed_metadata_and_original_link_only',
     enabled: false,
     templateSource: template,
   }
