@@ -23,6 +23,7 @@ from .providers import (
     ProviderRegistry,
 )
 from .rss import RssCollector
+from .official_list import OfficialListCollector
 from .util import truncate
 
 
@@ -405,6 +406,7 @@ def _build_youtube_collector(source: SourceConfig) -> RssCollector:
 
 _COLLECTOR_FACTORIES = {
     "rss": RssCollector,
+    "official_list": OfficialListCollector,
     "youtube": _build_youtube_collector,
     "market": MarketCollector,
     "imap": ImapCollector,

@@ -279,6 +279,21 @@ def _field(
 
 DEFAULT_PROVIDER_REGISTRY = ProviderRegistry((
     ProviderSpec(
+        "official_list",
+        "官方公告列表",
+        frozenset({SourceCapability.NEWS_ITEMS}),
+        UrlMode.REQUIRED,
+        (
+            _field("article_url_prefixes", "string_array", required=True,
+                   description="Exact HTTPS article directory prefixes; only dated links are collected."),
+            _field("timezone", "string", default="UTC"),
+            _field("max_content_age_seconds", "integer", default=0, minimum=0, maximum=31536000),
+            _field("content_policy", "string", default="public_document_full_text"),
+        ),
+        (),
+        _READ_ONLY_FETCH,
+    ),
+    ProviderSpec(
         "rss",
         "RSS / Atom",
         frozenset({SourceCapability.FEED_ITEMS, SourceCapability.NEWS_ITEMS}),

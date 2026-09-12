@@ -158,6 +158,21 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
             )
         return tuple(documents), fetch_request
 
+    # RSS 1.0 (RDF), used by Japanese ministries, has namespaced sibling items.
+    if root.tag == "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}RDF":
+        normalized = ET.Element("rss")
+        rdf_channel = ET.SubElement(normalized, "channel")
+        for entry in root.findall("{http://purl.org/rss/1.0/}item"):
+            item = ET.SubElement(rdf_channel, "item")
+            for child in entry:
+                tag = child.tag.removeprefix("{http://purl.org/rss/1.0/}")
+                if tag == "{http://purl.org/dc/elements/1.1/}date":
+                    tag = "pubDate"
+                ET.SubElement(item, tag).text = child.text
+            ET.SubElement(item, "guid").text = entry.get(
+                "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about", ""
+            )
+        root = normalized
     channel = root.find("channel")
     if channel is not None:
         for item in channel.findall("item"):
@@ -274,6 +289,14 @@ def _validate_fetch_url(
 
 
 class RssCollector:
+    content_types = frozenset({
+        "application/rss+xml", "application/atom+xml", "application/xml", "text/xml",
+        "application/rdf+xml",
+    })
+
+    def parse_payload(self, payload: bytes) -> tuple[Observation, ...]:
+        return parse_feed(payload, self.config)
+
     def __init__(
         self,
         config: RssSourceConfig,
@@ -287,7 +310,7 @@ class RssCollector:
     def fetch(self, state: SourceState) -> FeedFetchResult:
         max_content_age = int(self.config.settings.get("max_content_age_seconds", 0))
         headers = {
-            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9",
+            "Accept": ", ".join(sorted(self.content_types)),
             "User-Agent": "Argus/0.7 (personal feed monitor)",
         }
         if state.etag and not max_content_age:
@@ -332,17 +355,12 @@ class RssCollector:
             final_url = response.geturl()
             _validate_fetch_url(final_url, self.config.allowed_hosts, self._resolver)
             content_type = response.headers.get_content_type().lower()
-            if content_type not in {
-                "application/rss+xml",
-                "application/atom+xml",
-                "application/xml",
-                "text/xml",
-            }:
+            if content_type not in self.content_types:
                 raise FeedError(f"unexpected feed content type: {content_type}")
             payload = response.read(self.config.max_response_bytes + 1)
             if len(payload) > self.config.max_response_bytes:
                 raise FeedError("feed response exceeded configured size limit")
-            observations = parse_feed(payload, self.config)
+            observations = self.parse_payload(payload)
             if max_content_age:
                 published_dates = [
                     item.published_at for item in observations

@@ -20,6 +20,7 @@ class NewsCatalogError(ValueError):
 
 class IntegrationMode(StrEnum):
     VERIFIED_RSS = "verified_rss"
+    VERIFIED_OFFICIAL_LIST = "verified_official_list"
     USER_CONFIRMED_OFFICIAL_URL = "user_confirmed_official_url"
     LICENSED_PROVIDER = "licensed_provider"
 
@@ -39,6 +40,7 @@ class NewsFeedTemplate:
     url: str
     allowed_hosts: tuple[str, ...]
     max_content_age_seconds: int = 0
+    article_url_prefixes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not _CATALOG_ID.fullmatch(self.id):
@@ -53,6 +55,7 @@ class NewsFeedTemplate:
             "url": self.url,
             "allowed_hosts": list(self.allowed_hosts),
             "max_content_age_seconds": self.max_content_age_seconds,
+            "article_url_prefixes": list(self.article_url_prefixes),
         }
 
 
@@ -75,6 +78,10 @@ class NewsSourceEntry:
     default_importance: int = 3
     topic: str = "general"
 
+    @property
+    def source_kind(self) -> str:
+        return "official_list" if self.integration_mode is IntegrationMode.VERIFIED_OFFICIAL_LIST else "rss"
+
     def __post_init__(self) -> None:
         if not _CATALOG_ID.fullmatch(self.id):
             raise NewsCatalogError(f"invalid catalog entry id: {self.id}")
@@ -84,7 +91,7 @@ class NewsSourceEntry:
             raise NewsCatalogError("catalog entries must remain disabled by default")
         if not self.requires_user_confirmation:
             raise NewsCatalogError("catalog entries must require explicit user confirmation")
-        if self.integration_mode is IntegrationMode.VERIFIED_RSS and not self.feeds:
+        if self.integration_mode in {IntegrationMode.VERIFIED_RSS, IntegrationMode.VERIFIED_OFFICIAL_LIST} and not self.feeds:
             raise NewsCatalogError(f"verified RSS entry {self.id} has no feed templates")
         if self.region not in {"CN", "JP", "US", "GLOBAL", "OTHER"}:
             raise NewsCatalogError(f"invalid catalog region: {self.region}")
@@ -115,6 +122,7 @@ class NewsSourceEntry:
             "source_tier": self.source_tier,
             "default_importance": self.default_importance,
             "topic": self.topic,
+            "source_kind": self.source_kind,
         }
 
 
@@ -166,7 +174,7 @@ class NewsSourceCatalog:
             raise NewsCatalogError("poll interval must be between 30 and 86400 seconds")
         return {
             "id": source_id,
-            "kind": "rss",
+            "kind": entry.source_kind,
             "publisher": entry.publisher,
             "section": feed.section,
             "dedupe_scope": entry.id,
@@ -184,6 +192,9 @@ class NewsSourceCatalog:
                 "content_policy": entry.content_policy,
                 "max_content_age_seconds": feed.max_content_age_seconds,
                 "topic": entry.topic,
+                **({"article_url_prefixes": list(feed.article_url_prefixes),
+                    "timezone": "Asia/Shanghai" if entry.region == "CN" else "Asia/Tokyo"}
+                   if entry.source_kind == "official_list" else {}),
             },
             "region": entry.region,
             "source_tier": entry.source_tier,
@@ -203,7 +214,7 @@ class NewsSourceCatalog:
         poll_interval_seconds: int = 300,
     ) -> dict[str, Any]:
         entry = self.require(entry_id)
-        if entry.integration_mode is IntegrationMode.VERIFIED_RSS:
+        if entry.integration_mode in {IntegrationMode.VERIFIED_RSS, IntegrationMode.VERIFIED_OFFICIAL_LIST}:
             raise NewsCatalogError("use a verified feed template for this catalog entry")
         if entry.integration_mode is IntegrationMode.LICENSED_PROVIDER:
             raise NewsCatalogError(
@@ -271,7 +282,73 @@ def _feed(
     return NewsFeedTemplate(feed_id, label, section, url, tuple(allowed_hosts), max_age)
 
 
+def _official_index(
+    identifier: str, publisher: str, url: str, prefixes: tuple[str, ...],
+    *, region: str = "CN", topic: str = "policy",
+) -> NewsSourceEntry:
+    hosts = tuple(dict.fromkeys(urlsplit(value).hostname or "" for value in (url, *prefixes)))
+    return NewsSourceEntry(
+        identifier, publisher, url, AccessModel.PUBLIC, IntegrationMode.VERIFIED_OFFICIAL_LIST,
+        (NewsFeedTemplate("announcements", "最新公告", topic, url, hosts,
+                          article_url_prefixes=prefixes),),
+        url, "直接监测官方列表中的带日期公告；每 15 分钟检查，普通信息收录日报，重大事件按规则通知。",
+        verified_on="2026-09-12", content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
+        region=region, source_tier="primary", default_importance=4, topic=topic,
+    )
+
+
 NEWS_SOURCE_CATALOG = NewsSourceCatalog((
+    _official_index(
+        "china_mof", "中国财政部", "https://www.mof.gov.cn/zhengwuxinxi/caizhengxinwen/",
+        ("https://www.mof.gov.cn/zhengwuxinxi/caizhengxinwen/",
+         "https://jrs.mof.gov.cn/zhengcefabu/", "https://jdjc.mof.gov.cn/jianchagonggao/"),
+        topic="finance",
+    ),
+    _official_index(
+        "china_ndrc", "国家发展改革委", "https://www.ndrc.gov.cn/xwdt/xwfb/",
+        ("https://www.ndrc.gov.cn/xwdt/xwfb/",),
+    ),
+    _official_index(
+        "china_stats", "国家统计局", "https://www.stats.gov.cn/sj/zxfb/",
+        ("https://www.stats.gov.cn/sj/zxfb/",), topic="economy",
+    ),
+    _official_index(
+        "china_mfa", "中国外交部", "https://www.mfa.gov.cn/wjdt_674879/fyrbt_674889/",
+        ("https://www.mfa.gov.cn/wjdt_674879/fyrbt_674889/",), topic="diplomacy",
+    ),
+    _official_index(
+        "china_most", "中国科学技术部", "https://www.most.gov.cn/kjbgz/",
+        ("https://www.most.gov.cn/kjbgz/",), topic="science",
+    ),
+    _official_index(
+        "japan_cabinet", "日本首相官邸", "https://japan.kantei.go.jp/",
+        ("https://japan.kantei.go.jp/105/",), region="JP", topic="diplomacy",
+    ),
+    NewsSourceEntry(
+        "japan_mhlw", "日本厚生劳动省", "https://www.mhlw.go.jp/",
+        AccessModel.PUBLIC, IntegrationMode.VERIFIED_RSS,
+        (_feed("news", "新着情報", "健康・劳动・社会保障",
+               "https://www.mhlw.go.jp/stf/news.rdf", "www.mhlw.go.jp"),),
+        "https://www.mhlw.go.jp/stf/news.rdf", "官方 RSS 1.0：公共卫生、劳动和社会保障公告。",
+        verified_on="2026-09-12", content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
+        region="JP", source_tier="primary", default_importance=4, topic="health",
+    ),
+    NewsSourceEntry(
+        "jaxa", "日本宇宙航空研究开发机构 JAXA", "https://global.jaxa.jp/",
+        AccessModel.PUBLIC, IntegrationMode.VERIFIED_RSS,
+        (_feed("press", "Press releases", "航天与科学", "https://global.jaxa.jp/rss/press.rdf", "global.jaxa.jp"),),
+        "https://global.jaxa.jp/", "官方 RSS 1.0：航天任务、科学研究与发射公告。",
+        verified_on="2026-09-12", content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
+        region="JP", source_tier="primary", default_importance=4, topic="science",
+    ),
+    NewsSourceEntry(
+        "un_news", "联合国新闻", "https://news.un.org/zh/",
+        AccessModel.PUBLIC, IntegrationMode.VERIFIED_RSS,
+        (_feed("chinese", "中文新闻", "国际与人道事务", "https://news.un.org/feed/subscribe/zh/news/all/rss.xml", "news.un.org"),),
+        "https://news.un.org/zh/", "联合国官方中文新闻，覆盖国际安全、人道、发展和公共卫生。",
+        verified_on="2026-09-12", content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
+        region="GLOBAL", source_tier="primary", default_importance=4, topic="world",
+    ),
     NewsSourceEntry(
         "bloomberg",
         "Bloomberg",
@@ -415,20 +492,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         (_feed("high_frequency", "High-frequency alerts", "Disaster and Weather", "https://www.data.jma.go.jp/developer/xml/feed/extra.xml", "www.data.jma.go.jp"),),
         "https://www.data.jma.go.jp/developer/xml/feed/",
         "Official JMAXML Atom feed for high-frequency weather and disaster information.",
-        content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
-        region="JP", source_tier="primary", default_importance=5, topic="disaster",
-    ),
-    NewsSourceEntry(
-        "china_ndrc",
-        "National Development and Reform Commission",
-        "https://www.ndrc.gov.cn/",
-        AccessModel.PUBLIC,
-        IntegrationMode.VERIFIED_RSS,
-        (_feed("press_releases", "Press releases", "Policy and Economy", "https://www.ndrc.gov.cn/xwdt/xwfb/rss.xml", "www.ndrc.gov.cn"),),
-        "https://www.ndrc.gov.cn/xwdt/xwfb/rss.xml",
-        "Official NDRC RSS endpoint; publication cadence varies by announcement schedule.",
-        content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
-        region="CN", source_tier="primary", default_importance=4, topic="policy",
+        region="JP", source_tier="primary", default_importance=4, topic="disaster",
     ),
     NewsSourceEntry(
         "world_health_organization",
@@ -436,9 +500,9 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         "https://www.who.int/",
         AccessModel.PUBLIC,
         IntegrationMode.VERIFIED_RSS,
-        (_feed("news_english", "News (English)", "Health", "https://www.who.int/rss-feeds/news-english.xml", "www.who.int"),),
+        (NewsFeedTemplate("news_english", "News (English)", "Health", "https://www.who.int/rss-feeds/news-english.xml", ("www.who.int",), 30 * 86400),),
         "https://www.who.int/rss-feeds",
-        "Official WHO news releases, statements, and media notes.",
+        "2026-09-12 实测：旧 RSS 最新消息停在 2026-02-25，暂不启用；网页入口返回 403，等待有效官方入口。",
         content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
         region="GLOBAL", source_tier="primary", default_importance=4, topic="health",
     ),
@@ -448,7 +512,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         "https://www.nasa.gov/",
         AccessModel.PUBLIC,
         IntegrationMode.VERIFIED_RSS,
-        (_feed("news_releases", "News releases", "Science and Space", "https://www.nasa.gov/news-release/feed/", "www.nasa.gov"),),
+        (_feed("news_releases", "News releases", "Science and Space", "https://www.nasa.gov/news-release/feed/", "www.nasa.gov", "science.nasa.gov"),),
         "https://www.nasa.gov/rss-feeds/",
         "Official NASA news-release feed.",
         content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,

@@ -1,6 +1,6 @@
 export type JsonRecord = Record<string, unknown>
 
-export type SourceKind = 'rss' | 'youtube' | 'x' | 'market' | 'imap'
+export type SourceKind = 'rss' | 'official_list' | 'youtube' | 'x' | 'market' | 'imap'
 export type IncidentStatus = 'open' | 'recovered' | 'recorded'
 export type Tone = 'positive' | 'warning' | 'negative' | 'info' | 'neutral'
 export type AdminJobStatus = 'queued' | 'running' | 'succeeded' | 'completed' | 'failed' | 'cancelled' | 'expired'
@@ -244,6 +244,7 @@ export interface NewsCatalogFeed extends JsonRecord {
   url: string
   allowed_hosts: string[]
   max_content_age_seconds?: number
+  article_url_prefixes?: string[]
 }
 
 export interface NewsCatalogEntry extends JsonRecord {
@@ -251,7 +252,12 @@ export interface NewsCatalogEntry extends JsonRecord {
   publisher: string
   homepage_url: string
   access_model: 'public' | 'mixed' | 'subscription' | 'licensed'
-  integration_mode: 'verified_rss' | 'user_confirmed_official_url' | 'licensed_provider'
+  integration_mode: 'verified_rss' | 'verified_official_list' | 'user_confirmed_official_url' | 'licensed_provider'
+  source_kind?: SourceKind
+  region?: string
+  source_tier?: string
+  default_importance?: number
+  topic?: string
   feeds: NewsCatalogFeed[]
   evidence_url: string
   notes: string

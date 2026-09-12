@@ -25,7 +25,7 @@ class ProviderRegistryTests(unittest.TestCase):
     def test_registry_describes_capabilities_credentials_and_test_strategy(self) -> None:
         kinds = set(DEFAULT_PROVIDER_REGISTRY.kinds)
         self.assertEqual(
-            {"rss", "youtube", "x", "imap", "market", "host", "mqtt", "heartbeat"},
+            {"rss", "official_list", "youtube", "x", "imap", "market", "host", "mqtt", "heartbeat"},
             kinds,
         )
         market = DEFAULT_PROVIDER_REGISTRY.require("market")
