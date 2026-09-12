@@ -112,7 +112,32 @@ stale content. Catalog news templates carry conservative publisher-specific
 limits; infrequent central-bank and regulator announcements leave it disabled.
 The connection test checks content freshness as well as transport/parsing.
 
-RSS sources expose three content policies:
+Official HTML announcement indexes use `kind = "official_list"`. They reuse the
+RSS transport's HTTPS allowlist, public-DNS, redirect, MIME and size checks. Only
+dated article links beneath `settings.article_url_prefixes` are retained; date-only
+values use `settings.timezone`. Script content, pagination and arbitrary links are
+not followed. An empty index fails visibly so a redesign cannot appear healthy.
+Current templates assume UTF-8 and TRS-style dated URLs or a nested HTML `time`;
+other layouts need a tested adapter change. Content enrichment remains independent.
+RSS 1.0/RDF is also accepted for ministries that publish that format.
+
+Catalog entries are templates, not live configuration. The requested September
+2026 regional rollout is selected in `argus.news_rollout`; use
+`scripts/operations/activate_news_sources.py --config /etc/argus/config.toml
+--expect-revision N` to preview and fetch every addition. Adding `--apply` commits
+the complete configuration through the managed repository in one revision after
+all probes pass. Existing sources, their enabled flags, analysis and daily digest
+policies remain intact. Check daemon acknowledgement and every new source's first
+successful baseline before reporting rollout complete. No historical notifications
+are sent at baseline. Rollback uses the previous managed revision via the admin API.
+
+China's NDRC RSS was empty on 2026-09-12; use the HTML index. WHO's old feed stopped
+at 2026-02-25, while its current page returned HTTP 403, so it is excluded from this
+rollout. JMA publishes XML bulletin links; the generic HTML/PDF content worker does
+not parse JMAXML, so its template keeps feed metadata only. Japan's MOFA/METI and
+China's NHC returned access errors during review and are not claimed as coverage.
+
+RSS and official indexes expose these content policies:
 
 - `feed_metadata_and_original_link_only`: store title, Feed excerpt, and link only;
   this is mandatory for commercial or subscription publishers by default.

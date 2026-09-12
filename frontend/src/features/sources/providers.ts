@@ -13,6 +13,7 @@ export interface ProviderDefinition {
 }
 
 export const providerRegistry: Record<SourceKind, ProviderDefinition> = {
+  official_list: { kind: 'official_list', label: '官方公告', description: '没有 RSS 的政府及公共机构公告', defaultSection: 'Policy', targetLabel: '官方公告列表地址', targetHint: '只提取指定目录下带日期的公告链接；网站改版或列表为空会报告异常。', icon: Rss },
   rss: { kind: 'rss', label: 'RSS / Atom', description: '新闻网站、博客和公告', defaultSection: 'News', targetLabel: '官方 RSS / Atom 地址', targetHint: '只接受 HTTPS；付费墙来源只保存标题、摘要和链接。', icon: Rss },
   youtube: { kind: 'youtube', label: 'YouTube', description: '频道发布新视频时提醒', defaultSection: 'Videos', targetLabel: 'YouTube 频道 ID', targetHint: '使用 UC 开头的稳定频道 ID，不使用显示名或 @handle。', icon: Video },
   x: { kind: 'x', label: 'X 账号', description: '指定账号发布内容时提醒', defaultSection: 'Social', targetLabel: 'X 账号数字 ID', targetHint: '使用平台数字 user ID，避免账号改名后监控错人。', icon: AtSign },
@@ -37,6 +38,8 @@ export interface SourceDraft {
   target: string
   maxContentAgeSeconds: number
   contentPolicy: ContentPolicy
+  articleUrlPrefixes: string
+  sourceTimezone: string
   keywords: string
   excludes: string
   notificationMode: NotificationMode
@@ -74,6 +77,8 @@ export function createSourceDraft(kind: SourceKind | null, entryMode: SourceEntr
     target: '',
     maxContentAgeSeconds: 0,
     contentPolicy: 'feed_metadata_and_original_link_only',
+    articleUrlPrefixes: '',
+    sourceTimezone: 'Asia/Shanghai',
     keywords: '',
     excludes: '',
     notificationMode: 'simple',
@@ -122,9 +127,11 @@ export function editSourceDraft(source: ManagedSource, rule: ManagedRule | null)
   draft.originalSource = structuredClone(source)
   draft.originalRule = rule ? structuredClone(rule) : null
   draft.notificationMode = 'preserve'
-  if (source.kind === 'rss') {
+  if (source.kind === 'rss' || source.kind === 'official_list') {
     draft.target = source.url || ''
     draft.maxContentAgeSeconds = settingNumber(settings, 'max_content_age_seconds', 0)
+    draft.articleUrlPrefixes = Array.isArray(settings.article_url_prefixes) ? settings.article_url_prefixes.map(String).join('\n') : ''
+    draft.sourceTimezone = setting(settings, 'timezone', draft.sourceTimezone)
     const contentPolicy = setting(settings, 'content_policy')
     if (contentPolicy === 'feed_full_text_allowed' || contentPolicy === 'public_document_full_text') {
       draft.contentPolicy = contentPolicy
@@ -187,13 +194,18 @@ export function serializeSource(draft: SourceDraft): ManagedSource {
   const source = baseSource(draft)
   const settings = { ...(source.settings || {}) }
   const target = draft.target.trim()
-  if (draft.kind === 'rss') {
+  if (draft.kind === 'rss' || draft.kind === 'official_list') {
     const url = new URL(target)
     const reference = draft.originalSource || draft.templateSource
     source.url = target
     source.allowed_hosts = reference?.url === target && reference.allowed_hosts?.length ? [...reference.allowed_hosts] : [url.hostname]
     settings.max_content_age_seconds = Number(draft.maxContentAgeSeconds)
     settings.content_policy = draft.contentPolicy
+    if (draft.kind === 'official_list') {
+      settings.article_url_prefixes = splitWords(draft.articleUrlPrefixes)
+      settings.timezone = draft.sourceTimezone
+      source.allowed_hosts = [...new Set([...(source.allowed_hosts || []), ...splitWords(draft.articleUrlPrefixes).map((value) => new URL(value).hostname)])]
+    }
   } else if (draft.kind === 'youtube') {
     settings.channel_id = target
   } else if (draft.kind === 'x') {
@@ -271,11 +283,11 @@ function availableCatalogId(entry: NewsCatalogEntry, feed: NewsCatalogFeed, exis
 }
 
 export function catalogSourceDraft(entry: NewsCatalogEntry, feed: NewsCatalogFeed, existingIds: string[]): SourceDraft {
-  const draft = createSourceDraft('rss', 'typed')
+  const draft = createSourceDraft(entry.source_kind || 'rss', 'typed')
   const id = availableCatalogId(entry, feed, existingIds)
   const template: ManagedSource = {
     id,
-    kind: 'rss',
+    kind: entry.source_kind || 'rss',
     publisher: entry.publisher,
     section: feed.section,
     dedupe_scope: entry.id,
@@ -287,11 +299,19 @@ export function catalogSourceDraft(entry: NewsCatalogEntry, feed: NewsCatalogFee
     request_attempts: 3,
     retry_base_seconds: 2,
     max_response_bytes: 2_097_152,
+    region: entry.region || 'GLOBAL',
+    source_tier: entry.source_tier || 'secondary',
+    default_importance: entry.default_importance || 3,
     settings: {
       catalog_entry: entry.id,
       catalog_feed: feed.id,
       max_content_age_seconds: feed.max_content_age_seconds ?? 0,
       content_policy: entry.content_policy,
+      topic: entry.topic || 'general',
+      ...(entry.source_kind === 'official_list' ? {
+        article_url_prefixes: feed.article_url_prefixes || [],
+        timezone: entry.region === 'JP' ? 'Asia/Tokyo' : 'Asia/Shanghai',
+      } : {}),
     },
   }
   return {
@@ -300,6 +320,8 @@ export function catalogSourceDraft(entry: NewsCatalogEntry, feed: NewsCatalogFee
     publisher: entry.publisher,
     section: feed.section,
     target: feed.url,
+    articleUrlPrefixes: (feed.article_url_prefixes || []).join('\n'),
+    sourceTimezone: entry.region === 'JP' ? 'Asia/Tokyo' : 'Asia/Shanghai',
     maxContentAgeSeconds: feed.max_content_age_seconds ?? 0,
     contentPolicy: entry.content_policy === 'public_document_full_text'
       ? 'public_document_full_text'

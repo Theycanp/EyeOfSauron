@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .providers import (
     DEFAULT_PROVIDER_REGISTRY,
@@ -280,7 +281,7 @@ def validate_provider_configuration(
             f"{source_location}.kind {kind} is experimental and has no runtime collector; keep it disabled"
         )
     normalized: dict[str, Any] = dict(settings)
-    if kind == "rss":
+    if kind in {"rss", "official_list"}:
         normalized["max_content_age_seconds"] = _setting_int(
             settings, "max_content_age_seconds", 0, location, 0, 31536000
         )
@@ -301,6 +302,18 @@ def validate_provider_configuration(
         )
     if enabled:
         _validate_declared_settings(spec, settings, location)
+        if kind == "official_list":
+            prefixes = settings.get("article_url_prefixes", [])
+            if not 1 <= len(prefixes) <= 32:
+                raise ProviderConfigError("official list requires 1 to 32 article URL prefixes")
+            for prefix in prefixes:
+                _, host = _plain_https_base(prefix, location)
+                if host not in allowed_hosts or not urlsplit(prefix).path.endswith("/"):
+                    raise ProviderConfigError("article URL prefix must end in / and use an allowed host")
+            try:
+                ZoneInfo(str(settings.get("timezone", "UTC")))
+            except (ValueError, ZoneInfoNotFoundError) as exc:
+                raise ProviderConfigError("official list timezone is invalid") from exc
         if kind == "market":
             normalized = _validate_market(settings, allowed_hosts, location)
         elif kind == "x":

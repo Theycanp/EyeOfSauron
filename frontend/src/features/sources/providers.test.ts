@@ -3,6 +3,19 @@ import type { ManagedRule, ManagedSource, NewsCatalogEntry, NewsCatalogFeed } fr
 import { catalogSourceDraft, createSourceDraft, editSourceDraft, serializeSimpleRule, serializeSource } from './providers'
 
 describe('source provider registry', () => {
+  it('keeps official catalog region, importance, timezone and article directories when edited', () => {
+    const entry = { id: 'cabinet', publisher: '日本首相官邸', source_kind: 'official_list', region: 'JP', source_tier: 'primary', default_importance: 4, topic: 'diplomacy', content_policy: 'public_document_full_text' } as NewsCatalogEntry
+    const feed: NewsCatalogFeed = { id: 'announcements', label: '公告', section: 'Policy', url: 'https://japan.kantei.go.jp/', allowed_hosts: ['japan.kantei.go.jp'], article_url_prefixes: ['https://japan.kantei.go.jp/105/'] }
+    const source = serializeSource(catalogSourceDraft(entry, feed, []))
+    expect(source).toMatchObject({ kind: 'official_list', region: 'JP', source_tier: 'primary', default_importance: 4, settings: { topic: 'diplomacy', timezone: 'Asia/Tokyo', article_url_prefixes: feed.article_url_prefixes } })
+    const draft = editSourceDraft(source, null)
+    draft.publisher = '官邸公告'
+    const saved = serializeSource(draft)
+    expect(saved.region).toBe('JP')
+    expect(saved.default_importance).toBe(4)
+    expect(saved.settings?.article_url_prefixes).toEqual(feed.article_url_prefixes)
+    expect(saved.settings?.timezone).toBe('Asia/Tokyo')
+  })
   it('opens a typed quick-add draft without another type-selection state', () => {
     const draft = createSourceDraft('rss', 'typed')
     expect(draft.kind).toBe('rss')

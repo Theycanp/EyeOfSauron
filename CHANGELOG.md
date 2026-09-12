@@ -5,6 +5,27 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-12
+
+### Fixed
+
+- Complete the requested CN/JP/US/international news rollout: a catalog template
+  alone does not activate production collection. Add a probe-before-apply command
+  with revision checks, idempotency and explicit daemon/baseline acceptance.
+- Replace the empty NDRC RSS endpoint with its official announcement index; mark
+  the stale WHO feed unavailable instead of treating HTTP 200 as fresh coverage.
+- Preserve region, source tier, importance and topic when creating sources from
+  the React catalog.
+
+### Added
+
+- Official announcement indexes for China's finance ministry, NDRC, statistics
+  bureau, foreign ministry and science ministry, plus Japan's prime minister.
+- RSS 1.0/RDF parsing for Japan's health ministry and JAXA, sharing existing
+  transport, dates, identity and content-policy behavior.
+- Reviewed activation of 16 additional feeds, conservative multilingual urgent
+  rules, and a visual official-index editor. Japanese sources start at importance 4.
+
 ## [0.13.0] - 2026-09-10
 
 ### Added
