@@ -170,6 +170,35 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(NOW + 10, incident["recovered_at"])
         self.assertEqual("Argus 数据源已恢复", incident["latest_title"])
 
+    def test_disabling_source_resolves_outage_without_notification(self) -> None:
+        for attempt in range(1, 4):
+            self.database.record_source_failure(
+                "bloomberg_markets", "network unavailable", threshold=3,
+                default_topic="eos", now=NOW + attempt,
+            )
+        self.assertEqual("open", self.database.list_incidents()[0]["status"])
+        self.database.sync_source_runtime(
+            [("bloomberg_markets", "rss", False, 300)], set(),
+            config_revision=2, now=NOW + 10,
+        )
+        state = self.database.get_source_state("bloomberg_markets")
+        self.assertEqual(0, state.consecutive_failures)
+        self.assertFalse(state.outage_alerted)
+        incident = self.database.list_incidents()[0]
+        self.assertEqual("recovered", incident["status"])
+        self.assertIn("source disabled by configuration", incident["evidence"])
+        self.assertEqual(1, self.database.status()["outbox"]["pending"])
+
+        self.database.sync_source_runtime(
+            [("bloomberg_markets", "rss", True, 300)], {"bloomberg_markets"},
+            config_revision=3, now=NOW + 20,
+        )
+        report = self.database.record_source_success(
+            "bloomberg_markets", FeedFetchResult((), None, None, not_modified=True),
+            self.rules, NOW + 21, "eos",
+        )
+        self.assertFalse(report.recovery_queued)
+
     def test_stateful_incident_can_reopen_after_recovery(self) -> None:
         def candidate(dedupe_key: str, recovery: bool = False) -> AlertCandidate:
             return AlertCandidate(

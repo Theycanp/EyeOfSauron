@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import gzip
 import unittest
 import urllib.error
 from dataclasses import replace
@@ -65,6 +66,20 @@ class RssTests(unittest.TestCase):
         self.assertIsNotNone(item.content_fetch)
         assert item.content_fetch is not None
         self.assertIn("www.bloomberg.com", item.content_fetch.allowed_hosts)
+
+    def test_public_binary_attachment_keeps_link_without_scheduling_fetch(self) -> None:
+        payload = b"""<rss><channel><item><title>Official spreadsheet</title>
+        <link>https://www.bloomberg.com/reports/data.XLSX?download=1</link>
+        <description>Official statistics are available in the attached workbook.</description>
+        </item></channel></rss>"""
+        public = replace(
+            self.source,
+            settings={**self.source.settings, "content_policy": "public_document_full_text"},
+        )
+        item = parse_feed(payload, public)[0]
+        self.assertEqual("https://www.bloomberg.com/reports/data.XLSX?download=1", item.url)
+        self.assertEqual([ContentLevel.EXCERPT], [doc.level for doc in item.content_documents])
+        self.assertIsNone(item.content_fetch)
 
     def test_atom_content_obeys_full_text_policy(self) -> None:
         payload = b"""<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>x</id>
@@ -188,6 +203,29 @@ class RssTests(unittest.TestCase):
         opener.open.return_value = Response()
         resolver = lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))]
         with self.assertRaisesRegex(FeedError, "size limit"):
+            RssCollector(source, opener=opener, resolver=resolver).fetch(self._state())
+
+    def test_collector_decodes_gzip_with_a_decompressed_size_limit(self) -> None:
+        headers = Message()
+        headers["Content-Type"] = "application/rss+xml"
+        headers["Content-Encoding"] = "gzip"
+
+        class Response(io.BytesIO):
+            def __init__(self, payload: bytes) -> None:
+                super().__init__(gzip.compress(payload))
+                self.headers = headers
+
+            def geturl(self) -> str:
+                return "https://www.bloomberg.com/feeds/markets/news.rss"
+
+        opener = Mock()
+        opener.open.return_value = Response(self.payload)
+        resolver = lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))]
+        result = RssCollector(self.source, opener=opener, resolver=resolver).fetch(self._state())
+        self.assertEqual(2, len(result.observations))
+        source = replace(self.source, max_response_bytes=1024)
+        opener.open.return_value = Response(b"<rss>" + b" " * 2000 + b"</rss>")
+        with self.assertRaisesRegex(FeedError, "decoded feed response"):
             RssCollector(source, opener=opener, resolver=resolver).fetch(self._state())
 
     def test_fallback_id_is_stable_when_date_is_missing(self) -> None:

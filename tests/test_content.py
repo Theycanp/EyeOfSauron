@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import gzip
 import sqlite3
 import tempfile
 import unittest
@@ -112,6 +113,15 @@ class ContentExtractionTests(unittest.TestCase):
         ).fetch(self._item(url="https://official.example/release.pdf"))
         self.assertEqual(ContentLevel.DOCUMENT, pdf.level)
         self.assertEqual("public_pdf", pdf.source_method)
+
+    def test_fetcher_decodes_bounded_gzip(self) -> None:
+        html = ("<article><h1>Official release</h1><p>" + "Public facts. " * 12 + "</p></article>").encode()
+        response = _Response(gzip.compress(html), "text/html; charset=utf-8", "https://official.example/release")
+        response.headers["Content-Encoding"] = "gzip"
+        opener = Mock()
+        opener.open.return_value = response
+        document = PublicDocumentFetcher(opener=opener, resolver=lambda *a, **k: PUBLIC_IP).fetch(self._item())
+        self.assertIn("Official release", document.body)
 
     @staticmethod
     def _item(

@@ -33,7 +33,7 @@ from .reminders import ReminderError, ReminderSpec, next_daily_occurrence
 from .source_quality import SourceQualityPolicy, calculate_quality
 from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
-from .prompts import PromptTemplate, TRIAGE_V1
+from .prompts import BUILTIN_PROMPTS, PromptTemplate, TRIAGE_V1
 
 SCHEMA_VERSION = 14
 
@@ -83,6 +83,13 @@ class Database:
                 self.connection.execute("PRAGMA foreign_keys=ON")
                 self.connection.execute("PRAGMA busy_timeout=5000")
                 self._migrate()
+                with self.connection:
+                    for prompt in BUILTIN_PROMPTS.values():
+                        self.connection.execute(
+                            "INSERT OR IGNORE INTO prompts(prompt_id, version, system_text, active, actor, created_at) "
+                            "VALUES (?, ?, ?, 1, 'system', ?)",
+                            (prompt.prompt_id, prompt.version, prompt.system_text, int(time.time())),
+                        )
             except Exception:
                 self.connection.close()
                 raise
@@ -1411,6 +1418,7 @@ class Database:
         now: int,
     ) -> None:
         identifiers = {source_id for source_id, _, _, _ in sources}
+        explicitly_disabled = {source_id for source_id, _, enabled, _ in sources if not enabled}
         with self.unit_of_work():
             if identifiers:
                 placeholders = ",".join("?" for _ in identifiers)
@@ -1455,6 +1463,45 @@ class Database:
                         now if source_id in active_source_ids else None,
                         now,
                     ),
+                )
+            for source_id in sorted(explicitly_disabled):
+                self.connection.execute(
+                    """
+                    UPDATE collector_state
+                    SET consecutive_failures = 0, outage_alerted = 0,
+                        outage_started_at = NULL, last_error = NULL,
+                        last_error_kind = NULL, last_http_status = NULL
+                    WHERE source_id = ?
+                    """,
+                    (source_id,),
+                )
+            open_source_incidents = list(self.connection.execute(
+                "SELECT id, incident_key, evidence_json FROM incidents "
+                "WHERE kind = 'stateful' AND status = 'open' "
+                "AND incident_key LIKE 'system:source:%'"
+            ))
+            for incident in open_source_incidents:
+                source_id = str(incident["incident_key"]).removeprefix("system:source:")
+                if source_id in identifiers and source_id not in explicitly_disabled:
+                    continue
+                try:
+                    evidence = list(json.loads(incident["evidence_json"]))
+                except (TypeError, ValueError):
+                    evidence = []
+                resolution = (
+                    "source disabled by configuration"
+                    if source_id in explicitly_disabled
+                    else "source removed from configuration"
+                )
+                if resolution not in evidence:
+                    evidence.append(resolution)
+                self.connection.execute(
+                    """
+                    UPDATE incidents
+                    SET status = 'recovered', recovered_at = ?, updated_at = ?, evidence_json = ?
+                    WHERE id = ?
+                    """,
+                    (now, now, json.dumps(evidence, ensure_ascii=False), int(incident["id"])),
                 )
 
     def mark_source_runtime(
@@ -1805,10 +1852,14 @@ class Database:
                 # historical article URLs from that initial batch.
                 if state.initialized and observation.content_fetch is not None:
                     self._enqueue_content_fetch(observation_id, observation.content_fetch, now)
-                if state.initialized:
+                if state.initialized or observation.attributes.get("live_state") is True:
                     for candidate in rules.evaluate(observation, now):
                         if self._insert_alert(candidate, observation_id, now):
                             queued += 1
+                            self.connection.execute(
+                                "UPDATE observations SET handling = 'immediate' WHERE id = ?",
+                                (observation_id,),
+                            )
 
             if state.outage_alerted:
                 outage_identity = state.outage_started_at or now
@@ -2848,6 +2899,76 @@ class Database:
             observations.append(item)
         return observations
 
+    def list_digest_observations(
+        self, since: int, until: int, *, source_ids: Sequence[str] | None = None,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        """Filter before limiting, with fair per-source sampling and alert history.
+
+        Alert creation time also admits delayed notifications about older news.
+        A rule-selected observation remains immediate even after reanalysis.
+        """
+        if since < 0 or until < since or not 1 <= limit <= 5000:
+            raise ValueError("digest candidate bounds are invalid")
+        clauses = ["(o.handling IN ('digest', 'immediate') OR a.observation_id IS NOT NULL)",
+                   "((o.published_at >= ? AND o.published_at < ?) OR a.in_period = 1)"]
+        params: list[Any] = [since, until, since, until]
+        if source_ids is not None:
+            if not source_ids:
+                return []
+            clauses.append(f"o.source_id IN ({','.join('?' for _ in source_ids)})")
+            params.extend(source_ids)
+        params.append(limit)
+        rows = self.connection.execute(
+            "WITH notified AS (SELECT observation_id, "
+            "MAX(CASE WHEN created_at >= ? AND created_at < ? THEN 1 ELSE 0 END) AS in_period "
+            "FROM alerts WHERE observation_id IS NOT NULL AND status != 'cancelled' "
+            "GROUP BY observation_id), candidates AS ("
+            "SELECT o.*, CASE WHEN a.observation_id IS NOT NULL THEN 'immediate' "
+            "ELSE o.handling END AS effective_handling, "
+            "ROW_NUMBER() OVER (PARTITION BY o.source_id ORDER BY "
+            "(a.observation_id IS NOT NULL) DESC, o.importance DESC, o.published_at DESC, o.id DESC) AS source_rank "
+            "FROM observations o LEFT JOIN notified a ON a.observation_id = o.id "
+            f"WHERE {' AND '.join(clauses)}) "
+            "SELECT * FROM candidates ORDER BY (effective_handling = 'immediate') DESC, "
+            "source_rank, importance DESC, published_at DESC, id DESC LIMIT ?", params,
+        )
+        result = []
+        for row in rows:
+            item = dict(row)
+            item['handling'] = item.pop('effective_handling')
+            item.pop('source_rank')
+            try:
+                attributes = json.loads(item.pop('attributes_json'))
+            except (TypeError, ValueError):
+                attributes = {}
+            item['attributes'] = attributes if isinstance(attributes, dict) else {}
+            result.append(item)
+        return result
+
+    def get_analysis_text(self, observation_id: int, *, max_chars: int) -> str:
+        """Read bounded, already acquired content; never fetch on model demand."""
+        row = self.connection.execute(
+            "SELECT substr(body, 1, ?) FROM content_documents WHERE observation_id = ? "
+            "AND level IN ('full_text', 'document') ORDER BY id DESC LIMIT 1",
+            (max_chars, observation_id),
+        ).fetchone()
+        return str(row[0]) if row else ""
+
+    def backfill_default_topics(self, topics: Mapping[str, str]) -> int:
+        """Repair legacy generic topics without replacing item-specific values."""
+        changed = 0
+        with self.unit_of_work():
+            for source_id, topic in topics.items():
+                if not source_id or not topic or topic == "general":
+                    continue
+                cursor = self.connection.execute(
+                    "UPDATE observations SET topic = ? WHERE source_id = ? AND topic = 'general'",
+                    (topic[:80], source_id),
+                )
+                changed += cursor.rowcount
+        return changed
+
     def claim_analysis_observations(
         self, now: int, *, limit: int, lease_seconds: int
     ) -> list[AnalysisWorkItem]:
@@ -3005,7 +3126,8 @@ class Database:
                 UPDATE observations
                 SET importance = ?, urgency = ?, relevance = ?, confidence = ?,
                     region = ?, topic = ?, source_tier = ?, information_type = ?,
-                    handling = ?, processing_state = ?, analysis_lease_token = NULL,
+                    handling = CASE WHEN handling = 'immediate' THEN handling ELSE ? END,
+                    processing_state = ?, analysis_lease_token = NULL,
                     analysis_lease_until = NULL, analysis_error = ?, analyzed_at = ?
                 WHERE id = ? AND processing_state = 'processing'
                   AND analysis_lease_token = ?

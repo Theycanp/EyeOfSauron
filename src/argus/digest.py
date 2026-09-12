@@ -6,12 +6,14 @@ Persistence implementations consume and return these immutable domain models.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import math
 import re
 import unicodedata
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 from urllib.parse import quote
@@ -19,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 from .config import DigestConfig
 from .reminders import next_daily_occurrence
+from .util import sanitize_error
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+|[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
@@ -124,6 +127,11 @@ class DigestDocument:
 class DigestInputRepository(Protocol):
     """Read port needed by the digest builder."""
 
+    def list_digest_observations(
+        self, since: int, until: int, *, source_ids: Sequence[str] | None = None,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]: ...
+
     def list_observations(
         self,
         since: int,
@@ -188,6 +196,16 @@ class DigestNotificationRepository(Protocol):
     ) -> bool: ...
 
 
+class DigestSummarizer(Protocol):
+    def summarize(self, digest: DigestDocument) -> str: ...
+
+
+@runtime_checkable
+class DigestAnalysisRepository(Protocol):
+    def reserve_analysis_api_call(self, budget_day: str, *, limit: int, now: int) -> bool: ...
+    def get_analysis_text(self, observation_id: int, *, max_chars: int) -> str: ...
+
+
 def _normalized_title(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).casefold()
     normalized = "".join(character if character.isalnum() else " " for character in normalized)
@@ -231,13 +249,13 @@ def _observation_score(
     region = str(item.get("region", "GLOBAL")).upper()
     regional_interest = _bounded_int(region_weights.get(region, region_weights.get("OTHER", 3)), 3)
     source_bonus = 0.35 if item.get("source_tier") == "primary" else 0.0
-    base = round(
+    base = (
         importance * 0.35
         + urgency * 0.15
         + relevance * 0.25
         + confidence * 0.5
         + regional_interest * 0.15
-        + source_bonus,
+        + source_bonus
     )
     quality = 1.0
     if source_quality_weights is not None:
@@ -353,8 +371,21 @@ def cluster_observations(
                 ),
             )
         )
-    clusters.sort(key=lambda item: (-item.score, -item.published_at, item.cluster_key))
-    return tuple(clusters[:max_items])
+    # Select immediate reports first, then reduce repeated-source dominance.
+    # This is a soft diversity penalty, not a quota that hides an urgent event.
+    selected: list[DigestCluster] = []
+    counts: dict[str, int] = {}
+    while clusters and len(selected) < max_items:
+        clusters.sort(key=lambda item: (
+            item.handling != "immediate",
+            -(item.score / (1 + 0.35 * min((counts.get(s, 0) for s in item.source_ids), default=0))),
+            -item.published_at, item.cluster_key,
+        ))
+        chosen = clusters.pop(0)
+        selected.append(chosen)
+        for source_id in chosen.source_ids:
+            counts[source_id] = counts.get(source_id, 0) + 1
+    return tuple(selected)
 
 
 def source_coverage_from_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[SourceCoverage, ...]:
@@ -413,10 +444,10 @@ class DigestBuilder:
         source_ids: Sequence[str] | None = None,
         title: str | None = None,
     ) -> DigestDocument:
-        observations = self.repository.list_observations(
+        observations = self.repository.list_digest_observations(
             period_start,
             period_end,
-            handling=None,
+            source_ids=source_ids,
             limit=self.observation_limit,
         )
         observations = [
@@ -493,6 +524,9 @@ class DigestScheduler:
         source_ids: Sequence[str] | None = None,
         region_weights: Mapping[str, int] | None = None,
         source_quality_weights: Mapping[str, float] | None = None,
+        summarizer: DigestSummarizer | None = None,
+        daily_api_budget: int = 2,
+        send_full_text: bool = False,
     ) -> None:
         if not isinstance(repository, DigestRepository) or not isinstance(
             repository, DigestNotificationRepository
@@ -501,7 +535,10 @@ class DigestScheduler:
         self.config = config
         self.repository = repository
         self.topic = topic
-        self.source_ids = tuple(source_ids or ())
+        self.source_ids = tuple(source_ids) if source_ids is not None else None
+        self.summarizer = summarizer
+        self.daily_api_budget = daily_api_budget
+        self.send_full_text = send_full_text
         self.builder = DigestBuilder(
             repository,
             region_weights=region_weights,
@@ -511,6 +548,44 @@ class DigestScheduler:
         )
 
     def process_once(self, now: int) -> DigestDocument | None:
+        if self.summarizer is not None:
+            raise RuntimeError("model-assisted digests require process_once_async")
+        document = self._prepare(now)
+        return self._publish(document, now) if document else None
+
+    async def process_once_async(self, now: int) -> DigestDocument | None:
+        document = self._prepare(now)
+        if document is None:
+            return None
+        if document.status != "published" and document.items and self.summarizer is not None:
+            repository = self.repository
+            if not isinstance(repository, DigestAnalysisRepository):
+                raise TypeError("digest API requires budget and content repository ports")
+            day = datetime.fromtimestamp(now, UTC).date().isoformat()
+            if repository.reserve_analysis_api_call(day, limit=self.daily_api_budget, now=now):
+                evidence = document
+                if self.send_full_text:
+                    evidence = replace(document, items=tuple(
+                        replace(item, summary=(repository.get_analysis_text(
+                            item.observation_ids[0], max_chars=4000,
+                        ) or item.summary)) if item.observation_ids else item
+                        for item in document.items
+                    ))
+                try:
+                    # Only inference crosses threads. Every repository operation
+                    # stays on the connection owner's event-loop thread.
+                    summary = await asyncio.to_thread(self.summarizer.summarize, evidence)
+                    document = with_api_summary(document, summary, created_at=now)
+                except Exception as exc:
+                    logging.getLogger("argus.digest").warning(
+                        "digest_api_fallback error=%s", sanitize_error(exc),
+                    )
+                    document = replace(document, summary=document.summary + " API 总结失败，已使用算法摘要。")
+            else:
+                document = replace(document, summary=document.summary + " API 当日调用预算已用完，使用算法摘要。")
+        return self._publish(document, now)
+
+    def _prepare(self, now: int) -> DigestDocument | None:
         if not self.config.enabled:
             return None
         scheduled_at = self._latest_occurrence(now)
@@ -532,7 +607,7 @@ class DigestScheduler:
                 for row in quality_rows
                 if isinstance(row, Mapping) and row.get("source_id")
             }
-            draft = self.builder.build_and_save(
+            return self.builder.build(
                 digest_key=digest_key,
                 period_start=previous_at,
                 period_end=scheduled_at,
@@ -541,10 +616,16 @@ class DigestScheduler:
                 source_ids=self.source_ids,
                 title=f"EyeOfSauron 每日情报摘要 · {local_date.isoformat()}",
             )
-            published = self.repository.publish_digest(digest_key, draft.version, now)
+        return published
+
+    def _publish(self, document: DigestDocument, now: int) -> DigestDocument:
+        published = document
+        if document.status != "published":
+            saved = self.repository.save_digest(document)
+            published = self.repository.publish_digest(saved.digest_key, saved.version, now)
         if self.config.notify:
             click_url = (
-                f"{self.config.public_base_url}/digests/{quote(digest_key, safe='')}"
+                f"{self.config.public_base_url}/digests/{quote(published.digest_key, safe='')}"
             )
             self.repository.enqueue_digest_notification(
                 published, topic=self.topic, click_url=click_url, now=now

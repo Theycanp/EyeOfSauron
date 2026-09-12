@@ -113,7 +113,7 @@ class AnalysisOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         api = _Analyzer("api", {})
         config = AnalysisConfig(
             enabled=True,
-            api_enabled=True,
+            api_enabled=True, api_triage_enabled=True,
             api_base_url="https://api.example.test/v1",
             api_model="small",
             api_key_env="API_TOKEN",
@@ -137,7 +137,7 @@ class AnalysisOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         }
         config = AnalysisConfig(
             enabled=True,
-            api_enabled=True,
+            api_enabled=True, api_triage_enabled=True,
             api_base_url="https://api.example.test/v1",
             api_model="small",
             api_key_env="API_TOKEN",

@@ -319,7 +319,10 @@ class ControlPlaneHTTPTests(unittest.TestCase):
     def test_prompt_catalog_is_authenticated_and_versioned(self) -> None:
         status, payload = self.request("/api/prompts")
         self.assertEqual(200, status)
-        self.assertEqual("triage", payload["prompts"][0]["prompt_id"])
+        self.assertEqual(
+            {("digest", 1), ("triage", 1)},
+            {(item["prompt_id"], item["version"]) for item in payload["prompts"]},
+        )
         status, payload = self.request(
             "/api/prompts",
             {"prompt_id": "triage", "version": 2, "system_text": "Return JSON only."},

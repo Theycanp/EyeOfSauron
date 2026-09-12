@@ -12,6 +12,7 @@ from argus.config import load_config, parse_source_config
 from argus.database import Database
 from argus.models import SourceState
 from argus.news_rollout import plan_official_news
+from argus.runtime_rollout import plan_runtime_audit
 
 
 def main() -> None:
@@ -19,6 +20,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--expect-revision", type=int, required=True)
+    parser.add_argument("--runtime-audit", action="store_true", help="apply the reviewed v0.15 runtime fixes")
     args = parser.parse_args()
     base = load_config(args.config, include_managed=False)
     if base.service.managed_sources_path is None:
@@ -30,7 +32,8 @@ def main() -> None:
         if revision != args.expect_revision:
             parser.error(f"configuration changed: expected {args.expect_revision}, found {revision}")
         current = active["payload"] if active else {}
-        planned, additions = plan_official_news(current, base.sources)
+        planned, additions = (plan_runtime_audit(current) if args.runtime_audit
+                              else plan_official_news(current, base.sources))
         config = load_config(args.config, managed_override=planned)
         print(json.dumps({"revision": revision, "additions": [item["id"] for item in additions],
                           "enabled_after": sum(s.enabled for s in config.sources)}, ensure_ascii=False), flush=True)
@@ -40,13 +43,14 @@ def main() -> None:
             state = SourceState(source.id, False, None, None, None, None, 0, False, None)
             result = build_collector(source).fetch(state)
             return {"source": source.id, "items": len(result.observations),
-                    "newest": max(item.published_at for item in result.observations).isoformat()}
+                    "newest": max((item.published_at for item in result.observations), default=None),
+                    "warnings": result.warnings}
 
         # Every addition must fetch and parse successfully before any write.
         with ThreadPoolExecutor(max_workers=4) as pool:
             for result in pool.map(probe, additions):
-                print(json.dumps(result, ensure_ascii=False), flush=True)
-        if not args.apply or not additions:
+                print(json.dumps(result, ensure_ascii=False, default=str), flush=True)
+        if not args.apply or planned == current:
             print("preview passed; no configuration changes")
             return
         store = ManagedConfigStore(
@@ -54,8 +58,15 @@ def main() -> None:
             {source.id for source in base.sources}, {rule.id for rule in base.rules}, database,
         )
         revision = store.write(planned, actor="operations:news-rollout",
-                               reason="activate user-requested CN/JP/US/international official sources",
+                               reason=("runtime audit: host monitoring, API digest, official sources and JMA correction"
+                                       if args.runtime_audit else "activate user-requested CN/JP/US/international official sources"),
                                expected_revision=args.expect_revision)
+        if args.runtime_audit:
+            repaired = database.backfill_default_topics({
+                source.id: str(source.settings.get("topic", "general"))
+                for source in config.sources
+            })
+            print(f"repaired default topics on {repaired} existing observations")
         print(f"activated configuration revision {revision}; verify daemon acknowledgement and source baselines")
     finally:
         database.close()

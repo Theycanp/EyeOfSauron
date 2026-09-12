@@ -120,10 +120,20 @@ polishing creates another draft; it cannot mutate or erase the algorithmic
 version. Digest items retain their observation IDs, source IDs, and links so a
 reader can inspect the evidence behind a summary.
 
+The API digest stage runs only after deterministic selection and receives every
+selected item within a distributed input budget. Its JSON output must cite valid
+item numbers; invalid output, timeout, rate limiting, or exhausted daily budget
+publishes the algorithmic draft instead. Per-observation API triage is a separate
+switch and is off by default, so it cannot silently consume the digest budget.
+
 Source coverage is captured with every digest and is distinct from item count.
 `covered` means the source produced observations, while `quiet` means polling
 succeeded but produced none. `degraded`, `stale`, `disabled`, and `unknown`
 remain explicit so an apparently quiet day cannot conceal a collector outage.
+Candidate filtering happens in the repository before the row limit, and ranking
+uses a soft repeated-source penalty so a high-volume weather feed cannot crowd
+all other sectors out. Rule-notified observations retain `immediate` handling and
+are included even when their source publication timestamp predates delivery.
 
 `DigestScheduler` owns wall-clock scheduling and depends on digest input,
 versioned storage, and notification repository ports. It resolves consecutive
@@ -199,7 +209,9 @@ references, URL policy, a side-effect-free connection-test strategy, and runtime
 support. Configuration loading and collector construction accept an extended
 registry, so a new provider can be composed without adding another core dispatch
 branch. The reviewed news source catalog is separate from runtime configuration:
-its templates are always disabled by default and require explicit confirmation.
+it is inert until an administrator explicitly selects a feed and saves the
+generated draft. Public feeds selected this way default to enabled; providers
+that require credentials remain disabled until credentials and stable IDs exist.
 See `docs/PROVIDERS.md` for the extension contract and catalog policy.
 
 `kind = "host"` is an opt-in low-frequency local probe for disk/inode,

@@ -43,7 +43,7 @@ class AnalyzerSettings:
 
     def __post_init__(self) -> None:
         parsed = urlsplit(self.base_url)
-        if parsed.username or parsed.password or not parsed.hostname:
+        if parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.hostname:
             raise ValueError("analyzer base URL must not contain credentials")
         if parsed.scheme not in {"https", "http"}:
             raise ValueError("analyzer base URL must use HTTP(S)")
@@ -73,6 +73,7 @@ def _observation_text(observation: Observation, limit: int) -> str:
         "source_tier": observation.source_tier,
         "information_type": observation.information_type,
         "url": observation.url,
+        "body": observation.attributes.get("analysis_text", ""),
     }
     # Article text is untrusted input. Delimit it clearly so it cannot masquerade
     # as instructions to the analyzer.
@@ -132,6 +133,11 @@ class OpenAICompatibleAnalyzer:
             raise ValueError("analyzer credential environment variable is invalid")
 
     def analyze(self, observation: Observation) -> Mapping[str, Any]:
+        content = self.complete(_observation_text(observation, self.settings.max_input_chars))
+        return _parse_advisory(content.encode("utf-8"), self.settings.max_response_bytes)
+
+    def complete(self, user_text: str) -> str:
+        """Bounded transport shared by triage and daily summary adapters."""
         endpoint = self.settings.base_url.rstrip("/") + "/chat/completions"
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.api_key_env:
@@ -143,7 +149,7 @@ class OpenAICompatibleAnalyzer:
             "model": self.settings.model,
             "messages": [
                 {"role": "system", "content": (self.prompt or get_prompt(self.settings.prompt_id, self.settings.prompt_version)).system_text},
-                {"role": "user", "content": _observation_text(observation, self.settings.max_input_chars)},
+                {"role": "user", "content": user_text},
             ],
             "temperature": 0,
             "max_tokens": self.settings.max_tokens,
@@ -154,6 +160,8 @@ class OpenAICompatibleAnalyzer:
                 raw = response.read(self.settings.max_response_bytes + 1)
         except (OSError, urllib.error.URLError, TimeoutError) as exc:
             raise AnalyzerError(f"analyzer request failed: {type(exc).__name__}") from exc
+        if len(raw) > self.settings.max_response_bytes:
+            raise AnalyzerError("analyzer response exceeded the configured limit")
         try:
             envelope = json.loads(raw.decode("utf-8"))
             content = envelope["choices"][0]["message"]["content"]
@@ -161,7 +169,7 @@ class OpenAICompatibleAnalyzer:
             raise AnalyzerError("analyzer response has an invalid completion shape") from exc
         if not isinstance(content, str):
             raise AnalyzerError("analyzer completion is not text")
-        return _parse_advisory(content.encode("utf-8"), self.settings.max_response_bytes)
+        return content
 
 
 class LocalModelAnalyzer(OpenAICompatibleAnalyzer):

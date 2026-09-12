@@ -1,6 +1,7 @@
 """Dated official announcement indexes using the same bounded transport as RSS."""
 from __future__ import annotations
 
+import json
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -21,6 +22,7 @@ class _AnnouncementLinks(HTMLParser):
         self.date = ""
         self.in_time = False
         self.ignored = 0
+        self.group_date = ""
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in {"script", "style"}:
@@ -31,6 +33,11 @@ class _AnnouncementLinks(HTMLParser):
             self.anchor = dict(attrs)
             self.parts = []
             self.date = ""
+            marker = re.fullmatch(r"a(20\d{2})(\d{2})(\d{2})", self.anchor.get("name") or "")
+            if marker:
+                self.group_date = "-".join(marker.groups())
+            if "information-item-inner" in (self.anchor.get("class") or "").split():
+                self.date = self.group_date
         if tag == "time" and self.anchor is not None:
             self.date = dict(attrs).get("datetime") or ""
             self.in_time = True
@@ -70,7 +77,7 @@ class OfficialListCollector(RssCollector):
     No scripts, pagination or linked pages execute here. Public text enrichment
     remains in the independent content queue; an empty index is an error.
     """
-    content_types = frozenset({"text/html", "application/xhtml+xml"})
+    content_types = frozenset({"text/html", "application/xhtml+xml", "application/json"})
 
     def parse_payload(self, payload: bytes) -> tuple[Observation, ...]:
         if len(payload) > self.config.max_response_bytes:
@@ -79,15 +86,27 @@ class OfficialListCollector(RssCollector):
             text = payload.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
             raise FeedError("official index must use UTF-8") from exc
-        parser = _AnnouncementLinks()
-        parser.feed(text)
-        parser.close()
+        if self.config.settings.get("index_format") == "govcn_json":
+            try:
+                rows = json.loads(text)
+                if not isinstance(rows, list):
+                    raise ValueError("index is not a list")
+                links = [(row['URL'], row['TITLE'], row['DOCRELPUBTIME']) for row in rows]
+                if any(not all(isinstance(value, str) for value in row) for row in links):
+                    raise ValueError("index fields are not text")
+            except (ValueError, KeyError, TypeError) as exc:
+                raise FeedError("official JSON index has an invalid shape") from exc
+        else:
+            parser = _AnnouncementLinks()
+            parser.feed(text)
+            parser.close()
+            links = parser.links
         root = ET.Element("rss")
         channel = ET.SubElement(root, "channel")
         seen: set[str] = set()
         prefixes = self.config.settings.get("article_url_prefixes", [])
         timezone = str(self.config.settings.get("timezone", "UTC"))
-        for href, title, date in parser.links:
+        for href, title, date in links:
             link = _safe_link(urljoin(str(self.config.url), href), self.config.allowed_hosts)
             if not link or link in seen or len(title.strip()) < 6:
                 continue

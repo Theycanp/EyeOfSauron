@@ -152,6 +152,25 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(notifier.sent))
         self.assertEqual("eos", notifier.sent[0].topic)
 
+    async def test_poll_attaches_configured_information_metadata(self) -> None:
+        self.source = replace(
+            self.source,
+            region="JP",
+            source_tier="primary",
+            default_importance=4,
+            settings={**self.source.settings, "topic": "policy"},
+        )
+        self.config = replace(self.config, sources=(self.source,))
+        item = observation("metadata", "Official policy update", timestamp=int(time.time()))
+        service = self._service(_Collector(FeedFetchResult((item,), None, None)), _Notifier())
+        self.assertTrue(await service.poll_source_once(self.source.id))
+        rows = self.database.list_observations(0, int(time.time()) + 1)
+        self.assertEqual(1, len(rows))
+        self.assertEqual("JP", rows[0]["region"])
+        self.assertEqual("primary", rows[0]["source_tier"])
+        self.assertEqual("policy", rows[0]["topic"])
+        self.assertEqual(4, rows[0]["importance"])
+
     async def test_notification_failure_returns_alert_to_pending(self) -> None:
         self.database.enqueue_test_alert("eos", int(time.time()))
         service = self._service(_Collector(FeedFetchResult((), None, None)), _Notifier(fail=True))
@@ -228,7 +247,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         service = self._service(_Collector(FeedFetchResult((), None, None)), _Notifier())
 
         class Scheduler:
-            def process_once(self, now: int):  # type: ignore[no-untyped-def]
+            async def process_once_async(self, now: int):  # type: ignore[no-untyped-def]
                 self.thread_id = threading.get_ident()
                 service.request_stop()
                 return None

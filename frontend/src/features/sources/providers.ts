@@ -1,4 +1,4 @@
-import { AtSign, Mail, Rss, TrendingUp, Video, type LucideIcon } from 'lucide-react'
+import { AtSign, Mail, Rss, Server, TrendingUp, Video, type LucideIcon } from 'lucide-react'
 import type { JsonRecord, ManagedRule, ManagedSource, NewsCatalogEntry, NewsCatalogFeed, SourceKind } from '../../shared/types'
 import { browserZone, escapeRegex, splitWords } from '../../shared/utils'
 
@@ -13,6 +13,7 @@ export interface ProviderDefinition {
 }
 
 export const providerRegistry: Record<SourceKind, ProviderDefinition> = {
+  host: { kind: 'host', label: '主机健康', description: '磁盘、内存、负载和关键服务', defaultSection: 'Host', targetLabel: '检查路径', targetHint: '以服务账户只读检查；未知状态不会当作恢复。', icon: Server },
   official_list: { kind: 'official_list', label: '官方公告', description: '没有 RSS 的政府及公共机构公告', defaultSection: 'Policy', targetLabel: '官方公告列表地址', targetHint: '只提取指定目录下带日期的公告链接；网站改版或列表为空会报告异常。', icon: Rss },
   rss: { kind: 'rss', label: 'RSS / Atom', description: '新闻网站、博客和公告', defaultSection: 'News', targetLabel: '官方 RSS / Atom 地址', targetHint: '只接受 HTTPS；付费墙来源只保存标题、摘要和链接。', icon: Rss },
   youtube: { kind: 'youtube', label: 'YouTube', description: '频道发布新视频时提醒', defaultSection: 'Videos', targetLabel: 'YouTube 频道 ID', targetHint: '使用 UC 开头的稳定频道 ID，不使用显示名或 @handle。', icon: Video },
@@ -59,6 +60,12 @@ export interface SourceDraft {
   passwordEnv: string
   search: string
   timezone: string
+  hostPaths: string
+  hostUnits: string
+  hostDisk: number
+  hostInode: number
+  hostMemory: number
+  hostLoad: number
 }
 
 function generatedId(): string {
@@ -73,7 +80,7 @@ export function createSourceDraft(kind: SourceKind | null, entryMode: SourceEntr
     id: generatedId(),
     publisher: '',
     section: kind ? providerRegistry[kind].defaultSection : '',
-    enabled: false,
+    enabled: kind !== 'x' && kind !== 'market' && kind !== 'imap',
     target: '',
     maxContentAgeSeconds: 0,
     contentPolicy: 'feed_metadata_and_original_link_only',
@@ -98,6 +105,7 @@ export function createSourceDraft(kind: SourceKind | null, entryMode: SourceEntr
     passwordEnv: 'IMAP_PASSWORD',
     search: 'ALL',
     timezone: browserZone,
+    hostPaths: '/', hostUnits: '', hostDisk: 90, hostInode: 90, hostMemory: 90, hostLoad: 8,
   }
 }
 
@@ -127,6 +135,14 @@ export function editSourceDraft(source: ManagedSource, rule: ManagedRule | null)
   draft.originalSource = structuredClone(source)
   draft.originalRule = rule ? structuredClone(rule) : null
   draft.notificationMode = 'preserve'
+  if (source.kind === 'host') {
+    draft.hostPaths = Array.isArray(settings.paths) ? settings.paths.map(String).join('\n') : '/'
+    draft.hostUnits = Array.isArray(settings.units) ? settings.units.map(String).join('\n') : ''
+    draft.hostDisk = settingNumber(settings, 'disk_used_percent', 90)
+    draft.hostInode = settingNumber(settings, 'inode_used_percent', 90)
+    draft.hostMemory = settingNumber(settings, 'memory_used_percent', 90)
+    draft.hostLoad = settingNumber(settings, 'load1', 8)
+  }
   if (source.kind === 'rss' || source.kind === 'official_list') {
     draft.target = source.url || ''
     draft.maxContentAgeSeconds = settingNumber(settings, 'max_content_age_seconds', 0)
@@ -206,6 +222,13 @@ export function serializeSource(draft: SourceDraft): ManagedSource {
       settings.timezone = draft.sourceTimezone
       source.allowed_hosts = [...new Set([...(source.allowed_hosts || []), ...splitWords(draft.articleUrlPrefixes).map((value) => new URL(value).hostname)])]
     }
+  } else if (draft.kind === 'host') {
+    settings.paths = splitWords(draft.hostPaths)
+    settings.units = splitWords(draft.hostUnits)
+    settings.disk_used_percent = Number(draft.hostDisk)
+    settings.inode_used_percent = Number(draft.hostInode)
+    settings.memory_used_percent = Number(draft.hostMemory)
+    settings.load1 = Number(draft.hostLoad)
   } else if (draft.kind === 'youtube') {
     settings.channel_id = target
   } else if (draft.kind === 'x') {
@@ -293,7 +316,7 @@ export function catalogSourceDraft(entry: NewsCatalogEntry, feed: NewsCatalogFee
     dedupe_scope: entry.id,
     url: feed.url,
     allowed_hosts: [...feed.allowed_hosts],
-    enabled: false,
+    enabled: true,
     poll_interval_seconds: entry.id === 'sec' ? 600 : 300,
     request_timeout_seconds: 20,
     request_attempts: 3,
@@ -308,8 +331,10 @@ export function catalogSourceDraft(entry: NewsCatalogEntry, feed: NewsCatalogFee
       max_content_age_seconds: feed.max_content_age_seconds ?? 0,
       content_policy: entry.content_policy,
       topic: entry.topic || 'general',
+      ...(entry.id === 'japan_meteorological_agency' ? { headline_from_summary: true } : {}),
       ...(entry.source_kind === 'official_list' ? {
         article_url_prefixes: feed.article_url_prefixes || [],
+        index_format: feed.index_format || 'html',
         timezone: entry.region === 'JP' ? 'Asia/Tokyo' : 'Asia/Shanghai',
       } : {}),
     },
@@ -328,7 +353,7 @@ export function catalogSourceDraft(entry: NewsCatalogEntry, feed: NewsCatalogFee
       : entry.content_policy === 'feed_full_text_allowed'
         ? 'feed_full_text_allowed'
         : 'feed_metadata_and_original_link_only',
-    enabled: false,
+    enabled: true,
     templateSource: template,
   }
 }

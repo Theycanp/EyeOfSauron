@@ -119,6 +119,19 @@ Remote endpoints require HTTPS. The default `shadow_mode = true` records model
 advice without changing the deterministic result; disable shadow mode only
 after reviewing model behavior and false positives.
 
+`analysis.api_enabled` supplies the remote adapter used by the daily summary;
+`digest.api_summary` controls that low-frequency stage. Keep
+`analysis.api_triage_enabled = false` unless individual-item advisory calls are
+worth sharing the daily call budget. API failures are logged without response
+secrets and fall back to the on-time algorithmic digest. `send_full_text` uses
+only content already retained under its source rights policy; it never triggers
+an extra crawl or bypasses a paywall.
+
+The runtime-audit rollout is previewed with `activate_news_sources.py` plus
+`--runtime-audit`; add `--apply` only after every new source probe succeeds. It
+also installs the local host check, repairs legacy `general` topics from source
+metadata, and keeps the local-model, heartbeat and hardware adapters disabled.
+
 The browser UI is compiled from `frontend/` with Node/Vite. Node and npm are
 not required on the production host: the running service serves the compiled
 files from `src/argus/admin_web/`. Keep the admin listener loopback-only.
