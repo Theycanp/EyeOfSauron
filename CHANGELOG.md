@@ -5,6 +5,14 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-09-12
+
+### Fixed
+
+- Distinguish the model output limit `max_tokens` from credential-bearing
+  fields while applying the same exact secret-field policy to writes and API
+  response redaction.
+
 ## [0.15.0] - 2026-09-12
 
 ### Added
@@ -236,7 +244,8 @@ Semantic Versioning and the Keep a Changelog structure.
 - Initial Bloomberg RSS monitoring, weighted alert rules, SQLite outbox, ntfy
   delivery, failure/recovery notifications, and baseline suppression.
 
-[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.12.0...v0.13.0
