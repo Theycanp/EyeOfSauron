@@ -15,8 +15,8 @@ from argus.adapters import build_collector
 from argus.admin import AdminError, ManagedConfigStore, make_handler
 from argus.database import Database
 from argus.market import MarketCollector
-from argus.host import HostHealthCollector
-from unittest.mock import patch
+from argus.host import HostHealthCollector, _unit_health
+from unittest.mock import Mock, patch
 from argus.models import SourceState
 from argus.mqtt import CommandPolicy, CommandRequest, MqttError, SensorNormalizer
 
@@ -253,6 +253,14 @@ class ExtensionTests(unittest.TestCase):
         titles = {item.title for item in result.observations}
         self.assertTrue(any("8080" in title for title in titles))
         self.assertTrue(any("443" in title for title in titles))
+
+    def test_host_probe_children_do_not_inherit_systemd_notify_socket(self) -> None:
+        with patch.dict("os.environ", {"NOTIFY_SOCKET": "@argus-test"}, clear=False), \
+                patch("argus.host.subprocess.run") as run:
+            run.return_value = Mock(returncode=0)
+            self.assertEqual({"demo.service": "healthy"}, _unit_health(["demo.service"]))
+        child_environment = run.call_args.kwargs["env"]
+        self.assertNotIn("NOTIFY_SOCKET", child_environment)
 
     def test_disabled_source_factory_returns_none(self) -> None:
         config = load_config(PROJECT_ROOT / "config" / "argus.example.toml")
