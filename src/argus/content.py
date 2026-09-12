@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urljoin, urlsplit
 
+from .util import decode_http_content
+
 
 MAX_DOCUMENT_CHARACTERS = 200_000
 _METHOD_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -27,6 +29,12 @@ _BLOCK_TAGS = frozenset({
     "main", "p", "pre", "section", "table", "td", "th", "tr",
 })
 _SKIP_TAGS = frozenset({"aside", "canvas", "form", "nav", "noscript", "script", "style", "svg"})
+_UNSUPPORTED_DOCUMENT_SUFFIXES = frozenset({
+    ".7z", ".avi", ".bmp", ".csv", ".doc", ".docm", ".docx", ".gif", ".jpeg", ".jpg",
+    ".mov", ".mp3", ".mp4", ".ods", ".odt", ".png", ".ppt", ".pptm", ".pptx",
+    ".rar", ".tar", ".tif", ".tiff", ".wav", ".webp", ".xls", ".xlsb", ".xlsm",
+    ".xlsx", ".xml.gz", ".zip",
+})
 
 
 class ContentLevel(StrEnum):
@@ -124,6 +132,12 @@ def parse_content_policy(value: object) -> ContentPolicy:
         return ContentPolicy(str(value or ContentPolicy.FEED_METADATA_ONLY))
     except ValueError as exc:
         raise ValueError("content policy is invalid") from exc
+
+
+def supports_public_document_fetch(url: str) -> bool:
+    """Reject links that the bounded text/PDF extractor cannot consume."""
+    path = urlsplit(url).path.casefold().rstrip("/")
+    return not any(path.endswith(suffix) for suffix in _UNSUPPORTED_DOCUMENT_SUFFIXES)
 
 
 def plain_text(value: str, *, limit: int = MAX_DOCUMENT_CHARACTERS) -> str:
@@ -374,6 +388,15 @@ class PublicDocumentFetcher:
                     retryable=False,
                     kind="size_limit",
                 )
+            try:
+                payload = decode_http_content(
+                    payload, response.headers.get("Content-Encoding", ""),
+                    request_spec.max_response_bytes,
+                )
+            except ValueError as exc:
+                raise ContentFetchError(
+                    str(exc), retryable=False, kind="content_encoding",
+                ) from exc
             charset = response.headers.get_content_charset()
 
         if media_type == "application/pdf":

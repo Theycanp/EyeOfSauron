@@ -70,8 +70,10 @@ credential destination.
 ## News source catalog
 
 `news_catalog.py` is a reviewed catalog of source templates, verified on
-2026-09-05. It is deliberately not an enablement list. Every entry is disabled
-by default and requires explicit confirmation before it may be enabled.
+2026-09-05. It is deliberately not an enablement list. Nothing is collected
+until an administrator selects a feed, reviews the generated draft, and saves
+it. Selected public feeds default to enabled; credential-bound providers remain
+disabled until credentials and stable target identifiers are configured.
 Templates store feed metadata and the original article link only; they do not
 fetch article pages or circumvent publisher access controls.
 
@@ -118,8 +120,17 @@ dated article links beneath `settings.article_url_prefixes` are retained; date-o
 values use `settings.timezone`. Script content, pagination and arbitrary links are
 not followed. An empty index fails visibly so a redesign cannot appear healthy.
 Current templates assume UTF-8 and TRS-style dated URLs or a nested HTML `time`;
-other layouts need a tested adapter change. Content enrichment remains independent.
+the State Council's documented page payload uses the dedicated bounded JSON
+index mode, while Japanese MOF groups links beneath dated anchors. Other layouts
+need a tested adapter change. Content enrichment remains independent.
 RSS 1.0/RDF is also accepted for ministries that publish that format.
+
+RSS transport accepts identity or gzip encoding and applies the configured size
+limit to both compressed and decoded content. This is required by the UN Chinese
+feed's CDN and prevents a compressed response from becoming an unbounded input.
+JMA's feed title is a bulletin category, so that source explicitly promotes the
+entry content to the headline before rule evaluation; the category label alone
+must never trigger a severe-weather alert.
 
 Catalog entries are templates, not live configuration. The requested September
 2026 regional rollout is selected in `argus.news_rollout`; use

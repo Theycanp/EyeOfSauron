@@ -34,6 +34,8 @@ LOGGER = logging.getLogger("argus.analysis")
 class AnalysisRepository(Protocol):
     """Persistence operations required by the analysis application service."""
 
+    def get_analysis_text(self, observation_id: int, *, max_chars: int) -> str: ...
+
     def claim_analysis_observations(
         self, now: int, *, limit: int, lease_seconds: int
     ) -> list[AnalysisWorkItem]: ...
@@ -157,11 +159,19 @@ class AnalysisOrchestrator:
             )
         ]
         successful_advisory: dict[str, object] | None = None
+        model_observation = item.observation
+        if self.config.send_full_text and (self.config.local_enabled or self.config.api_triage_enabled):
+            body = self.repository.get_analysis_text(
+                item.observation_id, max_chars=self.config.max_input_chars,
+            )
+            model_observation = replace(item.observation, attributes={
+                **item.observation.attributes, "analysis_text": body,
+            })
 
         if self.config.local_enabled:
             assert self.local_analyzer is not None
             advisory, attempt = await self._call(
-                self.local_analyzer, item.observation, shadow=self.config.shadow_mode
+                self.local_analyzer, model_observation, shadow=self.config.shadow_mode
             )
             attempts.append(attempt)
             if advisory is not None:
@@ -169,6 +179,7 @@ class AnalysisOrchestrator:
 
         if (
             self.config.api_enabled
+            and self.config.api_triage_enabled
             and _remote_candidate(baseline)
             and 0 <= now - item.fetched_at <= 86400
         ):
@@ -178,7 +189,7 @@ class AnalysisOrchestrator:
             ):
                 assert self.api_analyzer is not None
                 advisory, attempt = await self._call(
-                    self.api_analyzer, item.observation, shadow=self.config.shadow_mode
+                    self.api_analyzer, model_observation, shadow=self.config.shadow_mode
                 )
                 attempts.append(attempt)
                 if advisory is not None:
@@ -211,9 +222,13 @@ class AnalysisOrchestrator:
         if not self.config.enabled:
             return 0
         claimed_at = now_epoch() if now is None else now
+        # A lease must cover every sequential model request in this batch.
+        calls_per_item = int(self.config.local_enabled) + int(self.config.api_enabled and self.config.api_triage_enabled)
+        safe_limit = (max(1, (self.lease_seconds - 10) // (self.config.timeout_seconds * calls_per_item))
+                      if calls_per_item else self.config.max_items_per_run)
         items = self.repository.claim_analysis_observations(
             claimed_at,
-            limit=self.config.max_items_per_run,
+            limit=min(self.config.max_items_per_run, safe_limit),
             lease_seconds=self.lease_seconds,
         )
         for item in items:

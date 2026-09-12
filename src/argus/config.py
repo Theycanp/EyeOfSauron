@@ -106,6 +106,7 @@ class AnalysisConfig:
     local_base_url: str = "http://127.0.0.1:11434/v1"
     local_model: str = ""
     api_enabled: bool = False
+    api_triage_enabled: bool = False
     shadow_mode: bool = True
     api_base_url: str = ""
     api_model: str = ""
@@ -135,6 +136,9 @@ class DigestConfig:
     observation_limit: int = 5000
     notify: bool = True
     public_base_url: str = ""
+    api_summary: bool = True
+    prompt_id: str = "digest"
+    prompt_version: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,10 +431,10 @@ def _parse_analysis(raw: Any) -> AnalysisConfig:
         "api_base_url", "api_model", "api_key_env", "prompt_id", "prompt_version",
         "timeout_seconds", "max_input_chars", "max_response_bytes", "max_tokens",
         "max_items_per_run", "daily_api_budget", "send_full_text", "region_weights",
-        "shadow_mode",
+        "shadow_mode", "api_triage_enabled",
     }
     _reject_unknown(data, allowed, "analysis")
-    booleans = ("enabled", "local_enabled", "api_enabled", "send_full_text", "shadow_mode")
+    booleans = ("enabled", "local_enabled", "api_enabled", "api_triage_enabled", "send_full_text", "shadow_mode")
     values = {key: data.get(key, key == "shadow_mode") for key in booleans}
     for key, value in values.items():
         if not isinstance(value, bool):
@@ -445,6 +449,10 @@ def _parse_analysis(raw: Any) -> AnalysisConfig:
                        ("api_key_env", api_key_env)):
         if not isinstance(value, str) or len(value) > 256:
             raise ConfigError(f"analysis.{key} is invalid")
+    for endpoint in (local_base_url, api_base_url):
+        parsed_endpoint = urlsplit(endpoint)
+        if parsed_endpoint.username or parsed_endpoint.password or parsed_endpoint.query or parsed_endpoint.fragment:
+            raise ConfigError("analysis endpoint cannot include credentials, query or fragment")
     if values["local_enabled"]:
         parsed = urlsplit(local_base_url)
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
@@ -498,11 +506,18 @@ def _parse_digest(raw: Any) -> DigestConfig:
     data = _mapping(raw, "digest")
     _reject_unknown(
         data,
-        {"enabled", "timezone", "daily_time", "item_limit", "observation_limit", "notify", "public_base_url"},
+        {"enabled", "timezone", "daily_time", "item_limit", "observation_limit", "notify", "public_base_url",
+         "api_summary", "prompt_id", "prompt_version"},
         "digest",
     )
     enabled = data.get("enabled", False)
     notify = data.get("notify", True)
+    api_summary = data.get("api_summary", True)
+    if not isinstance(api_summary, bool):
+        raise ConfigError("digest.api_summary must be bool")
+    prompt_id = data.get("prompt_id", "digest")
+    if not isinstance(prompt_id, str) or not _ID_RE.fullmatch(prompt_id):
+        raise ConfigError("digest.prompt_id is invalid")
     if not isinstance(enabled, bool) or not isinstance(notify, bool):
         raise ConfigError("digest.enabled and digest.notify must be bool")
     timezone = data.get("timezone", "Asia/Shanghai")
@@ -531,6 +546,9 @@ def _parse_digest(raw: Any) -> DigestConfig:
         observation_limit=_bounded_int({"observation_limit": data.get("observation_limit", 5000)}, "observation_limit", "digest", 1, 5000),
         notify=notify,
         public_base_url=public_base_url,
+        api_summary=api_summary,
+        prompt_id=prompt_id,
+        prompt_version=_bounded_int({"prompt_version": data.get("prompt_version", 1)}, "prompt_version", "digest", 1, 10000),
     )
 
 

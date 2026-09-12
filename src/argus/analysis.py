@@ -105,7 +105,7 @@ def analyze_observation(observation: Observation) -> InformationAnalysis:
 
     # Existing explicit rule-generated alerts retain their behavior. For
     # unclassified observations the default is digest, never an interruption.
-    if attributes.get("immediate") is True:
+    if attributes.get("immediate") is True or observation.handling == HANDLING_IMMEDIATE:
         handling = HANDLING_IMMEDIATE
         reasons.append("来源策略要求即时处理")
     elif importance >= 4 and urgency >= 4 and confidence >= 0.7:

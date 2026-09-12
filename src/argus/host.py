@@ -86,7 +86,7 @@ def _listen_ports() -> set[tuple[str, str, int]] | None:
 
 
 def _family(address: str) -> str:
-    if address in {"*", "::", "0.0.0.0"}:
+    if address == "*":
         return "any"
     return "ipv6" if ":" in address else "ipv4"
 
@@ -151,6 +151,7 @@ class HostHealthCollector:
                 inode_used = ((stat.f_files - stat.f_favail) / stat.f_files * 100.0) if stat.f_files else 0.0
             except OSError as exc:
                 active[f"path:{path}"] = f"无法检查 {path}: {type(exc).__name__}"
+                unknown_prefixes.update({f"disk:{path}", f"inode:{path}"})
                 continue
             if disk_used >= self.disk_threshold:
                 active[f"disk:{path}"] = f"{path} 磁盘已使用 {disk_used:.1f}%"
@@ -228,6 +229,7 @@ class HostHealthCollector:
                     "check": identity,
                     "incident_key": f"host:{identity}",
                     "stateful": True,
+                    "live_state": True,
                 },
             ))
         for identity in sorted(previous_active - current_active):

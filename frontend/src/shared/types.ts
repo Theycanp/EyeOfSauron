@@ -1,6 +1,6 @@
 export type JsonRecord = Record<string, unknown>
 
-export type SourceKind = 'rss' | 'official_list' | 'youtube' | 'x' | 'market' | 'imap'
+export type SourceKind = 'rss' | 'official_list' | 'youtube' | 'x' | 'market' | 'imap' | 'host'
 export type IncidentStatus = 'open' | 'recovered' | 'recorded'
 export type Tone = 'positive' | 'warning' | 'negative' | 'info' | 'neutral'
 export type AdminJobStatus = 'queued' | 'running' | 'succeeded' | 'completed' | 'failed' | 'cancelled' | 'expired'
@@ -340,6 +340,9 @@ export interface DigestConfig extends JsonRecord {
   observation_limit?: number
   notify?: boolean
   public_base_url?: string
+  api_summary?: boolean
+  prompt_id?: string
+  prompt_version?: number
 }
 
 export interface AnalysisConfig extends JsonRecord {
@@ -349,6 +352,7 @@ export interface AnalysisConfig extends JsonRecord {
   local_base_url?: string
   local_model?: string
   api_enabled?: boolean
+  api_triage_enabled?: boolean
   api_base_url?: string
   api_model?: string
   api_key_env?: string

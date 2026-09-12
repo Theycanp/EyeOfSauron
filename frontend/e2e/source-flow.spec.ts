@@ -241,7 +241,7 @@ test('generic source entry presents exactly one provider choice step', async ({ 
   await expect(dialog.getByRole('button', { name: /YouTube/ })).toHaveCount(0)
 })
 
-test('catalog creates a disabled draft and saves with its opening revision', async ({ page }, testInfo) => {
+test('catalog creates an enabled draft and saves with its opening revision', async ({ page }, testInfo) => {
   await mockAdminApi(page)
   let saved: Record<string, unknown> | null = null
   await page.route('**/api/source-bundles', async (route) => {
@@ -256,9 +256,9 @@ test('catalog creates a disabled draft and saves with its opening revision', asy
   await expect(page.locator('body')).toHaveJSProperty('scrollWidth', await page.locator('body').evaluate((node) => node.clientWidth))
   await page.screenshot({ path: testInfo.outputPath('sources.png'), fullPage: true })
   await page.getByRole('button', { name: '生成草稿', exact: true }).click()
-  await page.getByRole('button', { name: '生成停用草稿', exact: true }).click()
+  await page.getByRole('button', { name: '生成来源草稿', exact: true }).click()
   const dialog = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'RSS / Atom 来源' }) })
-  await expect(dialog.getByLabel('保存后启用')).not.toBeChecked()
+  await expect(dialog.getByLabel('保存后启用')).toBeChecked()
   await expect(dialog.getByLabel('官方 RSS / Atom 地址')).toHaveValue('https://feeds.a.dj.com/rss/RSSMarketsMain.xml')
   await page.screenshot({ path: testInfo.outputPath('source-dialog.png'), fullPage: true })
   let backgroundRefreshed = false
@@ -270,7 +270,7 @@ test('catalog creates a disabled draft and saves with its opening revision', asy
   await expect.poll(() => backgroundRefreshed).toBe(true)
   await dialog.getByRole('button', { name: '保存来源' }).click()
   await expect.poll(() => saved).not.toBeNull()
-  expect(saved).toMatchObject({ source: { enabled: false, settings: { catalog_entry: 'wsj' } } })
+  expect(saved).toMatchObject({ source: { enabled: true, settings: { catalog_entry: 'wsj' } } })
 })
 
 test('connection test polls the daemon job without saving the draft', async ({ page }) => {

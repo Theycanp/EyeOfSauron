@@ -5,6 +5,38 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-12
+
+### Added
+
+- Add bounded, citation-checked API synthesis for daily digests with an
+  algorithmic fallback, shared call budget, versioned prompt, and UI controls.
+- Add production-ready host health configuration and a regular React editor for
+  disk, inode, memory, load and systemd unit checks.
+- Add verified State Council and Japanese Ministry of Finance official indexes,
+  plus current Economist, FT and Federal Reserve feeds to the rollout plan.
+
+### Fixed
+
+- Decode gzip RSS responses within compressed and decompressed size limits;
+  this fixes the UN Chinese feed's intermittent failure/recovery loop.
+- Preserve rule-selected immediate events through later semantic analysis and
+  guarantee they remain eligible for the daily digest.
+- Prevent the JMA category label from generating severe-weather false alerts;
+  evaluate the actual bulletin text instead.
+- Filter daily candidates to enabled sources before the database limit, retain
+  fractional quality scores, and apply a soft source-diversity penalty.
+- Keep failed analysis and digest form edits dirty, align browser limits with
+  backend validation, and reject ambiguous model endpoint URLs.
+- Make wildcard listener family checks accurate and prevent unknown disk probes
+  from being reported as recovery.
+- Resolve stale source-outage incidents when a source is explicitly disabled or
+  removed, without sending a misleading recovery notification.
+- Keep known binary official attachments as linked metadata instead of creating
+  unsupported full-text extraction jobs.
+- Align catalog confirmation text with the reviewed default-on behavior for
+  public sources; credential-bound providers still default off.
+
 ## [0.14.0] - 2026-09-12
 
 ### Fixed
@@ -204,7 +236,9 @@ Semantic Versioning and the Keep a Changelog structure.
 - Initial Bloomberg RSS monitoring, weighted alert rules, SQLite outbox, ntfy
   delivery, failure/recovery notifications, and baseline suppression.
 
-[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.10.2...v0.11.0

@@ -32,6 +32,9 @@ local_enabled = false
 local_base_url = "http://127.0.0.1:11434/v1"
 local_model = ""
 api_enabled = false
+# Keep remote calls for the daily digest by default. Enable this only if you
+# also want per-observation advisory calls to share the same daily budget.
+api_triage_enabled = false
 shadow_mode = true
 api_base_url = ""
 api_model = ""
@@ -62,6 +65,9 @@ item_limit = 30
 observation_limit = 5000
 notify = true
 public_base_url = "https://eos.example.com"
+api_summary = true
+prompt_id = "digest"
+prompt_version = 1
 
 [[sources]]
 id = "bloomberg_markets"

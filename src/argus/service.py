@@ -168,6 +168,7 @@ class ArgusService:
                     "region": source_config.region,
                     "source_tier": source_config.source_tier,
                     "importance": source_config.default_importance,
+                    "topic": str(source_config.settings.get("topic", item.topic)),
                     **item.attributes,
                 },
             )
@@ -404,10 +405,7 @@ class ArgusService:
         assert self.digest_scheduler is not None
         while not self.stop_event.is_set():
             try:
-                # The Database connection belongs to the event-loop thread.
-                # Digest generation is infrequent and must keep its SQLite
-                # transaction on that thread instead of crossing into a worker.
-                published = self.digest_scheduler.process_once(now_epoch())
+                published = await self.digest_scheduler.process_once_async(now_epoch())
                 if published is not None:
                     LOGGER.debug(
                         "digest_checked key=%s version=%d", published.digest_key, published.version
@@ -602,7 +600,7 @@ class ArgusService:
         while await self.process_content_fetch_once():
             pass
         if self.digest_scheduler is not None:
-            await asyncio.to_thread(self.digest_scheduler.process_once, now_epoch())
+            await self.digest_scheduler.process_once_async(now_epoch())
         self.process_reminders_once()
         if deliver:
             while await self.deliver_one():

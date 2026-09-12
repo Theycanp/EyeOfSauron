@@ -61,6 +61,13 @@ class FakeDigestRepository:
         self.observations = observations
         self.saved: list[DigestDocument] = []
 
+    def list_digest_observations(
+        self, since: int, until: int, *, source_ids: Sequence[str] | None = None,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        return [item for item in self.observations
+                if source_ids is None or item['source_id'] in source_ids][:limit]
+
     def list_observations(
         self,
         since: int,

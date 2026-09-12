@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
+from dataclasses import replace
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
@@ -20,13 +21,22 @@ from .content import (
     ContentPolicy,
     parse_content_policy,
     plain_text,
+    supports_public_document_fetch,
 )
 from .models import FeedFetchResult, Observation, SourceState
-from .util import truncate
+from .util import decode_http_content, truncate
 
 
 class FeedError(RuntimeError):
     pass
+
+
+def _decode_transport(payload: bytes, encoding: str, limit: int) -> bytes:
+    """Decode a supported HTTP content encoding with a strict output bound."""
+    try:
+        return decode_http_content(payload, encoding, limit)
+    except ValueError as exc:
+        raise FeedError(str(exc).replace("content", "feed response")) from exc
 
 
 class _NoDoctypeTreeBuilder(ET.TreeBuilder):
@@ -149,7 +159,12 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
                 ))
                 has_feed_full_text = True
         fetch_request = None
-        if policy is ContentPolicy.PUBLIC_DOCUMENT and link and not has_feed_full_text:
+        if (
+            policy is ContentPolicy.PUBLIC_DOCUMENT
+            and link
+            and not has_feed_full_text
+            and supports_public_document_fetch(link)
+        ):
             fetch_request = ContentFetchRequest(
                 link,
                 source.allowed_hosts,
@@ -252,6 +267,12 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
 
     if not observations:
         raise FeedError("feed contained no usable entries")
+    if source.settings.get("headline_from_summary") is True:
+        if any(not item.summary.strip() for item in observations):
+            raise FeedError("headline-from-summary feed has an entry without a summary")
+        observations = [replace(item, title=item.summary[:1000], attributes={
+            **item.attributes, "feed_title": item.title,
+        }) for item in observations]
     observations.sort(key=lambda item: (item.published_at, item.external_id))
     return tuple(observations)
 
@@ -360,6 +381,10 @@ class RssCollector:
             payload = response.read(self.config.max_response_bytes + 1)
             if len(payload) > self.config.max_response_bytes:
                 raise FeedError("feed response exceeded configured size limit")
+            payload = _decode_transport(
+                payload, response.headers.get("Content-Encoding", ""),
+                self.config.max_response_bytes,
+            )
             observations = self.parse_payload(payload)
             if max_content_age:
                 published_dates = [

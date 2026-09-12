@@ -47,7 +47,8 @@ RestrictRealtime=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 ProtectProc=invisible
-ProcSubset=pid
+# Host health needs /proc/meminfo; other users' processes remain hidden.
+ProcSubset=all
 RemoveIPC=true
 RestrictSUIDSGID=true
 SystemCallArchitectures=native

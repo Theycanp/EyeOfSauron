@@ -303,6 +303,8 @@ def validate_provider_configuration(
     if enabled:
         _validate_declared_settings(spec, settings, location)
         if kind == "official_list":
+            if settings.get("index_format", "html") not in {"html", "govcn_json"}:
+                raise ProviderConfigError("unsupported official index format")
             prefixes = settings.get("article_url_prefixes", [])
             if not 1 <= len(prefixes) <= 32:
                 raise ProviderConfigError("official list requires 1 to 32 article URL prefixes")

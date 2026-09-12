@@ -13,7 +13,7 @@ const health: HealthSummary = {
 describe('SettingsPage', () => {
   it('edits analysis policy without exposing a secret value field', async () => {
     const user = userEvent.setup()
-    const save = vi.fn()
+    const save = vi.fn().mockResolvedValue(false)
     render(<SettingsPage status={{}} health={health} revisions={[]} busy={false}
       analysis={{ enabled: true, shadow_mode: true, region_weights: { CN: 5, JP: 4, US: 5, GLOBAL: 3, OTHER: 3 } }}
       digest={{ enabled: false }} onSaveDigest={vi.fn()}
@@ -26,5 +26,8 @@ describe('SettingsPage', () => {
     await user.type(screen.getByLabelText('API 每日预算'), '7')
     await user.click(screen.getByRole('button', { name: /保存分析配置/ }))
     expect(save).toHaveBeenCalledWith(expect.objectContaining({ daily_api_budget: 7, shadow_mode: true }))
+    // A failed request must leave the operator's unsaved draft intact.
+    expect(screen.getByLabelText('API 每日预算')).toHaveValue(7)
+    expect(screen.getByRole('button', { name: /保存分析配置/ })).toBeEnabled()
   })
 })

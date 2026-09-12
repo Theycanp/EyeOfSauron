@@ -362,8 +362,8 @@ export default function AdminApp() {
     requestConfirmation({
       kind: 'rollback',
       title: `从官方目录添加“${entry.publisher} · ${feed.label}”？`,
-      detail: '系统只会生成一个默认停用的来源草稿，保留官方链接与精确主机白名单。请在下一步检查配置并主动保存；付费正文不会被抓取。',
-      confirmLabel: '生成停用草稿',
+      detail: '系统会生成一个默认启用的来源草稿，保留官方链接与精确主机白名单。请在下一步检查配置并主动保存；保存前不会采集，付费正文不会被抓取。',
+      confirmLabel: '生成来源草稿',
     }, () => {
       sourceDraftRevision.current = expectedRevision
       const draft = catalogSourceDraft(entry, feed, managedSources.map((source) => source.id))
@@ -433,7 +433,8 @@ export default function AdminApp() {
       markRestart(response.revision)
       await refresh(true)
       notify('分析策略已保存；等待 Argus 应用')
-    } catch (error) { await reportMutationError(error, '无法保存分析策略') } finally { setBusy(false) }
+      return true
+    } catch (error) { await reportMutationError(error, '无法保存分析策略'); return false } finally { setBusy(false) }
   }
 
   const savePrompt = async (prompt: { prompt_id: string; version: number; system_text: string }) => {
@@ -452,7 +453,8 @@ export default function AdminApp() {
       markRestart(response.revision)
       await refresh(true)
       notify('日报配置已保存；等待 Argus 应用')
-    } catch (error) { await reportMutationError(error, '无法保存日报配置') } finally { setBusy(false) }
+      return true
+    } catch (error) { await reportMutationError(error, '无法保存日报配置'); return false } finally { setBusy(false) }
   }
 
   const submitQualityFeedback = async (profile: SourceQualityProfile, signal: -1 | 0 | 1, reason: string) => {
@@ -493,7 +495,7 @@ export default function AdminApp() {
         {page === 'digests' && <DigestsPage api={api} onUnauthorized={logout} initialKey={window.location.pathname.startsWith('/digests/') ? decodeURIComponent(window.location.pathname.slice('/digests/'.length)) : undefined} />}
         {page === 'source-quality' && <SourceQualityPage profiles={sourceQuality} busy={busy || !can('quality:write')} onFeedback={submitQualityFeedback} onOverride={setQualityOverride} onClearOverride={clearQualityOverride} />}
         {page === 'users' && identity?.permissions.includes('users:manage') && <UsersPage api={api} currentUserId={identity.id} notify={notify} onUnauthorized={clearSession} />}
-        {page === 'settings' && <><SettingsPage status={status} health={health} revisions={revisions} revisionTotal={resources.revisions.data?.pagination?.total} busy={busy || !can('settings:write')} analysis={config?.managed.analysis} digest={config?.managed.digest} prompts={prompts} analysisError={resources.prompts.error} onSaveAnalysis={(value) => { void saveAnalysis(value) }} onSaveDigest={(value) => { void saveDigest(value) }} onSavePrompt={(value) => { void savePrompt(value) }} advancedKind={advancedKind} advancedJson={advancedJson} onAdvancedKind={setAdvancedKind} onAdvancedJson={setAdvancedJson} onLoadExample={loadAdvancedExample} onSaveAdvanced={() => { void saveAdvanced() }} onRollback={rollback} /><OutboxPanel status={outboxStatus} alerts={outboxAlerts} loading={outboxLoading} error={outboxError} nextCursor={outboxNextCursor} busy={busy || !can('operations:write')} onStatus={changeOutboxStatus} onReload={() => { void loadOutbox(outboxStatus) }} onLoadMore={() => { void loadOutbox(outboxStatus, true, outboxNextCursor) }} onRetry={retryOutbox} onCancel={cancelOutbox} onDelete={discardOutbox} /></>}
+        {page === 'settings' && <><SettingsPage status={status} health={health} revisions={revisions} revisionTotal={resources.revisions.data?.pagination?.total} busy={busy || !can('settings:write')} analysis={config?.managed.analysis} digest={config?.managed.digest} prompts={prompts} analysisError={resources.prompts.error} onSaveAnalysis={saveAnalysis} onSaveDigest={saveDigest} onSavePrompt={(value) => { void savePrompt(value) }} advancedKind={advancedKind} advancedJson={advancedJson} onAdvancedKind={setAdvancedKind} onAdvancedJson={setAdvancedJson} onLoadExample={loadAdvancedExample} onSaveAdvanced={() => { void saveAdvanced() }} onRollback={rollback} /><OutboxPanel status={outboxStatus} alerts={outboxAlerts} loading={outboxLoading} error={outboxError} nextCursor={outboxNextCursor} busy={busy || !can('operations:write')} onStatus={changeOutboxStatus} onReload={() => { void loadOutbox(outboxStatus) }} onLoadMore={() => { void loadOutbox(outboxStatus, true, outboxNextCursor) }} onRetry={retryOutbox} onCancel={cancelOutbox} onDelete={discardOutbox} /></>}
       </>}</main>
     </section>
     <ReminderDialog ref={reminderDialog} draft={reminderForm} setDraft={setReminderForm} busy={busy} dirty={Boolean(reminderSnapshot && reminderSnapshot !== JSON.stringify(reminderForm))} onClose={closeReminder} onSubmit={() => { void saveReminder() }} />

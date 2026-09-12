@@ -21,6 +21,8 @@ describe('source provider registry', () => {
     expect(draft.kind).toBe('rss')
     expect(draft.entryMode).toBe('typed')
     expect(draft.section).toBe('News')
+    expect(draft.enabled).toBe(true)
+    expect(createSourceDraft('x', 'typed').enabled).toBe(false)
   })
 
   it('preserves unknown source and provider settings during visual edits', () => {

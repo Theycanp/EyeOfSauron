@@ -15,6 +15,7 @@ from .analysis_orchestrator import AnalysisOrchestrator
 from .database import Database, read_active_config
 from .content import PublicDocumentFetcher
 from .digest import DigestScheduler
+from .digest_analysis import ApiDigestSummarizer
 from .model_analyzers import AnalyzerSettings, LocalModelAnalyzer, OpenAICompatibleAnalyzer
 from .notifier import DEFAULT_NOTIFIER_REGISTRY, NotifyError
 from .prompts import PromptTemplate
@@ -121,6 +122,23 @@ def _build_service(
             local_analyzer=local_analyzer,
             api_analyzer=api_analyzer,
         )
+    summarizer = None
+    if config.digest.enabled and config.digest.api_summary and config.analysis.enabled and config.analysis.api_enabled:
+        stored_digest_prompt = database.get_prompt(config.digest.prompt_id, config.digest.prompt_version)
+        if stored_digest_prompt is None:
+            raise ConfigError("configured digest prompt version does not exist")
+        summarizer = ApiDigestSummarizer(OpenAICompatibleAnalyzer(
+            AnalyzerSettings(
+                config.analysis.api_base_url, config.analysis.api_model,
+                timeout_seconds=config.analysis.timeout_seconds,
+                max_input_chars=config.analysis.max_input_chars,
+                max_response_bytes=config.analysis.max_response_bytes,
+                max_tokens=config.analysis.max_tokens,
+                prompt_id=config.digest.prompt_id, prompt_version=config.digest.prompt_version,
+            ), api_key_env=config.analysis.api_key_env,
+            prompt=PromptTemplate(str(stored_digest_prompt['prompt_id']),
+                                  int(stored_digest_prompt['version']), str(stored_digest_prompt['system_text'])),
+        ))
     digest_scheduler = (
         DigestScheduler(
             config.digest,
@@ -128,6 +146,9 @@ def _build_service(
             topic=config.ntfy.default_topic,
             source_ids=[source.id for source in config.sources if source.enabled],
             region_weights=config.analysis.region_weights,
+            summarizer=summarizer,
+            daily_api_budget=config.analysis.daily_api_budget,
+            send_full_text=config.analysis.send_full_text,
         )
         if config.digest.enabled else None
     )

@@ -41,6 +41,7 @@ class NewsFeedTemplate:
     allowed_hosts: tuple[str, ...]
     max_content_age_seconds: int = 0
     article_url_prefixes: tuple[str, ...] = ()
+    index_format: str = "html"
 
     def __post_init__(self) -> None:
         if not _CATALOG_ID.fullmatch(self.id):
@@ -56,6 +57,7 @@ class NewsFeedTemplate:
             "allowed_hosts": list(self.allowed_hosts),
             "max_content_age_seconds": self.max_content_age_seconds,
             "article_url_prefixes": list(self.article_url_prefixes),
+            "index_format": self.index_format,
         }
 
 
@@ -192,7 +194,10 @@ class NewsSourceCatalog:
                 "content_policy": entry.content_policy,
                 "max_content_age_seconds": feed.max_content_age_seconds,
                 "topic": entry.topic,
+                **({"headline_from_summary": True}
+                   if entry.id == "japan_meteorological_agency" else {}),
                 **({"article_url_prefixes": list(feed.article_url_prefixes),
+                    "index_format": feed.index_format,
                     "timezone": "Asia/Shanghai" if entry.region == "CN" else "Asia/Tokyo"}
                    if entry.source_kind == "official_list" else {}),
             },
@@ -284,13 +289,13 @@ def _feed(
 
 def _official_index(
     identifier: str, publisher: str, url: str, prefixes: tuple[str, ...],
-    *, region: str = "CN", topic: str = "policy",
+    *, region: str = "CN", topic: str = "policy", index_format: str = "html",
 ) -> NewsSourceEntry:
     hosts = tuple(dict.fromkeys(urlsplit(value).hostname or "" for value in (url, *prefixes)))
     return NewsSourceEntry(
         identifier, publisher, url, AccessModel.PUBLIC, IntegrationMode.VERIFIED_OFFICIAL_LIST,
         (NewsFeedTemplate("announcements", "最新公告", topic, url, hosts,
-                          article_url_prefixes=prefixes),),
+                          article_url_prefixes=prefixes, index_format=index_format),),
         url, "直接监测官方列表中的带日期公告；每 15 分钟检查，普通信息收录日报，重大事件按规则通知。",
         verified_on="2026-09-12", content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
         region=region, source_tier="primary", default_importance=4, topic=topic,
@@ -298,6 +303,15 @@ def _official_index(
 
 
 NEWS_SOURCE_CATALOG = NewsSourceCatalog((
+    _official_index(
+        "china_state_council", "中国国务院政策文件", "https://www.gov.cn/zhengce/zuixin/ZUIXINZHENGCE.json",
+        ("https://www.gov.cn/zhengce/",), topic="policy", index_format="govcn_json",
+    ),
+    _official_index(
+        "japan_mof", "日本财务省", "https://www.mof.go.jp/english/",
+        ("https://www.mof.go.jp/english/policy/", "https://www.mof.go.jp/english/international_policy/"),
+        region="JP", topic="economy",
+    ),
     _official_index(
         "china_mof", "中国财政部", "https://www.mof.gov.cn/zhengwuxinxi/caizhengxinwen/",
         ("https://www.mof.gov.cn/zhengwuxinxi/caizhengxinwen/",
@@ -322,7 +336,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
     ),
     _official_index(
         "japan_cabinet", "日本首相官邸", "https://japan.kantei.go.jp/",
-        ("https://japan.kantei.go.jp/105/",), region="JP", topic="diplomacy",
+        ("https://japan.kantei.go.jp/",), region="JP", topic="diplomacy",
     ),
     NewsSourceEntry(
         "japan_mhlw", "日本厚生劳动省", "https://www.mhlw.go.jp/",
