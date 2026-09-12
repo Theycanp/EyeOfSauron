@@ -4,6 +4,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import time
 import urllib.parse
@@ -31,12 +32,18 @@ class AdminError(ValueError):
     pass
 
 
+_SENSITIVE_KEY = re.compile(r"(?:^|_)(?:token|password|secret|key|api_?key|apikey)(?:$|_)")
+
+
+def _is_sensitive_key(value: object) -> bool:
+    name = str(value).lower()
+    return not name.endswith("_env") and _SENSITIVE_KEY.search(name) is not None
+
+
 def _reject_secret_values(value: Any, location: str = "config") -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
-            name = str(key).lower()
-            sensitive = any(token in name for token in ("token", "password", "secret")) or name in {"key", "api_key", "apikey"} or name.endswith("_key")
-            if sensitive and not name.endswith("_env"):
+            if _is_sensitive_key(key):
                 raise AdminError(f"{location}.{key} must reference an *_env variable, not a secret")
             _reject_secret_values(item, f"{location}.{key}")
     elif isinstance(value, list):
@@ -49,8 +56,7 @@ def _public(value: Any) -> Any:
         return {
             str(key): _public(item)
             for key, item in value.items()
-            if str(key).lower().endswith("_env")
-            or not any(token in str(key).lower() for token in ("token", "password", "secret"))
+            if not _is_sensitive_key(key)
         }
     if isinstance(value, (list, tuple)):
         return [_public(item) for item in value]

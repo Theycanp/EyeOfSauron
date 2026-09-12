@@ -14,7 +14,7 @@ from http.server import HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from argus.admin import AdminError, ManagedConfigStore, make_handler
+from argus.admin import AdminError, ManagedConfigStore, _public, make_handler
 from argus.database import Database, read_active_config
 from argus.digest import DigestCluster, DigestDocument, SourceCoverage
 from argus.persistence import ControlPlaneRepository, RevisionConflictError, RuntimeRepository
@@ -132,6 +132,15 @@ class ControlPlaneTests(unittest.TestCase):
         self.store.path.write_text(json.dumps({"sources": [raw], "rules": []}))
         with self.assertRaises(AdminError):
             ManagedConfigStore(self.store.path, database=self.database)
+
+    def test_model_token_limit_is_not_mistaken_for_a_credential(self) -> None:
+        payload = {"sources": [], "rules": [], "analysis": {"max_tokens": 300}}
+        self.assertEqual(1, self.store.write(payload))
+        self.assertEqual(300, self.store.read()["analysis"]["max_tokens"])
+        self.assertEqual(
+            {"max_tokens": 300, "api_key_env": "API_KEY"},
+            _public({"max_tokens": 300, "api_key": "secret", "api_key_env": "API_KEY"}),
+        )
 
     def test_invalid_stored_config_fails_closed_instead_of_erasing_sources(self) -> None:
         self.store.upsert("source", source())
