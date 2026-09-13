@@ -5,6 +5,14 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-09-12
+
+### Fixed
+
+- Prevent host health probe subprocesses from inheriting Argus's
+  `NOTIFY_SOCKET`, which caused misleading systemd "notification from non-main
+  PID" warnings during routine checks.
+
 ## [0.15.1] - 2026-09-12
 
 ### Fixed
@@ -244,7 +252,8 @@ Semantic Versioning and the Keep a Changelog structure.
 - Initial Bloomberg RSS monitoring, weighted alert rules, SQLite outbox, ntfy
   delivery, failure/recovery notifications, and baseline suppression.
 
-[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.2...HEAD
+[0.15.2]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.13.0...v0.14.0

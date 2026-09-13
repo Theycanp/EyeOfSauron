@@ -16,6 +16,13 @@ class HostHealthError(RuntimeError):
     pass
 
 
+def _child_environment() -> dict[str, str]:
+    """Keep service-only systemd notification variables out of probes."""
+    environment = os.environ.copy()
+    environment.pop("NOTIFY_SOCKET", None)
+    return environment
+
+
 def _mem_percent() -> float | None:
     values: dict[str, int] = {}
     try:
@@ -43,6 +50,7 @@ def _unit_health(units: list[str]) -> dict[str, str]:
                 stderr=subprocess.DEVNULL,
                 check=False,
                 timeout=3,
+                env=_child_environment(),
             )
         except (OSError, subprocess.SubprocessError):
             health[unit] = "unknown"
@@ -62,6 +70,7 @@ def _listen_ports() -> set[tuple[str, str, int]] | None:
             text=True,
             check=False,
             timeout=3,
+            env=_child_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
