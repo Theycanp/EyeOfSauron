@@ -331,6 +331,12 @@ def cluster_observations(
         source_ids = tuple(
             sorted({str(item.get("source_id", "")) for item in group if item.get("source_id")})
         )
+        links_by_source: dict[str, str] = {}
+        for item in group:
+            source_id = str(item.get("source_id", ""))
+            url = str(item.get("url", ""))
+            if source_id and url:
+                links_by_source.setdefault(source_id, url)
         observation_ids = tuple(
             sorted({int(item["id"]) for item in group if item.get("id") is not None})
         )
@@ -362,7 +368,9 @@ def cluster_observations(
                 source_ids=source_ids,
                 observation_ids=observation_ids,
                 links=tuple(
-                    dict.fromkeys(str(item.get("url", "")) for item in group if item.get("url"))
+                    links_by_source[source_id]
+                    for source_id in source_ids
+                    if source_id in links_by_source
                 ),
                 handling=(
                     "immediate"

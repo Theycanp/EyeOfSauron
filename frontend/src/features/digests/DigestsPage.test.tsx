@@ -9,13 +9,15 @@ describe('DigestsPage', () => {
     const digest = { digest_key: '2026-09-06', version: 1, period_start: 1, period_end: 2, timezone: 'Asia/Shanghai', title: '今日重点', summary: '三地重要动态', generation_kind: 'algorithm', status: 'published' as const, created_at: 2, published_at: 2, item_count: 1, source_count: 2 }
     const api = {
       digests: vi.fn().mockResolvedValue({ digests: [digest] }),
-      digest: vi.fn().mockResolvedValue({ digest: { ...digest, items: [{ cluster_key: 'a', title: '政策更新', summary: '公告摘要', score: 4.2, importance: 4, urgency: 3, relevance: 5, confidence: 0.9, regions: ['CN'], topics: ['policy'], links: ['https://example.com'] }], coverage: [{ source_id: 'official', status: 'healthy', observation_count: 1 }] } }),
+      digest: vi.fn().mockResolvedValue({ digest: { ...digest, items: [{ cluster_key: 'a', title: '政策更新', summary: '公告摘要', score: 4.2, importance: 4, urgency: 3, relevance: 5, confidence: 0.9, regions: ['CN'], topics: ['policy'], source_ids: ['official'], observation_ids: [1, 2, 3], links: ['https://example.com', 'https://example.com/update-2', 'https://example.com/update-3'] }], coverage: [{ source_id: 'official', status: 'healthy', observation_count: 1 }] } }),
     } as unknown as AdminApi
     render(<DigestsPage api={api} onUnauthorized={vi.fn()} />)
     await waitFor(() => expect(screen.getByText('今日重点')).toBeInTheDocument())
     await userEvent.click(screen.getByRole('button', { name: /阅读日报/ }))
     await waitFor(() => expect(screen.getByText('政策更新')).toBeInTheDocument())
-    expect(screen.getByRole('link', { name: /来源 1/ })).toHaveAttribute('href', 'https://example.com')
+    expect(screen.getByRole('link', { name: '查看原文' })).toHaveAttribute('href', 'https://example.com')
+    expect(screen.getAllByRole('link')).toHaveLength(1)
+    expect(screen.getByText('合并 3 次更新')).toBeVisible()
     expect(screen.getByText(/来源覆盖：1\/1 正常/)).toBeInTheDocument()
   })
 })

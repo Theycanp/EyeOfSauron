@@ -5,6 +5,19 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-09-14
+
+### Changed
+
+- Raise the default daily digest limit from 30 to 50 clustered topics.
+
+### Fixed
+
+- Keep one representative article link per actual source in each digest topic,
+  instead of presenting repeated updates from a high-frequency feed as dozens
+  of separate sources. The reader now labels repeated observations as merged
+  updates and also limits legacy digest links to the recorded source count.
+
 ## [0.15.2] - 2026-09-12
 
 ### Fixed
@@ -252,7 +265,8 @@ Semantic Versioning and the Keep a Changelog structure.
 - Initial Bloomberg RSS monitoring, weighted alert rules, SQLite outbox, ntfy
   delivery, failure/recovery notifications, and baseline suppression.
 
-[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.2...HEAD
+[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.3...HEAD
+[0.15.3]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.2...v0.15.3
 [0.15.2]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.14.0...v0.15.0
