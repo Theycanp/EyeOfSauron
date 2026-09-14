@@ -123,7 +123,12 @@ after reviewing model behavior and false positives.
 `digest.api_summary` controls that low-frequency stage. Keep
 `analysis.api_triage_enabled = false` unless individual-item advisory calls are
 worth sharing the daily call budget. API failures are logged without response
-secrets and fall back to the on-time algorithmic digest. `send_full_text` uses
+secrets and fall back to the on-time algorithmic digest. Set
+`analysis.api_model_fallbacks` and `analysis.local_model_fallbacks` to ordered
+arrays of model IDs when more than one model is available. A call consumes one
+budget unit regardless of how many candidates are attempted; transport errors,
+timeouts, invalid JSON, and invalid digest citations advance to the next model.
+`send_full_text` uses
 only content already retained under its source rights policy; it never triggers
 an extra crawl or bypasses a paywall.
 

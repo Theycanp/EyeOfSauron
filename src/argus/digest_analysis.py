@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Protocol
+from typing import Protocol, Sequence
 
 from .digest import DigestDocument
 from .model_analyzers import AnalyzerError, OpenAICompatibleAnalyzer
@@ -16,11 +16,30 @@ class DigestContentRepository(Protocol):
 class ApiDigestSummarizer:
     """Transport adapter; neither model output nor input can change routing."""
 
-    def __init__(self, client: OpenAICompatibleAnalyzer) -> None:
-        self.client = client
+    def __init__(self, clients: OpenAICompatibleAnalyzer | Sequence[OpenAICompatibleAnalyzer]) -> None:
+        if hasattr(clients, "analyzers"):
+            self.clients = tuple(clients.analyzers)  # type: ignore[attr-defined]
+        elif hasattr(clients, "complete") and hasattr(clients, "settings"):
+            self.clients = (clients,)  # type: ignore[assignment]
+        else:
+            self.clients = tuple(clients)
+        if not self.clients:
+            raise ValueError("at least one digest analyzer is required")
 
     def summarize(self, digest: DigestDocument) -> str:
-        limit = self.client.settings.max_input_chars
+        if len(self.clients) == 1:
+            return self._summarize_with(self.clients[0], digest)
+        failures: list[str] = []
+        for client in self.clients:
+            try:
+                return self._summarize_with(client, digest)
+            except Exception as exc:
+                failures.append(f"{client.settings.model}:{type(exc).__name__}")
+        raise AnalyzerError("all configured digest analyzers failed: " + ", ".join(failures))
+
+    @staticmethod
+    def _summarize_with(client: OpenAICompatibleAnalyzer, digest: DigestDocument) -> str:
+        limit = client.settings.max_input_chars
         # Distribute the input budget across all selected topics, rather than
         # truncate a JSON string halfway through (or omit its last sources).
         per_item = max(40, (limit - 1000) // max(1, len(digest.items)) - 200)
@@ -30,7 +49,7 @@ class ApiDigestSummarizer:
         payload = json.dumps({"items": items}, ensure_ascii=False)
         if len(payload) > limit:
             raise AnalyzerError("digest input budget is too small for all selected topics")
-        raw = self.client.complete(payload)
+        raw = client.complete(payload)
         try:
             result = json.loads(raw)
         except ValueError as exc:
@@ -48,4 +67,4 @@ class ApiDigestSummarizer:
         if references != set(citations):
             raise AnalyzerError("digest text references do not match its evidence")
         return (summary.strip() + "\n\nAI 辅助整理，请结合下方编号条目核对。"
-                + f"模型：{self.client.settings.model}；Prompt：{self.client.settings.prompt_id}@{self.client.settings.prompt_version}。")
+                + f"模型：{client.settings.model}；Prompt：{client.settings.prompt_id}@{client.settings.prompt_version}。")

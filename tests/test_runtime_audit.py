@@ -87,6 +87,21 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(digest, await scheduler.process_once_async(self.now+60))
         self.assertEqual(1, self.db.connection.execute('SELECT SUM(calls) FROM analysis_api_usage').fetchone()[0])
 
+    def test_digest_invalid_first_model_falls_back_to_second(self):
+        self.ingest(observation('item', 'policy announcement', timestamp=self.now-10))
+        digest = DigestScheduler(DigestConfig(enabled=True, notify=False), self.db, topic='eos').process_once(self.now)
+        first = OpenAICompatibleAnalyzer(AnalyzerSettings('https://api.example.test/v1', 'first'))
+        second = OpenAICompatibleAnalyzer(AnalyzerSettings('https://api.example.test/v1', 'second'))
+        first.complete = Mock(return_value='not-json')  # type: ignore[method-assign]
+        second.complete = Mock(return_value=json.dumps({
+            'summary': '第二个模型成功整理了这条信息，并保留了可核对的证据引用，同时说明了事件背景和潜在影响。[1]',
+            'citations': [1],
+        }))  # type: ignore[method-assign]
+        result = ApiDigestSummarizer((first, second)).summarize(digest)
+        self.assertIn('第二个模型成功', result)
+        first.complete.assert_called_once()
+        second.complete.assert_called_once()
+
     async def test_digest_full_text_and_budget_use_repository_before_worker(self):
         item = replace(observation('content', 'Official release', timestamp=self.now-10),
                        content_documents=(ContentDocumentDraft(ContentLevel.FULL_TEXT, 'public_html', 'Saved official text'),))
