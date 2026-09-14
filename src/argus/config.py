@@ -132,7 +132,7 @@ class DigestConfig:
     enabled: bool = False
     timezone: str = "Asia/Shanghai"
     daily_time: str = "20:00"
-    item_limit: int = 30
+    item_limit: int = 50
     observation_limit: int = 5000
     notify: bool = True
     public_base_url: str = ""

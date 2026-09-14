@@ -22,7 +22,7 @@ const DEFAULT_ANALYSIS: AnalysisConfig = {
   max_response_bytes: 65536, max_tokens: 300, max_items_per_run: 50, daily_api_budget: 2,
   send_full_text: false, region_weights: { CN: 5, JP: 4, US: 5, GLOBAL: 3, OTHER: 3 },
 }
-const DEFAULT_DIGEST: DigestConfig = { enabled: false, timezone: 'Asia/Shanghai', daily_time: '20:00', item_limit: 30, observation_limit: 5000, notify: true, public_base_url: '', api_summary: true, prompt_id: 'digest', prompt_version: 1 }
+const DEFAULT_DIGEST: DigestConfig = { enabled: false, timezone: 'Asia/Shanghai', daily_time: '20:00', item_limit: 50, observation_limit: 5000, notify: true, public_base_url: '', api_summary: true, prompt_id: 'digest', prompt_version: 1 }
 
 export function SettingsPage({ status, health, revisions, revisionTotal, busy, analysis, prompts, analysisError, onSaveAnalysis, digest, onSaveDigest, onSavePrompt, advancedKind, advancedJson, onAdvancedKind, onAdvancedJson, onLoadExample, onSaveAdvanced, onRollback }: SettingsPageProps) {
   const [page, setPage] = useState(1)

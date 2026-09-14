@@ -147,6 +147,22 @@ class DigestDomainTests(unittest.TestCase):
         self.assertEqual(("mof_cn", "xinhua_cn"), clusters[0].source_ids)
         self.assertGreater(clusters[0].score, clusters[1].score)
 
+    def test_cluster_keeps_one_representative_link_per_source(self) -> None:
+        rows = [
+            _row(1, "熊本县发布雷电注意报", source_id="jma"),
+            _row(2, "熊本县发布雷电注意报", source_id="jma"),
+            _row(3, "熊本县发布雷电注意报", source_id="local_news"),
+        ]
+
+        cluster = cluster_observations(rows)[0]
+
+        self.assertEqual(("jma", "local_news"), cluster.source_ids)
+        self.assertEqual(3, len(cluster.observation_ids))
+        self.assertEqual(
+            ("https://example.test/2", "https://example.test/3"),
+            cluster.links,
+        )
+
     def test_builder_uses_repository_ports_and_reports_coverage(self) -> None:
         repository = FakeDigestRepository(
             [_row(1, "日本央行维持政策利率不变", source_id="boj_jp", region="JP")]
