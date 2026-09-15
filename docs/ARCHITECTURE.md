@@ -115,7 +115,12 @@ The daily digest builder reads normalized observations and source coverage only
 through repository ports. Its algorithmic version ranks by the durable triage
 fields and configured regional interest, then deterministically clusters similar
 headlines across publishers. Corroboration from independent sources raises a
-cluster modestly but never rewrites the underlying observations.
+cluster modestly but never rewrites the underlying observations. The configured
+`item_limit` is a hard ceiling, not a fixed daily count: each ranked cluster's
+bounded score contributes to a signal budget, so quiet days yield shorter
+digests and information-dense days use more of the ceiling. Immediate events
+are retained whenever the ceiling permits them; no model call is involved in
+this sizing decision.
 
 Digest drafts are immutable, monotonically versioned documents. Publishing one
 version atomically supersedes the previously published version for the same
@@ -126,9 +131,12 @@ reader can inspect the evidence behind a summary.
 
 The API digest stage runs only after deterministic selection and receives every
 selected item within a distributed input budget. Its JSON output must cite valid
-item numbers; invalid output, timeout, rate limiting, or exhausted daily budget
-publishes the algorithmic draft instead. Per-observation API triage is a separate
-switch and is off by default, so it cannot silently consume the digest budget.
+item numbers. A first-attempt failure publishes and notifies the algorithmic draft
+immediately; four persistent retries follow at 75-minute intervals inside a
+five-hour window. Success publishes a new immutable API version and notifies it.
+Each digest has its own five-attempt budget, separate from per-observation API
+triage. Fully exhausted days form a durable streak; the third consecutive day
+enqueues one operator alert, while the next successful AI digest resets it.
 
 Source coverage is captured with every digest and is distinct from item count.
 `covered` means the source produced observations, while `quiet` means polling

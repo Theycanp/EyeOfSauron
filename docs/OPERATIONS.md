@@ -122,8 +122,12 @@ after reviewing model behavior and false positives.
 `analysis.api_enabled` supplies the remote adapter used by the daily summary;
 `digest.api_summary` controls that low-frequency stage. Keep
 `analysis.api_triage_enabled = false` unless individual-item advisory calls are
-worth sharing the daily call budget. API failures are logged without response
-secrets and fall back to the on-time algorithmic digest. Set
+worth their separate daily budget. The daily digest has an independent allowance
+of five attempts. If the first attempt fails, the algorithmic digest is published
+on time; Argus retries four times at 75-minute intervals within five hours and
+publishes a new AI version if one succeeds. Three consecutive fully failed digest
+days enqueue an operator alert. All state survives restart and errors are logged
+without response secrets. Set
 `analysis.api_model_fallbacks` and `analysis.local_model_fallbacks` to ordered
 arrays of model IDs when more than one model is available. A call consumes one
 budget unit regardless of how many candidates are attempted; transport errors,

@@ -19,7 +19,7 @@ from argus.content import (
     PublicDocumentFetcher,
     plain_text,
 )
-from argus.database import Database
+from argus.database import Database, SCHEMA_VERSION
 from argus.models import FeedFetchResult
 from argus.rules import RuleSet
 
@@ -271,7 +271,7 @@ class ContentPersistenceTests(unittest.TestCase):
         target.close()
         migrated = Database(copied)
         try:
-            self.assertEqual(14, migrated.status()["database_schema"])
+            self.assertEqual(SCHEMA_VERSION, migrated.status()["database_schema"])
             tables = {
                 row[0]
                 for row in migrated.connection.execute(

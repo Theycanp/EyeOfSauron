@@ -11,6 +11,7 @@ from .digest import (
     DigestNotificationRepository,
     DigestReaderRepository,
     DigestRepository,
+    DigestRetryRepository,
 )
 from .models import FeedFetchResult, IngestReport, OutboxMessage, SourceState
 from .manual_events import ManualEventSpec
@@ -58,7 +59,8 @@ class SQLiteUnitOfWork:
 
 @runtime_checkable
 class RuntimeRepository(
-    AnalysisRepository, DigestInputRepository, DigestRepository, DigestNotificationRepository, Protocol
+    AnalysisRepository, DigestInputRepository, DigestRepository, DigestNotificationRepository,
+    DigestRetryRepository, Protocol
 ):
     """Persistence port used by the always-on application service."""
 

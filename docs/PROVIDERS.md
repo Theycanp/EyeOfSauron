@@ -94,6 +94,8 @@ fetch article pages or circumvent publisher access controls.
 | World Health Organization | news releases and statements | public official RSS |
 | NASA | news releases | public official RSS |
 | U.S. Geological Survey | significant earthquakes | public official Atom |
+| NVIDIA Newsroom | technology and AI announcements | public official RSS; first-party NVIDIA statements only |
+| U.S. Embassy in China | consular, disaster and security alerts | verified official Alerts RSS; bounded retries handle intermittent site throttling |
 
 Publisher endpoints and terms can change after the verification date. Before
 activation, review the catalog evidence URL, confirm the exact feed URL and host

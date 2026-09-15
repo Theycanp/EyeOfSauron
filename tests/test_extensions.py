@@ -13,7 +13,7 @@ from pathlib import Path
 
 from argus.adapters import build_collector
 from argus.admin import AdminError, ManagedConfigStore, make_handler
-from argus.database import Database
+from argus.database import Database, SCHEMA_VERSION
 from argus.market import MarketCollector
 from argus.host import HostHealthCollector, _unit_health
 from unittest.mock import Mock, patch
@@ -319,7 +319,7 @@ class ExtensionTests(unittest.TestCase):
             """)
             connection.close()
             database = Database(path)
-            self.assertEqual(14, database.status()["database_schema"])
+            self.assertEqual(SCHEMA_VERSION, database.status()["database_schema"])
             self.assertTrue(database.get_source_state("legacy").initialized)
             columns = {row[1] for row in database.connection.execute("PRAGMA table_info(alerts)")}
             self.assertIn("confidence", columns)

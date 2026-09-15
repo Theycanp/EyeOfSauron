@@ -195,6 +195,46 @@ class DigestNotificationRepository(Protocol):
         now: int,
     ) -> bool: ...
 
+    def enqueue_digest_failure_notification(
+        self, *, digest_key: str, streak: int, error: str, topic: str, click_url: str, now: int
+    ) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DigestRetryState:
+    digest_key: str
+    fallback_version: int
+    attempts: int
+    next_attempt_at: int | None
+    retry_deadline_at: int
+    status: str
+    last_error: str | None = None
+
+
+class DigestRetryRepository(Protocol):
+    def start_digest_retry(
+        self, digest_key: str, fallback_version: int, now: int, retry_deadline_at: int
+    ) -> DigestRetryState: ...
+
+    def get_digest_retry(self, digest_key: str) -> DigestRetryState | None: ...
+
+    def list_expired_digest_retries(self, now: int) -> list[DigestRetryState]: ...
+
+    def record_digest_retry(
+        self,
+        digest_key: str,
+        *,
+        attempts: int,
+        status: str,
+        next_attempt_at: int | None,
+        last_error: str | None,
+        now: int,
+    ) -> DigestRetryState: ...
+
+    def record_digest_failure(self, digest_key: str, *, now: int) -> tuple[int, bool]: ...
+
+    def record_digest_success(self, *, now: int) -> None: ...
+
 
 class DigestSummarizer(Protocol):
     def summarize(self, digest: DigestDocument) -> str: ...
@@ -203,6 +243,7 @@ class DigestSummarizer(Protocol):
 @runtime_checkable
 class DigestAnalysisRepository(Protocol):
     def reserve_analysis_api_call(self, budget_day: str, *, limit: int, now: int) -> bool: ...
+    def reserve_digest_api_call(self, digest_key: str, *, limit: int, now: int) -> bool: ...
     def get_analysis_text(self, observation_id: int, *, max_chars: int) -> str: ...
 
 
@@ -284,6 +325,32 @@ def _cluster_key(observation_ids: Sequence[int], title: str) -> str:
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
 
+def adaptive_digest_item_count(
+    clusters: Sequence[DigestCluster],
+    *,
+    max_items: int = 50,
+) -> int:
+    """Choose a deterministic daily item count from the ranked cluster scores.
+
+    ``max_items`` is a safety ceiling, not the normal publication size.  A
+    cluster contributes one slot for roughly four points of weighted signal;
+    lower-signal days therefore produce shorter digests while a dense day can
+    use most of the configured ceiling.  Immediate clusters are never removed
+    merely because the day is otherwise quiet (subject to the hard ceiling).
+    """
+    if not 1 <= max_items <= 500:
+        raise ValueError("digest item limit is out of range")
+    if not clusters:
+        return 0
+    # Scores are already a bounded combination of durable triage dimensions,
+    # confidence, regional interest and corroboration.  Clamp malformed or
+    # future-extensible values before they can influence the publication size.
+    signal_mass = sum(max(1.0, min(6.0, float(cluster.score))) for cluster in clusters)
+    score_target = math.ceil(signal_mass / 4.0)
+    immediate_count = sum(cluster.handling == "immediate" for cluster in clusters)
+    return min(max_items, max(1, score_target, immediate_count))
+
+
 def cluster_observations(
     observations: Sequence[Mapping[str, Any]],
     *,
@@ -291,6 +358,7 @@ def cluster_observations(
     similarity_threshold: float = 0.62,
     max_items: int = 50,
     source_quality_weights: Mapping[str, float] | None = None,
+    adaptive: bool = False,
 ) -> tuple[DigestCluster, ...]:
     """Cluster related reports and return ranked, deterministic digest items."""
     if not 0.5 <= similarity_threshold <= 1.0:
@@ -379,11 +447,12 @@ def cluster_observations(
                 ),
             )
         )
+    selection_limit = adaptive_digest_item_count(clusters, max_items=max_items) if adaptive else max_items
     # Select immediate reports first, then reduce repeated-source dominance.
     # This is a soft diversity penalty, not a quota that hides an urgent event.
     selected: list[DigestCluster] = []
     counts: dict[str, int] = {}
-    while clusters and len(selected) < max_items:
+    while clusters and len(selected) < selection_limit:
         clusters.sort(key=lambda item: (
             item.handling != "immediate",
             -(item.score / (1 + 0.35 * min((counts.get(s, 0) for s in item.source_ids), default=0))),
@@ -468,6 +537,7 @@ class DigestBuilder:
             region_weights=self.region_weights,
             max_items=self.item_limit,
             source_quality_weights=self.source_quality_weights,
+            adaptive=True,
         )
         coverage = source_coverage_from_rows(
             self.repository.list_source_coverage(
@@ -554,6 +624,10 @@ class DigestScheduler:
             observation_limit=config.observation_limit,
             item_limit=config.item_limit,
         )
+        # Retry state is persisted by production repositories.  The in-memory
+        # fallback keeps the domain service usable with lightweight test ports.
+        self._retry_memory: dict[str, DigestRetryState] = {}
+        self._failure_streak_memory = 0
 
     def process_once(self, now: int) -> DigestDocument | None:
         if self.summarizer is not None:
@@ -562,36 +636,192 @@ class DigestScheduler:
         return self._publish(document, now) if document else None
 
     async def process_once_async(self, now: int) -> DigestDocument | None:
+        self._finalize_expired_retries(now)
         document = self._prepare(now)
         if document is None:
             return None
-        if document.status != "published" and document.items and self.summarizer is not None:
-            repository = self.repository
-            if not isinstance(repository, DigestAnalysisRepository):
-                raise TypeError("digest API requires budget and content repository ports")
+
+        # A previously published algorithm digest may have a durable retry
+        # state.  Handle that state before the normal publication path so a
+        # restart does not lose the five-hour retry window.
+        retry = self._get_retry(document.digest_key)
+        # Recover the tiny crash window between publishing the deterministic
+        # fallback and persisting its retry row.  The marker is only emitted
+        # for an AI failure, so ordinary algorithm-only digests are untouched.
+        if (
+            retry is None
+            and document.status == "published"
+            and self.summarizer is not None
+            and "AI 总结暂时失败" in document.summary
+        ):
+            self._start_retry(document, now, "retry state reconstructed after publication")
+            retry = self._get_retry(document.digest_key)
+        if retry is not None and retry.status == "pending":
+            if document.generation_kind == "api":
+                self._finish_retry(document.digest_key, retry, now)
+                return document
+            if retry.next_attempt_at is not None and now < retry.next_attempt_at and now < retry.retry_deadline_at:
+                return document
+            return await self._retry_api(document, retry, now)
+        if retry is not None and retry.status == "failed":
+            state_reader = getattr(self.repository, "get_digest_failure_state", None)
+            if state_reader is not None:
+                streak, failed_key = state_reader()
+                if failed_key == document.digest_key and streak >= 3:
+                    self._notify_failure(document.digest_key, streak, retry.last_error or "AI retries exhausted", now)
+            return document
+
+        if document.status == "published" or not document.items or self.summarizer is None:
+            return self._publish(document, now)
+
+        try:
+            summary = await self._summarize(document, now)
+        except Exception as exc:
+            # Publish a useful deterministic report immediately.  AI retries
+            # are deliberately decoupled from this first notification.
+            error = sanitize_error(exc)
+            logging.getLogger("argus.digest").warning(
+                "digest_api_fallback error=%s", error,
+            )
+            fallback = replace(document, summary=document.summary + " AI 总结暂时失败，已先发送算法版日报。")
+            published = self._publish(fallback, now)
+            self._start_retry(published, now, error)
+            return published
+        polished = with_api_summary(document, summary, created_at=now)
+        published = self._publish(polished, now)
+        success = getattr(self.repository, "record_digest_success", None)
+        if success is not None:
+            success(now=now)
+        return published
+
+    async def _summarize(self, document: DigestDocument, now: int) -> str:
+        repository = self.repository
+        if not isinstance(repository, DigestAnalysisRepository):
+            raise TypeError("digest API requires budget and content repository ports")
+        digest_reserver = getattr(repository, "reserve_digest_api_call", None)
+        if digest_reserver is not None:
+            allowed = digest_reserver(document.digest_key, limit=5, now=now)
+        else:
             day = datetime.fromtimestamp(now, UTC).date().isoformat()
-            if repository.reserve_analysis_api_call(day, limit=self.daily_api_budget, now=now):
-                evidence = document
-                if self.send_full_text:
-                    evidence = replace(document, items=tuple(
-                        replace(item, summary=(repository.get_analysis_text(
-                            item.observation_ids[0], max_chars=4000,
-                        ) or item.summary)) if item.observation_ids else item
-                        for item in document.items
-                    ))
-                try:
-                    # Only inference crosses threads. Every repository operation
-                    # stays on the connection owner's event-loop thread.
-                    summary = await asyncio.to_thread(self.summarizer.summarize, evidence)
-                    document = with_api_summary(document, summary, created_at=now)
-                except Exception as exc:
-                    logging.getLogger("argus.digest").warning(
-                        "digest_api_fallback error=%s", sanitize_error(exc),
-                    )
-                    document = replace(document, summary=document.summary + " API 总结失败，已使用算法摘要。")
+            allowed = repository.reserve_analysis_api_call(day, limit=self.daily_api_budget, now=now)
+        if not allowed:
+            raise RuntimeError("digest API attempt budget exhausted")
+        evidence = document
+        if self.send_full_text:
+            evidence = replace(document, items=tuple(
+                replace(item, summary=(repository.get_analysis_text(
+                    item.observation_ids[0], max_chars=4000,
+                ) or item.summary)) if item.observation_ids else item
+                for item in document.items
+            ))
+        # Only inference crosses threads. Repository operations remain on the
+        # connection owner's event-loop thread.
+        return await asyncio.to_thread(self.summarizer.summarize, evidence)  # type: ignore[union-attr]
+
+    async def _retry_api(
+        self, document: DigestDocument, retry: DigestRetryState, now: int
+    ) -> DigestDocument:
+        try:
+            summary = await self._summarize(document, now)
+        except Exception as exc:
+            error = sanitize_error(exc)
+            attempts = retry.attempts + 1
+            exhausted = attempts >= 5 or now >= retry.retry_deadline_at
+            if exhausted:
+                streak, notify = self._finish_retry_failure(document.digest_key, now, error)
+                if notify:
+                    self._notify_failure(document.digest_key, streak, error, now)
+                logging.getLogger("argus.digest").error(
+                    "digest_api_retries_exhausted key=%s attempts=%d error=%s",
+                    document.digest_key, attempts, error,
+                )
             else:
-                document = replace(document, summary=document.summary + " API 当日调用预算已用完，使用算法摘要。")
-        return self._publish(document, now)
+                self._record_retry_failure(document.digest_key, retry, attempts, now, error)
+                logging.getLogger("argus.digest").warning(
+                    "digest_api_retry_failed key=%s attempt=%d error=%s",
+                    document.digest_key, attempts, error,
+                )
+            return document
+        polished = with_api_summary(document, summary, created_at=now)
+        published = self._publish(polished, now)
+        self._finish_retry(document.digest_key, retry, now)
+        return published
+
+    def _get_retry(self, digest_key: str) -> DigestRetryState | None:
+        getter = getattr(self.repository, "get_digest_retry", None)
+        return getter(digest_key) if getter is not None else self._retry_memory.get(digest_key)
+
+    def _start_retry(self, document: DigestDocument, now: int, error: str) -> None:
+        deadline = now + 5 * 60 * 60
+        starter = getattr(self.repository, "start_digest_retry", None)
+        if starter is not None:
+            starter(document.digest_key, document.version, now, deadline)
+        else:
+            self._retry_memory[document.digest_key] = DigestRetryState(
+                document.digest_key, document.version, 1, now + 4500, deadline, "pending", error
+            )
+
+    def _record_retry_failure(
+        self, digest_key: str, retry: DigestRetryState, attempts: int, now: int, error: str
+    ) -> None:
+        next_at = min(retry.retry_deadline_at, now + 4500)
+        recorder = getattr(self.repository, "record_digest_retry", None)
+        if recorder is not None:
+            recorder(digest_key, attempts=attempts, status="pending", next_attempt_at=next_at,
+                     last_error=error, now=now)
+        else:
+            self._retry_memory[digest_key] = replace(
+                retry, attempts=attempts, next_attempt_at=next_at, last_error=error
+            )
+
+    def _finish_retry(self, digest_key: str, retry: DigestRetryState, now: int) -> None:
+        recorder = getattr(self.repository, "record_digest_retry", None)
+        if recorder is not None:
+            recorder(digest_key, attempts=retry.attempts + 1, status="succeeded",
+                     next_attempt_at=None, last_error=None, now=now)
+        else:
+            self._retry_memory.pop(digest_key, None)
+        success = getattr(self.repository, "record_digest_success", None)
+        if success is not None:
+            success(now=now)
+
+    def _finish_retry_failure(self, digest_key: str, now: int, error: str) -> tuple[int, bool]:
+        recorder = getattr(self.repository, "record_digest_retry", None)
+        retry = self._get_retry(digest_key)
+        if recorder is not None and retry is not None:
+            recorder(digest_key, attempts=retry.attempts + 1, status="failed",
+                     next_attempt_at=None, last_error=error, now=now)
+        else:
+            self._retry_memory.pop(digest_key, None)
+        failure = getattr(self.repository, "record_digest_failure", None)
+        if failure is not None:
+            streak, notify = failure(digest_key, now=now)
+            return int(streak), bool(notify)
+        self._failure_streak_memory += 1
+        return self._failure_streak_memory, self._failure_streak_memory >= 3
+
+    def _finalize_expired_retries(self, now: int) -> None:
+        expired_reader = getattr(self.repository, "list_expired_digest_retries", None)
+        if expired_reader is None:
+            return
+        for retry in expired_reader(now):
+            error = retry.last_error or "digest AI retry window expired before all attempts"
+            streak, notify = self._finish_retry_failure(retry.digest_key, now, error)
+            if notify:
+                self._notify_failure(retry.digest_key, streak, error, now)
+            logging.getLogger("argus.digest").error(
+                "digest_api_retry_window_expired key=%s attempts=%d error=%s",
+                retry.digest_key, retry.attempts, error,
+            )
+
+    def _notify_failure(self, digest_key: str, streak: int, error: str, now: int) -> None:
+        if not self.config.notify:
+            return
+        enqueue = getattr(self.repository, "enqueue_digest_failure_notification", None)
+        if enqueue is not None:
+            click_url = f"{self.config.public_base_url}/digests/{quote(digest_key, safe='')}"
+            enqueue(digest_key=digest_key, streak=streak, error=error,
+                    topic=self.topic, click_url=click_url, now=now)
 
     def _prepare(self, now: int) -> DigestDocument | None:
         if not self.config.enabled:

@@ -134,6 +134,8 @@ class NewsCatalogTests(unittest.TestCase):
             "world_health_organization",
             "nasa",
             "usgs_earthquakes",
+            "nvidia_newsroom",
+            "us_embassy_china",
         ):
             self.assertIsNotNone(NEWS_SOURCE_CATALOG.get(entry_id))
         self.assertEqual((), NEWS_SOURCE_CATALOG.require("reuters").feeds)
@@ -145,6 +147,14 @@ class NewsCatalogTests(unittest.TestCase):
         self.assertEqual("JP", NEWS_SOURCE_CATALOG.require("bank_of_japan").region)
         self.assertEqual("CN", NEWS_SOURCE_CATALOG.require("china_ndrc").region)
         self.assertEqual("primary", NEWS_SOURCE_CATALOG.require("world_health_organization").source_tier)
+        nvidia = NEWS_SOURCE_CATALOG.require("nvidia_newsroom")
+        self.assertEqual("US", nvidia.region)
+        self.assertEqual("technology", nvidia.topic)
+        self.assertEqual("https://nvidianews.nvidia.com/rss.xml", nvidia.feeds[0].url)
+        embassy = NEWS_SOURCE_CATALOG.require("us_embassy_china")
+        self.assertEqual(IntegrationMode.VERIFIED_RSS, embassy.integration_mode)
+        self.assertEqual("https://china.usembassy-china.org.cn/category/alert/feed/", embassy.feeds[0].url)
+        self.assertEqual(5, embassy.default_importance)
 
     def test_catalog_template_carries_information_policy(self) -> None:
         source = NEWS_SOURCE_CATALOG.source_template(
@@ -155,6 +165,27 @@ class NewsCatalogTests(unittest.TestCase):
         self.assertEqual("primary", parsed.source_tier)
         self.assertEqual(4, parsed.default_importance)
         self.assertEqual("policy", parsed.settings["topic"])
+
+    def test_nvidia_newsroom_template_is_bounded_and_primary(self) -> None:
+        raw = NEWS_SOURCE_CATALOG.source_template("nvidia_newsroom", "news", "nvidia_news")
+        parsed = parse_source_config(raw)
+        self.assertEqual("rss", parsed.kind)
+        self.assertEqual(("nvidianews.nvidia.com", "blogs.nvidia.com"), parsed.allowed_hosts)
+        self.assertEqual("US", parsed.region)
+        self.assertEqual("primary", parsed.source_tier)
+        self.assertFalse(parsed.enabled)
+
+    def test_embassy_alert_template_is_bounded_and_primary(self) -> None:
+        entry = NEWS_SOURCE_CATALOG.require("us_embassy_china")
+        raw = NEWS_SOURCE_CATALOG.source_template(
+            "us_embassy_china", "alerts", "us_embassy_china_alerts",
+        )
+        parsed = parse_source_config(raw)
+        self.assertFalse(parsed.enabled)
+        self.assertEqual(("china.usembassy-china.org.cn",), parsed.allowed_hosts)
+        self.assertEqual("CN", parsed.region)
+        self.assertEqual("primary", parsed.source_tier)
+        self.assertEqual(5, entry.default_importance)
 
     def test_verified_template_requires_confirmation_only_when_enabling(self) -> None:
         disabled = NEWS_SOURCE_CATALOG.source_template(

@@ -6,7 +6,7 @@ import os
 import sqlite3
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -17,7 +17,7 @@ from .content import (
     ContentFetchWorkItem,
     ContentLevel,
 )
-from .digest import DigestCluster, DigestDocument, SourceCoverage
+from .digest import DigestCluster, DigestDocument, DigestRetryState, SourceCoverage
 from .manual_events import ManualEventSpec
 from .models import (
     AnalysisWorkItem,
@@ -35,7 +35,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 def read_active_config(path: Path) -> dict[str, Any] | None:
@@ -1126,6 +1126,53 @@ class Database:
                 self.connection.rollback()
                 raise
             version = 14
+
+        if version < 15:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 15:
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS digest_retry_state (
+                            digest_key TEXT PRIMARY KEY,
+                            fallback_version INTEGER NOT NULL CHECK (fallback_version >= 1),
+                            attempts INTEGER NOT NULL CHECK (attempts >= 1),
+                            next_attempt_at INTEGER,
+                            retry_deadline_at INTEGER NOT NULL CHECK (retry_deadline_at >= 0),
+                            status TEXT NOT NULL CHECK (status IN ('pending', 'succeeded', 'failed')),
+                            last_error TEXT,
+                            started_at INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL,
+                            CHECK ((status = 'pending' AND next_attempt_at IS NOT NULL) OR status != 'pending')
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS digest_failure_state (
+                            id INTEGER PRIMARY KEY CHECK (id = 1),
+                            consecutive_failures INTEGER NOT NULL CHECK (consecutive_failures >= 0),
+                            last_failed_digest_key TEXT,
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS digest_api_usage (
+                            digest_key TEXT PRIMARY KEY,
+                            calls INTEGER NOT NULL CHECK (calls >= 0),
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self.connection.execute("PRAGMA user_version=15")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 15
 
     def close(self) -> None:
         self.connection.close()
@@ -3102,6 +3149,29 @@ class Database:
             )
         return True
 
+    def reserve_digest_api_call(self, digest_key: str, *, limit: int, now: int) -> bool:
+        """Reserve a synthesis attempt independently from per-article API triage."""
+        if not digest_key or len(digest_key) > 128 or not 0 <= limit <= 5 or now < 0:
+            raise ValueError("digest API budget is invalid")
+        if limit == 0:
+            return False
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT calls FROM digest_api_usage WHERE digest_key = ?", (digest_key,)
+            ).fetchone()
+            if row is not None and int(row["calls"]) >= limit:
+                return False
+            self.connection.execute(
+                """
+                INSERT INTO digest_api_usage(digest_key, calls, updated_at)
+                VALUES (?, 1, ?)
+                ON CONFLICT(digest_key) DO UPDATE SET
+                    calls = digest_api_usage.calls + 1, updated_at = excluded.updated_at
+                """,
+                (digest_key, now),
+            )
+        return True
+
     def save_analysis_result(
         self,
         observation_id: int,
@@ -3619,6 +3689,190 @@ class Database:
         with self.connection:
             return self._insert_alert(candidate, None, now)
 
+    def enqueue_digest_failure_notification(
+        self,
+        *,
+        digest_key: str,
+        streak: int,
+        error: str,
+        topic: str,
+        click_url: str,
+        now: int,
+    ) -> bool:
+        """Queue the operator alert emitted after three consecutive AI failures."""
+        if not digest_key or not 1 <= streak <= 10000 or not topic or now < 0:
+            raise ValueError("digest failure notification request is invalid")
+        candidate = AlertCandidate(
+            rule_id="digest.ai_failure",
+            dedupe_key=f"digest:ai-failure:{digest_key}:{streak}",
+            title="日报 AI 连续生成失败",
+            message=(
+                f"日报 {digest_key} 已连续 {streak} 天无法生成 AI 版本，已保留算法版。"
+                f"请检查模型服务后处理。最近错误：{error[:500]}"
+            ),
+            priority=5,
+            tags=("digest", "ai", "incident"),
+            click_url=click_url,
+            topic=topic,
+            confidence=1.0,
+            evidence=(f"digest {digest_key}", f"consecutive_failures={streak}"),
+        )
+        with self.connection:
+            return self._insert_alert(candidate, None, now)
+
+    def start_digest_retry(
+        self, digest_key: str, fallback_version: int, now: int, retry_deadline_at: int
+    ) -> DigestRetryState:
+        if not digest_key or fallback_version < 1 or now < 0 or retry_deadline_at < now:
+            raise ValueError("digest retry start request is invalid")
+        next_attempt_at = min(retry_deadline_at, now + 4500)
+        with self.unit_of_work():
+            self.connection.execute(
+                """
+                INSERT INTO digest_retry_state(
+                    digest_key, fallback_version, attempts, next_attempt_at,
+                    retry_deadline_at, status, last_error, started_at, updated_at
+                ) VALUES (?, ?, 1, ?, ?, 'pending', NULL, ?, ?)
+                ON CONFLICT(digest_key) DO UPDATE SET
+                    fallback_version = excluded.fallback_version,
+                    attempts = 1,
+                    next_attempt_at = excluded.next_attempt_at,
+                    retry_deadline_at = excluded.retry_deadline_at,
+                    status = 'pending',
+                    last_error = NULL,
+                    started_at = excluded.started_at,
+                    updated_at = excluded.updated_at
+                """,
+                (digest_key, fallback_version, next_attempt_at, retry_deadline_at, now, now),
+            )
+        state = self.get_digest_retry(digest_key)
+        assert state is not None
+        return state
+
+    def get_digest_retry(self, digest_key: str) -> DigestRetryState | None:
+        row = self.connection.execute(
+            "SELECT * FROM digest_retry_state WHERE digest_key = ?", (digest_key,)
+        ).fetchone()
+        if row is None:
+            return None
+        return DigestRetryState(
+            digest_key=str(row["digest_key"]),
+            fallback_version=int(row["fallback_version"]),
+            attempts=int(row["attempts"]),
+            next_attempt_at=(int(row["next_attempt_at"]) if row["next_attempt_at"] is not None else None),
+            retry_deadline_at=int(row["retry_deadline_at"]),
+            status=str(row["status"]),
+            last_error=(str(row["last_error"]) if row["last_error"] is not None else None),
+        )
+
+    def list_expired_digest_retries(self, now: int) -> list[DigestRetryState]:
+        if now < 0:
+            raise ValueError("digest retry expiry timestamp is invalid")
+        rows = self.connection.execute(
+            "SELECT digest_key FROM digest_retry_state "
+            "WHERE status = 'pending' AND retry_deadline_at < ? "
+            "ORDER BY retry_deadline_at, digest_key LIMIT 30",
+            (now,),
+        )
+        return [state for row in rows
+                if (state := self.get_digest_retry(str(row["digest_key"]))) is not None]
+
+    def record_digest_retry(
+        self,
+        digest_key: str,
+        *,
+        attempts: int,
+        status: str,
+        next_attempt_at: int | None,
+        last_error: str | None,
+        now: int,
+    ) -> DigestRetryState:
+        if status not in {"pending", "succeeded", "failed"} or not 1 <= attempts <= 5 or now < 0:
+            raise ValueError("digest retry update is invalid")
+        if status == "pending" and next_attempt_at is None:
+            raise ValueError("pending digest retry requires next attempt")
+        with self.unit_of_work():
+            updated = self.connection.execute(
+                """
+                UPDATE digest_retry_state
+                SET attempts = ?, status = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
+                WHERE digest_key = ?
+                """,
+                (attempts, status, next_attempt_at, (last_error[:1000] if last_error else None), now, digest_key),
+            ).rowcount
+            if not updated:
+                raise KeyError(f"digest retry state does not exist: {digest_key}")
+        state = self.get_digest_retry(digest_key)
+        assert state is not None
+        return state
+
+    @staticmethod
+    def _digest_date(digest_key: str) -> date | None:
+        if not digest_key.startswith("daily:"):
+            return None
+        try:
+            return datetime.strptime(digest_key[6:], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    def record_digest_failure(self, digest_key: str, *, now: int) -> tuple[int, bool]:
+        """Record one fully failed day and return (streak, threshold_crossed)."""
+        if not digest_key or now < 0:
+            raise ValueError("digest failure record is invalid")
+        with self.unit_of_work():
+            row = self.connection.execute(
+                "SELECT consecutive_failures, last_failed_digest_key FROM digest_failure_state WHERE id = 1"
+            ).fetchone()
+            previous = int(row["consecutive_failures"]) if row is not None else 0
+            previous_key = str(row["last_failed_digest_key"]) if row and row["last_failed_digest_key"] else None
+            current_date = self._digest_date(digest_key)
+            previous_date = self._digest_date(previous_key or "")
+            if previous_key == digest_key:
+                streak = previous
+            elif current_date is not None and previous_date is not None and current_date.toordinal() == previous_date.toordinal() + 1:
+                streak = previous + 1
+            else:
+                streak = 1
+            self.connection.execute(
+                """
+                INSERT INTO digest_failure_state(id, consecutive_failures, last_failed_digest_key, updated_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    consecutive_failures = excluded.consecutive_failures,
+                    last_failed_digest_key = excluded.last_failed_digest_key,
+                    updated_at = excluded.updated_at
+                """,
+                (streak, digest_key, now),
+            )
+        return streak, streak == 3 and previous_key != digest_key
+
+    def record_digest_success(self, *, now: int) -> None:
+        if now < 0:
+            raise ValueError("digest success timestamp is invalid")
+        with self.unit_of_work():
+            self.connection.execute(
+                """
+                INSERT INTO digest_failure_state(id, consecutive_failures, last_failed_digest_key, updated_at)
+                VALUES (1, 0, NULL, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    consecutive_failures = 0,
+                    last_failed_digest_key = NULL,
+                    updated_at = excluded.updated_at
+                """,
+                (now,),
+            )
+
+    def get_digest_failure_state(self) -> tuple[int, str | None]:
+        row = self.connection.execute(
+            "SELECT consecutive_failures, last_failed_digest_key FROM digest_failure_state WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return 0, None
+        return int(row["consecutive_failures"]), (
+            str(row["last_failed_digest_key"])
+            if row["last_failed_digest_key"] else None
+        )
+
     def get_digest(
         self,
         digest_key: str,
@@ -3806,6 +4060,10 @@ class Database:
             "# TYPE argus_reminders gauge",
             f"argus_reminders{{status=\"enabled\"}} {status['reminders'].get('enabled', 0)}",
             f"argus_reminders{{status=\"disabled\"}} {status['reminders'].get('disabled', 0)}",
+            "# TYPE argus_digest_ai_retries gauge",
+            f"argus_digest_ai_retries{{status=\"pending\"}} {status['digest_ai']['retries'].get('pending', 0)}",
+            f"argus_digest_ai_retries{{status=\"failed\"}} {status['digest_ai']['retries'].get('failed', 0)}",
+            f"argus_digest_ai_failure_streak {status['digest_ai']['consecutive_failure_days']}",
         ])
         for source in status["sources"]:
             source_id = str(source["source_id"]).replace('"', '')
@@ -3869,6 +4127,9 @@ class Database:
                 )
                 self.connection.execute(
                     "DELETE FROM analysis_api_usage WHERE updated_at < ?", (audit_cutoff,)
+                )
+                self.connection.execute(
+                    "DELETE FROM digest_api_usage WHERE updated_at < ?", (audit_cutoff,)
                 )
                 self.connection.execute(
                     "DELETE FROM admin_auth_audit WHERE created_at < ?", (audit_cutoff,)
@@ -3951,6 +4212,16 @@ class Database:
                 "SELECT status, COUNT(*) AS count FROM content_fetch_jobs GROUP BY status"
             )
         }
+        digest_retries = {
+            str(row["status"]): int(row["count"])
+            for row in self.connection.execute(
+                "SELECT status, COUNT(*) AS count FROM digest_retry_state GROUP BY status"
+            )
+        }
+        failure_row = self.connection.execute(
+            "SELECT consecutive_failures, last_failed_digest_key "
+            "FROM digest_failure_state WHERE id = 1"
+        ).fetchone()
         revisions = [dict(row) for row in self.connection.execute(
             "SELECT revision, created_at, active FROM config_revisions WHERE active = 1 ORDER BY revision DESC LIMIT 1"
         )]
@@ -3966,6 +4237,13 @@ class Database:
                 "states": analysis_states,
                 "api_calls_today": int(usage_row["calls"]) if usage_row is not None else 0,
                 "budget_day": budget_day,
+            },
+            "digest_ai": {
+                "retries": digest_retries,
+                "consecutive_failure_days": int(failure_row["consecutive_failures"])
+                if failure_row is not None else 0,
+                "last_failed_digest_key": str(failure_row["last_failed_digest_key"])
+                if failure_row is not None and failure_row["last_failed_digest_key"] else None,
             },
             "outbox": outbox,
             "outbox_metrics": outbox_metrics,

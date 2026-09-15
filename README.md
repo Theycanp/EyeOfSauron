@@ -40,6 +40,10 @@ source health.
 - No secret is stored in this repository, SQLite, or application logs.
 - Daily digests are clustered across sources, versioned, and published through
   the same durable notification outbox.
+- Digest length adapts deterministically to that day's weighted signal, with 50
+  as a safety ceiling rather than a fixed target.
+- A failed AI digest publishes its algorithmic version on time, then persists
+  four retries over five hours; three fully failed days trigger an operator alert.
 
 ## Management backend
 
@@ -122,9 +126,9 @@ prefer the repository `.venv` when present. Dependency installation and online
 vulnerability audits remain explicit CI setup steps rather than hidden test
 network access.
 
-See `docs/ARCHITECTURE.md` for design decisions, `docs/PROVIDERS.md` for the
-provider capability contract and reviewed news catalog, and `docs/OPERATIONS.md`
-for deployment and recovery commands.
+Start with `docs/README.md` for the complete handoff map. `docs/ARCHITECTURE.md`
+records design decisions, `docs/PROVIDERS.md` defines provider contracts, and
+`docs/OPERATIONS.md` contains deployment and recovery commands.
 
 ## License
 

@@ -561,7 +561,7 @@ def _parse_digest(raw: Any) -> DigestConfig:
         enabled=enabled,
         timezone=timezone,
         daily_time=daily_time,
-        item_limit=_bounded_int({"item_limit": data.get("item_limit", 30)}, "item_limit", "digest", 1, 100),
+        item_limit=_bounded_int({"item_limit": data.get("item_limit", 50)}, "item_limit", "digest", 1, 100),
         observation_limit=_bounded_int({"observation_limit": data.get("observation_limit", 5000)}, "observation_limit", "digest", 1, 5000),
         notify=notify,
         public_base_url=public_base_url,
