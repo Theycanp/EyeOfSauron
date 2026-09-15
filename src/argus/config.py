@@ -140,7 +140,7 @@ class DigestConfig:
     public_base_url: str = ""
     api_summary: bool = True
     prompt_id: str = "digest"
-    prompt_version: int = 1
+    prompt_version: int = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -567,7 +567,7 @@ def _parse_digest(raw: Any) -> DigestConfig:
         public_base_url=public_base_url,
         api_summary=api_summary,
         prompt_id=prompt_id,
-        prompt_version=_bounded_int({"prompt_version": data.get("prompt_version", 1)}, "prompt_version", "digest", 1, 10000),
+        prompt_version=_bounded_int({"prompt_version": data.get("prompt_version", 2)}, "prompt_version", "digest", 1, 10000),
     )
 
 

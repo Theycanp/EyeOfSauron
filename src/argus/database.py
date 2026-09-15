@@ -33,7 +33,7 @@ from .reminders import ReminderError, ReminderSpec, next_daily_occurrence
 from .source_quality import SourceQualityPolicy, calculate_quality
 from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
-from .prompts import BUILTIN_PROMPTS, PromptTemplate, TRIAGE_V1
+from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
 SCHEMA_VERSION = 14
 
@@ -84,12 +84,20 @@ class Database:
                 self.connection.execute("PRAGMA busy_timeout=5000")
                 self._migrate()
                 with self.connection:
-                    for prompt in BUILTIN_PROMPTS.values():
+                    for prompt in BUILTIN_PROMPT_VERSIONS:
+                        latest = BUILTIN_PROMPTS[prompt.prompt_id]
                         self.connection.execute(
                             "INSERT OR IGNORE INTO prompts(prompt_id, version, system_text, active, actor, created_at) "
-                            "VALUES (?, ?, ?, 1, 'system', ?)",
-                            (prompt.prompt_id, prompt.version, prompt.system_text, int(time.time())),
+                            "VALUES (?, ?, ?, ?, 'system', ?)",
+                            (prompt.prompt_id, prompt.version, prompt.system_text,
+                             int(prompt.version == latest.version), int(time.time())),
                         )
+                        if prompt.version == latest.version:
+                            self.connection.execute(
+                                "UPDATE prompts SET active = 0 WHERE prompt_id = ? AND version != ? "
+                                "AND actor = 'system'",
+                                (prompt.prompt_id, prompt.version),
+                            )
             except Exception:
                 self.connection.close()
                 raise
