@@ -332,7 +332,14 @@ class RssCollector:
         max_content_age = int(self.config.settings.get("max_content_age_seconds", 0))
         headers = {
             "Accept": ", ".join(sorted(self.content_types)),
-            "User-Agent": "Argus/0.7 (personal feed monitor)",
+            # Some official WordPress/CDN deployments reject bare library-style
+            # agents even though their public feed is available to browsers.
+            # Keep an honest product identity while using the conventional
+            # compatible-agent shape expected by those edges.
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; EyeOfSauron-Argus/1.0; "
+                "+https://github.com/Theycanp/EyeOfSauron)"
+            ),
         }
         if state.etag and not max_content_age:
             headers["If-None-Match"] = state.etag

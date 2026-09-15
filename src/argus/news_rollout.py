@@ -24,6 +24,8 @@ OFFICIAL_NEWS_SELECTION = (
     ("usgs_earthquakes", "significant_month"),
     ("un_news", "chinese"),
     ("economist", "science_technology"),
+    ("nvidia_newsroom", "news"),
+    ("us_embassy_china", "alerts"),
 )
 
 
@@ -57,12 +59,11 @@ def plan_official_news(
         urls.add(source["url"])
     if additions:
         rule_id = "official_news_critical"
-        # A shared operator-edited rule must not silently be replaced.
-        if any(rule["id"] == rule_id for rule in rules):
-            raise ValueError("official_news_critical already exists; review additions and rule coverage manually")
-        rules.append({
+        official_rule = next((rule for rule in rules if rule.get("id") == rule_id), None)
+        if official_rule is None:
+            official_rule = {
             "id": rule_id, "kind": "weighted_text",
-            "source_ids": [source["id"] for source in additions],
+            "source_ids": [],
             "threshold": 8.0, "max_item_age_seconds": 172800,
             "notification_title": "重大一手信息", "priority": 4,
             "tags": ["rotating_light"],
@@ -80,5 +81,33 @@ def plan_official_news(
                  "regex": r"(?i)演练|演習|訓練|drill|exercise|anniversary|回顾|纪念|議事録|minutes of",
                  "title_weight": -12.0, "summary_weight": -4.0},
             ],
-        })
+            }
+            rules.append(official_rule)
+        covered = official_rule.setdefault("source_ids", [])
+        for source in additions:
+            if source["id"] not in covered:
+                covered.append(source["id"])
+        embassy_source_id = "us_embassy_china_alerts"
+        if embassy_source_id in {source["id"] for source in additions}:
+            embassy_rule = next(
+                (rule for rule in rules if rule.get("id") == "us_embassy_security_alerts"), None
+            )
+            if embassy_rule is None:
+                rules.append({
+                    "id": "us_embassy_security_alerts", "kind": "weighted_text",
+                    "source_ids": [embassy_source_id], "threshold": 4.0,
+                    "max_item_age_seconds": 172800,
+                    "notification_title": "美国驻华使馆安全提醒", "priority": 5,
+                    "tags": ["security", "embassy", "rotating_light"],
+                    "patterns": [
+                        {"label": "灾害与紧急安全提醒",
+                         "regex": r"(?i)alert|security|emergency|evacuat|natural disaster|typhoon|flood|earthquake|爆炸|地震|台风|洪水|紧急|安全提醒",
+                         "title_weight": 6.0, "summary_weight": 3.0},
+                        {"label": "普通信息降权",
+                         "regex": r"(?i)reminder|routine|general information|例行|常规",
+                         "title_weight": -2.0, "summary_weight": -1.0},
+                    ],
+                })
+            elif embassy_source_id not in embassy_rule.setdefault("source_ids", []):
+                embassy_rule["source_ids"].append(embassy_source_id)
     return result, additions

@@ -86,7 +86,73 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual('algorithm', digest.generation_kind)
         self.assertIn('失败', digest.summary)
         self.assertEqual(digest, await scheduler.process_once_async(self.now+60))
-        self.assertEqual(1, self.db.connection.execute('SELECT SUM(calls) FROM analysis_api_usage').fetchone()[0])
+        self.assertEqual(1, self.db.connection.execute('SELECT SUM(calls) FROM digest_api_usage').fetchone()[0])
+
+    async def test_digest_model_failure_retries_after_fallback_publication(self):
+        self.ingest(observation('retry-item', 'policy announcement', timestamp=self.now-10))
+
+        class EventuallyAvailable:
+            def __init__(self):
+                self.calls = 0
+
+            def summarize(self, digest):
+                self.calls += 1
+                if self.calls == 1:
+                    raise AnalyzerError('temporary provider outage')
+                return '模型恢复后补发的日报摘要，保留事实和证据编号。[1]'
+
+        summarizer = EventuallyAvailable()
+        scheduler = DigestScheduler(
+            DigestConfig(enabled=True, notify=False), self.db, topic='eos',
+            summarizer=summarizer, daily_api_budget=5,
+        )
+        fallback = await scheduler.process_once_async(self.now)
+        self.assertEqual('algorithm', fallback.generation_kind)
+        self.assertEqual('published', fallback.status)
+        self.assertEqual(1, summarizer.calls)
+        self.assertIsNotNone(self.db.get_digest_retry(fallback.digest_key))
+
+        # The worker polls frequently, but must not retry before its durable
+        # next-attempt timestamp.
+        same = await scheduler.process_once_async(self.now + 4499)
+        self.assertEqual(fallback.version, same.version)
+        self.assertEqual(1, summarizer.calls)
+
+        polished = await scheduler.process_once_async(self.now + 4500)
+        self.assertEqual('api', polished.generation_kind)
+        self.assertGreater(polished.version, fallback.version)
+        self.assertEqual(2, summarizer.calls)
+        self.assertEqual('succeeded', self.db.get_digest_retry(fallback.digest_key).status)
+
+    async def test_digest_model_failure_exhausts_exactly_five_attempts(self):
+        self.ingest(observation('failed-item', 'policy announcement', timestamp=self.now-10))
+
+        class AlwaysUnavailable:
+            calls = 0
+
+            def summarize(self, digest):
+                self.calls += 1
+                raise AnalyzerError('provider unavailable')
+
+        summarizer = AlwaysUnavailable()
+        scheduler = DigestScheduler(
+            DigestConfig(enabled=True, notify=False), self.db, topic='eos',
+            summarizer=summarizer,
+        )
+        fallback = await scheduler.process_once_async(self.now)
+        for offset in (4500, 9000, 13500, 18000):
+            await scheduler.process_once_async(self.now + offset)
+        state = self.db.get_digest_retry(fallback.digest_key)
+        self.assertEqual(5, summarizer.calls)
+        self.assertEqual(5, state.attempts)
+        self.assertEqual('failed', state.status)
+        self.assertEqual(
+            5,
+            self.db.connection.execute(
+                'SELECT calls FROM digest_api_usage WHERE digest_key = ?',
+                (fallback.digest_key,),
+            ).fetchone()[0],
+        )
 
     def test_digest_invalid_first_model_falls_back_to_second(self):
         self.ingest(observation('item', 'policy announcement', timestamp=self.now-10))
@@ -186,6 +252,7 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual('Saved official text', result.items[0].summary)
         tomorrow = await DigestScheduler(config, self.db, topic='eos', summarizer=Summary(), daily_api_budget=0).process_once_async(self.now+86400)
         self.assertEqual('algorithm', tomorrow.generation_kind)
+        self.assertIsNone(self.db.connection.execute('SELECT SUM(calls) FROM analysis_api_usage').fetchone()[0])
 
     def test_model_rejects_oversize_envelope_and_unknown_citations(self):
         client = OpenAICompatibleAnalyzer(AnalyzerSettings('https://example.test/v1', 'test', max_response_bytes=1024))

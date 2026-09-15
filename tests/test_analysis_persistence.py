@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from argus.analysis import AnalysisAttempt, analyze_observation
-from argus.database import Database
+from argus.database import Database, SCHEMA_VERSION
 from argus.models import FeedFetchResult
 from argus.rules import RuleSet
 from tests.helpers import observation
@@ -95,7 +95,7 @@ class AnalysisPersistenceTests(unittest.TestCase):
         target_connection.close()
         migrated = Database(copied)
         try:
-            self.assertEqual(14, migrated.status()["database_schema"])
+            self.assertEqual(SCHEMA_VERSION, migrated.status()["database_schema"])
         finally:
             migrated.close()
 

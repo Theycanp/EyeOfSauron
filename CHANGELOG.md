@@ -5,6 +5,27 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-15
+
+### Added
+
+- Publish an algorithmic digest immediately when AI synthesis fails, persist four
+  retries over five hours, republish a successful AI version, and alert after
+  three consecutive fully failed days.
+- Choose the daily digest size deterministically from weighted information
+  density, with the configured limit retained as a hard ceiling.
+- Add verified U.S. Embassy in China Alerts RSS and NVIDIA Newsroom RSS sources,
+  including a dedicated embassy security-alert rule.
+- Add a maintainer-oriented documentation map covering architecture, configuration,
+  digest policy, persistence, sources, operations, and fresh reproduction.
+
+### Changed
+
+- Digest AI attempt accounting is persistent and independent from per-observation
+  analysis budget (schema 15).
+- Use a browser-compatible, honest product User-Agent for public RSS endpoints
+  that reject library-only agents.
+
 ## [0.16.3] - 2026-09-15
 
 ### Changed

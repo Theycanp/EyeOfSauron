@@ -18,6 +18,7 @@ from argus.digest import (
     cluster_observations,
     with_api_summary,
     DigestScheduler,
+    adaptive_digest_item_count,
 )
 
 
@@ -127,6 +128,34 @@ class FakeDigestRepository:
 
 
 class DigestDomainTests(unittest.TestCase):
+    def _cluster(self, score: float, *, handling: str = "digest", key: str = "x") -> DigestCluster:
+        return DigestCluster(
+            cluster_key=f"{key}-{score}", title="主题", summary="摘要", score=score,
+            importance=3, urgency=2, relevance=3, confidence=0.5,
+            published_at=START, regions=("CN",), topics=("general",),
+            source_ids=("source",), observation_ids=(1,), links=("https://example.test",),
+            handling=handling,
+        )
+
+    def test_adaptive_item_count_scales_with_weighted_signal(self) -> None:
+        quiet = adaptive_digest_item_count([self._cluster(2.0, key=str(i)) for i in range(4)], max_items=50)
+        busy = adaptive_digest_item_count([self._cluster(5.5, key=str(i)) for i in range(20)], max_items=50)
+        self.assertEqual(2, quiet)
+        self.assertEqual(28, busy)
+
+    def test_adaptive_item_count_keeps_immediate_events_and_hard_ceiling(self) -> None:
+        clusters = [self._cluster(1.0, handling="immediate", key=str(i)) for i in range(8)]
+        self.assertEqual(8, adaptive_digest_item_count(clusters, max_items=10))
+        self.assertEqual(5, adaptive_digest_item_count(clusters, max_items=5))
+
+    def test_cluster_observations_adaptive_mode_uses_score_based_count(self) -> None:
+        rows = [
+            _row(index, f"独立主题 {index}", source_id=f"source_{index}", topic=f"topic_{index}", importance=2, urgency=1)
+            for index in range(1, 11)
+        ]
+        selected = cluster_observations(rows, max_items=50, adaptive=True)
+        self.assertEqual(9, len(selected))
+
     def test_clusters_duplicate_reports_and_ranks_regional_interest(self) -> None:
         rows = [
             _row(1, "财政部将向八家金融央企增资3600亿元", source_id="mof_cn"),
@@ -322,6 +351,80 @@ class DigestDatabaseTests(unittest.TestCase):
         alerts = self.database.list_alerts()
         self.assertEqual(2, len(alerts))
         self.assertIn("daily%3A2026-09-06", alerts[0]["click_url"])
+
+    def test_digest_retry_state_and_three_day_failure_threshold_are_idempotent(self) -> None:
+        first = self.database.start_digest_retry("daily:2026-09-01", 1, 100, 100 + 18000)
+        self.assertEqual(1, first.attempts)
+        self.assertEqual("pending", first.status)
+        updated = self.database.record_digest_retry(
+            first.digest_key, attempts=2, status="pending",
+            next_attempt_at=4600, last_error="temporary", now=200,
+        )
+        self.assertEqual(2, updated.attempts)
+        self.assertEqual(4600, updated.next_attempt_at)
+        self.database.record_digest_retry(
+            first.digest_key, attempts=5, status="failed",
+            next_attempt_at=None, last_error="permanent", now=300,
+        )
+        self.assertEqual("failed", self.database.get_digest_retry(first.digest_key).status)
+        self.assertEqual((1, False), self.database.record_digest_failure("daily:2026-09-01", now=301))
+        self.assertEqual((2, False), self.database.record_digest_failure("daily:2026-09-02", now=302))
+        self.assertEqual((3, True), self.database.record_digest_failure("daily:2026-09-03", now=303))
+        self.assertEqual((3, False), self.database.record_digest_failure("daily:2026-09-03", now=304))
+        self.assertEqual(3, self.database.status()["digest_ai"]["consecutive_failure_days"])
+        self.assertIn("argus_digest_ai_failure_streak 3", self.database.metrics_prometheus())
+        alerted = self.database.enqueue_digest_failure_notification(
+            digest_key="daily:2026-09-03", streak=3, error="provider unavailable",
+            topic="eos", click_url="https://eos.example.test/digests/daily%3A2026-09-03",
+            now=304,
+        )
+        again = self.database.enqueue_digest_failure_notification(
+            digest_key="daily:2026-09-03", streak=3, error="provider unavailable",
+            topic="eos", click_url="https://eos.example.test/digests/daily%3A2026-09-03",
+            now=305,
+        )
+        self.assertTrue(alerted)
+        self.assertFalse(again)
+        self.database.record_digest_success(now=305)
+        self.assertEqual((1, False), self.database.record_digest_failure("daily:2026-09-05", now=306))
+
+    def test_digest_api_budget_is_independent_and_persists_across_reopen(self) -> None:
+        key = "daily:2026-09-06"
+        self.assertTrue(self.database.reserve_digest_api_call(key, limit=5, now=100))
+        self.assertTrue(self.database.reserve_analysis_api_call("2026-09-06", limit=1, now=100))
+        self.assertFalse(self.database.reserve_analysis_api_call("2026-09-06", limit=1, now=101))
+        self.database.close()
+        self.database = Database(self.path)
+        for _ in range(4):
+            self.assertTrue(self.database.reserve_digest_api_call(key, limit=5, now=102))
+        self.assertFalse(self.database.reserve_digest_api_call(key, limit=5, now=102))
+
+    def test_schema_fourteen_migrates_to_durable_digest_retry_tables(self) -> None:
+        self.database.connection.executescript(
+            "DROP TABLE digest_retry_state; DROP TABLE digest_failure_state; "
+            "DROP TABLE digest_api_usage; PRAGMA user_version=14;"
+        )
+        self.database.close()
+        self.database = Database(self.path)
+        self.assertEqual(SCHEMA_VERSION, self.database.status()["database_schema"])
+        tables = {
+            str(row[0]) for row in self.database.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        self.assertTrue(
+            {"digest_retry_state", "digest_failure_state", "digest_api_usage"} <= tables
+        )
+        self.database.close()
+        self.database = Database(self.path)
+        self.assertTrue(self.database.reserve_digest_api_call("daily:2026-09-06", limit=5, now=100))
+
+    def test_expired_digest_retry_can_be_discovered_after_downtime(self) -> None:
+        retry = self.database.start_digest_retry("daily:2026-09-06", 1, 100, 18100)
+        self.assertEqual([], self.database.list_expired_digest_retries(18100))
+        self.database.close()
+        self.database = Database(self.path)
+        self.assertEqual([retry], self.database.list_expired_digest_retries(18101))
 
 
 if __name__ == "__main__":
