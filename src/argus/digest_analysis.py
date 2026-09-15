@@ -64,7 +64,10 @@ class ApiDigestSummarizer:
             index_result = json.loads(client.complete(index_payload))
             raw_ids = index_result.get("expand_topics") if isinstance(index_result, dict) else None
             if isinstance(raw_ids, list):
-                selected_ids = [number for number in raw_ids if type(number) is int and 1 <= number <= len(items)][:12]
+                selected_ids = list(dict.fromkeys(
+                    number for number in raw_ids
+                    if type(number) is int and 1 <= number <= len(items)
+                ))[:12]
         except (AnalyzerError, ValueError, TypeError):
             selected_ids = []
         if not selected_ids:

@@ -329,7 +329,7 @@ class ControlPlaneHTTPTests(unittest.TestCase):
         status, payload = self.request("/api/prompts")
         self.assertEqual(200, status)
         self.assertEqual(
-            {("digest", 1), ("triage", 1)},
+            {("digest", 2), ("digest", 1), ("triage", 1)},
             {(item["prompt_id"], item["version"]) for item in payload["prompts"]},
         )
         status, payload = self.request(

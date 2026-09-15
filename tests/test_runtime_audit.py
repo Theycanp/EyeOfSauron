@@ -22,6 +22,7 @@ from argus.models import FeedFetchResult, SourceState
 from argus.news_catalog import NEWS_SOURCE_CATALOG
 from argus.news_rollout import plan_official_news
 from argus.official_list import OfficialListCollector
+from argus.prompts import DIGEST_V2
 from argus.rss import FeedError, parse_feed
 from argus.rules import RuleSet
 from argus.runtime_rollout import plan_runtime_audit
@@ -129,6 +130,13 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('[13][7]', result)
         self.assertEqual([13, 7], calls[1]['selected_topic_ids'])
         self.assertEqual([13, 7], [item['id'] for item in calls[1]['items']])
+
+    def test_digest_prompt_defines_distinct_index_and_synthesis_contracts(self):
+        self.assertEqual(2, DIGEST_V2.version)
+        self.assertIn('stage 为 index', DIGEST_V2.system_text)
+        self.assertIn('expand_topics', DIGEST_V2.system_text)
+        self.assertIn('stage 为 synthesis', DIGEST_V2.system_text)
+        self.assertIn('summary', DIGEST_V2.system_text)
 
     async def test_digest_full_text_and_budget_use_repository_before_worker(self):
         item = replace(observation('content', 'Official release', timestamp=self.now-10),
