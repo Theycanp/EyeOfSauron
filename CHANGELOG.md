@@ -5,6 +5,18 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-15
+
+### Added
+
+- Configurable ordered model failover for local and remote analysis.
+- Staged daily digest synthesis: full-topic indexing followed by focused evidence synthesis.
+
+### Changed
+
+- Daily digest model processing now retries the next configured model after transport or validation failures while preserving one logical budget reservation.
+- The React settings page exposes local and remote fallback model lists.
+
 ## [0.15.3] - 2026-09-14
 
 ### Changed
@@ -265,7 +277,8 @@ Semantic Versioning and the Keep a Changelog structure.
 - Initial Bloomberg RSS monitoring, weighted alert rules, SQLite outbox, ntfy
   delivery, failure/recovery notifications, and baseline suppression.
 
-[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.3...HEAD
+[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.3...v0.16.0
 [0.15.3]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.2...v0.15.3
 [0.15.2]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.0...v0.15.1
