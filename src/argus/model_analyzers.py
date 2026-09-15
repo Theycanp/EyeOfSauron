@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from os import environ
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from .models import Observation
@@ -170,6 +170,35 @@ class OpenAICompatibleAnalyzer:
         if not isinstance(content, str):
             raise AnalyzerError("analyzer completion is not text")
         return content
+
+
+class FailoverAnalyzer:
+    """Try configured analyzers in order, keeping one logical model port."""
+
+    def __init__(self, analyzers: Sequence[OpenAICompatibleAnalyzer]) -> None:
+        self.analyzers = tuple(analyzers)
+        if not self.analyzers:
+            raise ValueError("at least one analyzer is required")
+        self.name = "failover(" + ",".join(analyzer.settings.model for analyzer in self.analyzers) + ")"
+        self.settings = self.analyzers[0].settings
+
+    def analyze(self, observation: Observation) -> Mapping[str, Any]:
+        failures: list[str] = []
+        for analyzer in self.analyzers:
+            try:
+                return analyzer.analyze(observation)
+            except Exception as exc:
+                failures.append(f"{analyzer.settings.model}:{type(exc).__name__}")
+        raise AnalyzerError("all configured analyzers failed: " + ", ".join(failures))
+
+    def complete(self, user_text: str) -> str:
+        failures: list[str] = []
+        for analyzer in self.analyzers:
+            try:
+                return analyzer.complete(user_text)
+            except Exception as exc:
+                failures.append(f"{analyzer.settings.model}:{type(exc).__name__}")
+        raise AnalyzerError("all configured analyzers failed: " + ", ".join(failures))
 
 
 class LocalModelAnalyzer(OpenAICompatibleAnalyzer):

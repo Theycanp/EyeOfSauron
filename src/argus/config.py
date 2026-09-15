@@ -105,11 +105,13 @@ class AnalysisConfig:
     local_enabled: bool = False
     local_base_url: str = "http://127.0.0.1:11434/v1"
     local_model: str = ""
+    local_model_fallbacks: tuple[str, ...] = ()
     api_enabled: bool = False
     api_triage_enabled: bool = False
     shadow_mode: bool = True
     api_base_url: str = ""
     api_model: str = ""
+    api_model_fallbacks: tuple[str, ...] = ()
     api_key_env: str = ""
     prompt_id: str = "triage"
     prompt_version: int = 1
@@ -427,8 +429,8 @@ def _parse_analysis(raw: Any) -> AnalysisConfig:
         return AnalysisConfig()
     data = _mapping(raw, "analysis")
     allowed = {
-        "enabled", "local_enabled", "local_base_url", "local_model", "api_enabled",
-        "api_base_url", "api_model", "api_key_env", "prompt_id", "prompt_version",
+        "enabled", "local_enabled", "local_base_url", "local_model", "local_model_fallbacks", "api_enabled",
+        "api_base_url", "api_model", "api_model_fallbacks", "api_key_env", "prompt_id", "prompt_version",
         "timeout_seconds", "max_input_chars", "max_response_bytes", "max_tokens",
         "max_items_per_run", "daily_api_budget", "send_full_text", "region_weights",
         "shadow_mode", "api_triage_enabled",
@@ -443,12 +445,27 @@ def _parse_analysis(raw: Any) -> AnalysisConfig:
     api_base_url = data.get("api_base_url", "")
     local_model = data.get("local_model", "")
     api_model = data.get("api_model", "")
+    local_fallbacks = data.get("local_model_fallbacks", [])
+    api_fallbacks = data.get("api_model_fallbacks", [])
     api_key_env = data.get("api_key_env", "")
     for key, value in (("local_base_url", local_base_url), ("api_base_url", api_base_url),
                        ("local_model", local_model), ("api_model", api_model),
                        ("api_key_env", api_key_env)):
         if not isinstance(value, str) or len(value) > 256:
             raise ConfigError(f"analysis.{key} is invalid")
+    def _models(value: Any, key: str) -> tuple[str, ...]:
+        if not isinstance(value, list) or len(value) > 8 or not all(isinstance(item, str) for item in value):
+            raise ConfigError(f"analysis.{key} must be an array of at most 8 strings")
+        result: list[str] = []
+        for item in value:
+            model = item.strip()
+            if not model or len(model) > 128 or any(ord(char) < 32 for char in model):
+                raise ConfigError(f"analysis.{key} contains an invalid model")
+            if model not in result:
+                result.append(model)
+        return tuple(result)
+    local_model_fallbacks = _models(local_fallbacks, "local_model_fallbacks")
+    api_model_fallbacks = _models(api_fallbacks, "api_model_fallbacks")
     for endpoint in (local_base_url, api_base_url):
         parsed_endpoint = urlsplit(endpoint)
         if parsed_endpoint.username or parsed_endpoint.password or parsed_endpoint.query or parsed_endpoint.fragment:
@@ -485,8 +502,10 @@ def _parse_analysis(raw: Any) -> AnalysisConfig:
         **values,
         local_base_url=local_base_url,
         local_model=local_model.strip(),
+        local_model_fallbacks=local_model_fallbacks,
         api_base_url=api_base_url,
         api_model=api_model.strip(),
+        api_model_fallbacks=api_model_fallbacks,
         api_key_env=api_key_env,
         prompt_id=prompt_id,
         prompt_version=prompt_version,

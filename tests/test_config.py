@@ -71,6 +71,37 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "HTTPS"):
                 load_config(path)
 
+    def test_analysis_model_fallbacks_are_deduplicated_and_bounded(self) -> None:
+        source = (PROJECT_ROOT / "config" / "argus.example.toml").read_text()
+        mutated = source.replace('enabled = false', 'enabled = true', 1).replace(
+            'api_enabled = false', 'api_enabled = true', 1
+        ).replace('api_base_url = ""', 'api_base_url = "https://api.example.test/v1"', 1).replace(
+            'api_model = ""', 'api_model = "primary"', 1
+        ).replace('api_model_fallbacks = []', 'api_model_fallbacks = ["backup", "primary", "backup"]', 1).replace(
+            'api_key_env = "ARGUS_AI_API_KEY"', 'api_key_env = "TEST_API_KEY"', 1
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fallbacks.toml"
+            path.write_text(mutated)
+            config = load_config(path)
+        self.assertEqual(("backup", "primary"), config.analysis.api_model_fallbacks)
+
+    def test_analysis_model_fallbacks_reject_more_than_eight(self) -> None:
+        source = (PROJECT_ROOT / "config" / "argus.example.toml").read_text()
+        models = ", ".join(f'"m{i}"' for i in range(9))
+        mutated = source.replace('enabled = false', 'enabled = true', 1).replace(
+            'api_enabled = false', 'api_enabled = true', 1
+        ).replace('api_base_url = ""', 'api_base_url = "https://api.example.test/v1"', 1).replace(
+            'api_model = ""', 'api_model = "primary"', 1
+        ).replace('api_model_fallbacks = []', f'api_model_fallbacks = [{models}]', 1).replace(
+            'api_key_env = "ARGUS_AI_API_KEY"', 'api_key_env = "TEST_API_KEY"', 1
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "too-many-fallbacks.toml"
+            path.write_text(mutated)
+            with self.assertRaisesRegex(ConfigError, "at most 8"):
+                load_config(path)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,12 @@ from .database import Database, read_active_config
 from .content import PublicDocumentFetcher
 from .digest import DigestScheduler
 from .digest_analysis import ApiDigestSummarizer
-from .model_analyzers import AnalyzerSettings, LocalModelAnalyzer, OpenAICompatibleAnalyzer
+from .model_analyzers import (
+    AnalyzerSettings,
+    FailoverAnalyzer,
+    LocalModelAnalyzer,
+    OpenAICompatibleAnalyzer,
+)
 from .notifier import DEFAULT_NOTIFIER_REGISTRY, NotifyError
 from .prompts import PromptTemplate
 from .rules import RuleSet
@@ -93,27 +98,32 @@ def _build_service(
             "prompt_id": config.analysis.prompt_id,
             "prompt_version": config.analysis.prompt_version,
         }
+        def build_models(model: str, fallbacks: tuple[str, ...], *, local: bool,
+                         prompt_template: PromptTemplate, prompt_common: dict[str, object]):
+            models = tuple(dict.fromkeys((model, *fallbacks)))
+            clients = []
+            for candidate in models:
+                settings = AnalyzerSettings(
+                    config.analysis.local_base_url if local else config.analysis.api_base_url,
+                    candidate,
+                    **prompt_common,
+                )
+                clients.append(
+                    LocalModelAnalyzer(settings, prompt=prompt_template)
+                    if local else OpenAICompatibleAnalyzer(
+                        settings, api_key_env=config.analysis.api_key_env, prompt=prompt_template
+                    )
+                )
+            return clients[0] if len(clients) == 1 else FailoverAnalyzer(clients)
+
         local_analyzer = (
-            LocalModelAnalyzer(
-                AnalyzerSettings(
-                    config.analysis.local_base_url,
-                    config.analysis.local_model,
-                    **common,
-                ),
-                prompt=prompt,
-            )
+            build_models(config.analysis.local_model, config.analysis.local_model_fallbacks,
+                         local=True, prompt_template=prompt, prompt_common=common)
             if config.analysis.local_enabled else None
         )
         api_analyzer = (
-            OpenAICompatibleAnalyzer(
-                AnalyzerSettings(
-                    config.analysis.api_base_url,
-                    config.analysis.api_model,
-                    **common,
-                ),
-                api_key_env=config.analysis.api_key_env,
-                prompt=prompt,
-            )
+            build_models(config.analysis.api_model, config.analysis.api_model_fallbacks,
+                         local=False, prompt_template=prompt, prompt_common=common)
             if config.analysis.api_enabled else None
         )
         analysis_orchestrator = AnalysisOrchestrator(
@@ -127,18 +137,27 @@ def _build_service(
         stored_digest_prompt = database.get_prompt(config.digest.prompt_id, config.digest.prompt_version)
         if stored_digest_prompt is None:
             raise ConfigError("configured digest prompt version does not exist")
-        summarizer = ApiDigestSummarizer(OpenAICompatibleAnalyzer(
-            AnalyzerSettings(
-                config.analysis.api_base_url, config.analysis.api_model,
-                timeout_seconds=config.analysis.timeout_seconds,
-                max_input_chars=config.analysis.max_input_chars,
-                max_response_bytes=config.analysis.max_response_bytes,
-                max_tokens=config.analysis.max_tokens,
-                prompt_id=config.digest.prompt_id, prompt_version=config.digest.prompt_version,
-            ), api_key_env=config.analysis.api_key_env,
-            prompt=PromptTemplate(str(stored_digest_prompt['prompt_id']),
-                                  int(stored_digest_prompt['version']), str(stored_digest_prompt['system_text'])),
-        ))
+        digest_prompt = PromptTemplate(
+            str(stored_digest_prompt['prompt_id']), int(stored_digest_prompt['version']),
+            str(stored_digest_prompt['system_text']),
+        )
+        digest_common = {
+            "timeout_seconds": config.analysis.timeout_seconds,
+            "max_input_chars": config.analysis.max_input_chars,
+            "max_response_bytes": config.analysis.max_response_bytes,
+            "max_tokens": config.analysis.max_tokens,
+            "prompt_id": config.digest.prompt_id,
+            "prompt_version": config.digest.prompt_version,
+        }
+        digest_clients = [
+            OpenAICompatibleAnalyzer(
+                AnalyzerSettings(config.analysis.api_base_url, model, **digest_common),
+                api_key_env=config.analysis.api_key_env,
+                prompt=digest_prompt,
+            )
+            for model in tuple(dict.fromkeys((config.analysis.api_model, *config.analysis.api_model_fallbacks)))
+        ]
+        summarizer = ApiDigestSummarizer(digest_clients)
     digest_scheduler = (
         DigestScheduler(
             config.digest,

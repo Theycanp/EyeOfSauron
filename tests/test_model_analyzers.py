@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from argus.model_analyzers import AnalyzerError, AnalyzerSettings, LocalModelAnalyzer, OpenAICompatibleAnalyzer
+from argus.model_analyzers import AnalyzerError, AnalyzerSettings, FailoverAnalyzer, LocalModelAnalyzer, OpenAICompatibleAnalyzer
 from argus.prompts import PromptTemplate
 from tests.helpers import observation
 
@@ -74,3 +74,21 @@ class ModelAnalyzerTests(unittest.TestCase):
         })))
         with self.assertRaisesRegex(AnalyzerError, "region"):
             OpenAICompatibleAnalyzer(self.settings).analyze(observation("one", "headline"))
+
+    def test_failover_uses_next_model_after_failure(self):
+        first = OpenAICompatibleAnalyzer(AnalyzerSettings("https://api.example.test/v1", "first"))
+        second = OpenAICompatibleAnalyzer(AnalyzerSettings("https://api.example.test/v1", "second"))
+        first.analyze = Mock(side_effect=AnalyzerError("unavailable"))  # type: ignore[method-assign]
+        second.analyze = Mock(return_value={"importance": 3, "urgency": 2, "relevance": 3, "confidence": 0.8})  # type: ignore[method-assign]
+        result = FailoverAnalyzer((first, second)).analyze(observation("one", "headline"))
+        self.assertEqual(3, result["importance"])
+        first.analyze.assert_called_once()
+        second.analyze.assert_called_once()
+
+    def test_failover_reports_all_models_failed_without_secrets(self):
+        first = OpenAICompatibleAnalyzer(AnalyzerSettings("https://api.example.test/v1", "first"))
+        second = OpenAICompatibleAnalyzer(AnalyzerSettings("https://api.example.test/v1", "second"))
+        first.analyze = Mock(side_effect=AnalyzerError("provider unavailable"))  # type: ignore[method-assign]
+        second.analyze = Mock(side_effect=TimeoutError())  # type: ignore[method-assign]
+        with self.assertRaisesRegex(AnalyzerError, "first:AnalyzerError, second:TimeoutError"):
+            FailoverAnalyzer((first, second)).analyze(observation("one", "headline"))

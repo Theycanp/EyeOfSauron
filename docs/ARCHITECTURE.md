@@ -52,7 +52,11 @@ Semantic enrichment depends only on the `Analyzer.analyze` port. Prompt text is
 versioned configuration owned by the analysis subsystem, never concatenated
 from article instructions or accepted from an untrusted feed. Remote API and
 local-model adapters are optional and disabled by default; their structured
-output is bounded, validated, and advisory.
+output is bounded, validated, and advisory. Each adapter can be wrapped in an
+ordered failover chain. A candidate is abandoned on transport failure or
+validation failure, and the next candidate is tried without bypassing the
+single logical API budget reservation. If every candidate fails, deterministic
+analysis or the algorithmic digest remains authoritative.
 
 Incidents are durable records separate from notification attempts. An `event`
 is a one-off fact such as a breaking-news match and is immediately `recorded`;

@@ -79,7 +79,8 @@ def plan_runtime_audit(current: Mapping[str, Any]) -> tuple[dict[str, Any], list
     planned.setdefault('analysis', {
         'enabled':True, 'api_enabled':True, 'api_triage_enabled':False,
         'local_enabled':False, 'shadow_mode':True,
-        'api_base_url':'https://api.juggler.cc/v1', 'api_model':'gpt-5.4-mini',
+        'api_base_url':'https://api.juggler.cc/v1', 'api_model':'gpt-5.6-sol',
+        'api_model_fallbacks':['gpt-6-astra'],
         'api_key_env':'ARGUS_ANALYSIS_API_KEY', 'timeout_seconds':45,
         'max_input_chars':40000, 'max_response_bytes':65536, 'max_tokens':3000,
         'max_items_per_run':50, 'daily_api_budget':2, 'send_full_text':False,

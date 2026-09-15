@@ -351,10 +351,12 @@ export interface AnalysisConfig extends JsonRecord {
   local_enabled?: boolean
   local_base_url?: string
   local_model?: string
+  local_model_fallbacks?: string[]
   api_enabled?: boolean
   api_triage_enabled?: boolean
   api_base_url?: string
   api_model?: string
+  api_model_fallbacks?: string[]
   api_key_env?: string
   prompt_id?: string
   prompt_version?: number
