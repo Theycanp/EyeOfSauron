@@ -54,7 +54,7 @@ class ApiDigestSummarizer:
                  for index, item in enumerate(digest.items, 1)]
         index_payload = json.dumps({
             "stage": "index",
-            "instruction": "浏览全部主题，返回需要深入阅读的主题编号。只输出 JSON：{\"expand_topics\":[整数]}。优先选择重大变化、跨来源关联、官方公告、信源分歧和可能影响用户关注地区或市场的主题。最多选择 12 个。",
+            "instruction": "浏览全部主题，自主选择真正需要深入阅读的主题编号。只输出 JSON：{\"expand_topics\":[整数]}。优先选择重大变化、跨来源关联、官方公告、信源分歧和可能影响用户关注地区或市场的主题，不要为了凑数量而全选。",
             "items": items,
         }, ensure_ascii=False)
         if len(index_payload) > limit:
@@ -67,11 +67,11 @@ class ApiDigestSummarizer:
                 selected_ids = list(dict.fromkeys(
                     number for number in raw_ids
                     if type(number) is int and 1 <= number <= len(items)
-                ))[:12]
+                ))
         except (AnalyzerError, ValueError, TypeError):
             selected_ids = []
         if not selected_ids:
-            selected_ids = list(range(1, min(12, len(items)) + 1))
+            selected_ids = list(range(1, len(items) + 1))
         selected = tuple(
             item if not item.observation_ids else item
             for item in (digest.items[number - 1] for number in selected_ids)

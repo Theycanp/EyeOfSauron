@@ -22,7 +22,7 @@ from argus.models import FeedFetchResult, SourceState
 from argus.news_catalog import NEWS_SOURCE_CATALOG
 from argus.news_rollout import plan_official_news
 from argus.official_list import OfficialListCollector
-from argus.prompts import DIGEST_V2
+from argus.prompts import DIGEST_V3
 from argus.rss import FeedError, parse_feed
 from argus.rules import RuleSet
 from argus.runtime_rollout import plan_runtime_audit
@@ -131,12 +131,43 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([13, 7], calls[1]['selected_topic_ids'])
         self.assertEqual([13, 7], [item['id'] for item in calls[1]['items']])
 
+    def test_large_digest_keeps_all_model_selected_topics(self):
+        rows = [
+            _row(index, f'独立主题 {index}', source_id=f'source_{index}', topic=f'topic_{index}')
+            for index in range(1, 16)
+        ]
+        digest = DigestBuilder(FakeDigestRepository(rows)).build(
+            digest_key='test:all-selected', period_start=self.now - 86400, period_end=self.now,
+            timezone='Asia/Shanghai', created_at=self.now,
+        )
+        client = OpenAICompatibleAnalyzer(AnalyzerSettings('https://api.example.test/v1', 'model'))
+        calls = []
+
+        def complete(payload):
+            calls.append(json.loads(payload))
+            if len(calls) == 1:
+                return json.dumps({'expand_topics': list(range(1, 16))})
+            ids = list(range(1, 16))
+            return json.dumps({
+                'summary': ' '.join(f'主题 {index} 的事实与影响已核对。[{index}]' for index in ids),
+                'citations': ids,
+            })
+
+        client.complete = Mock(side_effect=complete)  # type: ignore[method-assign]
+        ApiDigestSummarizer(client).summarize(digest)
+        self.assertEqual(list(range(1, 16)), calls[1]['selected_topic_ids'])
+        self.assertEqual(15, len(calls[1]['items']))
+
     def test_digest_prompt_defines_distinct_index_and_synthesis_contracts(self):
-        self.assertEqual(2, DIGEST_V2.version)
-        self.assertIn('stage 为 index', DIGEST_V2.system_text)
-        self.assertIn('expand_topics', DIGEST_V2.system_text)
-        self.assertIn('stage 为 synthesis', DIGEST_V2.system_text)
-        self.assertIn('summary', DIGEST_V2.system_text)
+        self.assertEqual(3, DIGEST_V3.version)
+        self.assertIn('stage 为 index', DIGEST_V3.system_text)
+        self.assertIn('expand_topics', DIGEST_V3.system_text)
+        self.assertIn('自主决定需要深入阅读的主题数量', DIGEST_V3.system_text)
+        self.assertNotIn('最多选择 12 个', DIGEST_V3.system_text)
+        self.assertIn('stage 为 synthesis', DIGEST_V3.system_text)
+        self.assertIn('由你根据材料复杂度决定合适长度', DIGEST_V3.system_text)
+        self.assertNotIn('600 至 1200 字', DIGEST_V3.system_text)
+        self.assertIn('summary', DIGEST_V3.system_text)
 
     async def test_digest_full_text_and_budget_use_repository_before_worker(self):
         item = replace(observation('content', 'Official release', timestamp=self.now-10),

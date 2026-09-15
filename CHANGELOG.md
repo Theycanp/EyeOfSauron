@@ -5,6 +5,17 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-09-15
+
+### Changed
+
+- Let the digest model choose any number of topics that genuinely require
+  deeper synthesis instead of imposing a twelve-topic selection limit.
+- Let the model choose a concise, fact-complete summary length based on the
+  material rather than recommending a fixed word range.
+- Keep bounded request and response budgets as reliability safeguards, and
+  preserve strict citation validation for every selected topic.
+
 ## [0.16.2] - 2026-09-15
 
 ### Fixed
@@ -293,7 +304,8 @@ Semantic Versioning and the Keep a Changelog structure.
 - Initial Bloomberg RSS monitoring, weighted alert rules, SQLite outbox, ntfy
   delivery, failure/recovery notifications, and baseline suppression.
 
-[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.16.2...HEAD
+[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.16.3...HEAD
+[0.16.3]: https://github.com/Theycanp/EyeOfSauron/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/Theycanp/EyeOfSauron/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/Theycanp/EyeOfSauron/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.3...v0.16.0
