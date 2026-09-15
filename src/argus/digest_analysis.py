@@ -39,16 +39,63 @@ class ApiDigestSummarizer:
 
     @staticmethod
     def _summarize_with(client: OpenAICompatibleAnalyzer, digest: DigestDocument) -> str:
+        if len(digest.items) > 12:
+            return ApiDigestSummarizer._summarize_large_digest(client, digest)
+        return ApiDigestSummarizer._synthesize(client, digest, digest.items)
+
+    @staticmethod
+    def _summarize_large_digest(client: OpenAICompatibleAnalyzer, digest: DigestDocument) -> str:
+        """Use a map/select pass before spending context on the final synthesis."""
         limit = client.settings.max_input_chars
-        # Distribute the input budget across all selected topics, rather than
-        # truncate a JSON string halfway through (or omit its last sources).
-        per_item = max(40, (limit - 1000) // max(1, len(digest.items)) - 200)
+        index_budget = max(12000, min(40000, limit // 2))
+        per_item = max(80, (index_budget - 1000) // max(1, len(digest.items)) - 80)
         items = [{"id": index, "title": item.title[:min(300, per_item // 2)],
                   "summary": item.summary[:per_item // 2], "regions": item.regions}
                  for index, item in enumerate(digest.items, 1)]
-        payload = json.dumps({"items": items}, ensure_ascii=False)
+        index_payload = json.dumps({
+            "stage": "index",
+            "instruction": "浏览全部主题，返回需要深入阅读的主题编号。只输出 JSON：{\"expand_topics\":[整数]}。优先选择重大变化、跨来源关联、官方公告、信源分歧和可能影响用户关注地区或市场的主题。最多选择 12 个。",
+            "items": items,
+        }, ensure_ascii=False)
+        if len(index_payload) > limit:
+            raise AnalyzerError("digest index input budget is too small for all selected topics")
+        selected_ids: list[int] = []
+        try:
+            index_result = json.loads(client.complete(index_payload))
+            raw_ids = index_result.get("expand_topics") if isinstance(index_result, dict) else None
+            if isinstance(raw_ids, list):
+                selected_ids = [number for number in raw_ids if type(number) is int and 1 <= number <= len(items)][:12]
+        except (AnalyzerError, ValueError, TypeError):
+            selected_ids = []
+        if not selected_ids:
+            selected_ids = list(range(1, min(12, len(items)) + 1))
+        selected = tuple(
+            item if not item.observation_ids else item
+            for item in (digest.items[number - 1] for number in selected_ids)
+        )
+        return ApiDigestSummarizer._synthesize(client, digest, selected, index_ids=selected_ids)
+
+    @staticmethod
+    def _synthesize(
+        client: OpenAICompatibleAnalyzer,
+        digest: DigestDocument,
+        evidence_items: Sequence,
+        *,
+        index_ids: Sequence[int] | None = None,
+    ) -> str:
+        limit = client.settings.max_input_chars
+        per_item = max(80, (limit - 1200) // max(1, len(evidence_items)) - 120)
+        items = [{"id": index, "title": item.title[:min(300, per_item // 2)],
+                  "summary": item.summary[:per_item], "regions": item.regions}
+                 for index, item in enumerate(evidence_items, 1)]
+        payload = json.dumps({
+            "stage": "synthesis",
+            "instruction": "基于证据完成最终日报。输出 JSON：{\"summary\":\"中文摘要\",\"citations\":[1,2]}。摘要必须覆盖最重要变化、主题关联、影响、不确定性和后续观察；每个事实段落使用 [编号] 引用。",
+            "selected_topic_ids": list(index_ids or range(1, len(items) + 1)),
+            "items": items,
+        }, ensure_ascii=False)
         if len(payload) > limit:
-            raise AnalyzerError("digest input budget is too small for all selected topics")
+            raise AnalyzerError("digest evidence input budget is too small")
         raw = client.complete(payload)
         try:
             result = json.loads(raw)
