@@ -5,6 +5,13 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-09-15
+
+### Fixed
+
+- Preserve the original daily topic numbers through staged AI selection so
+  citations in the synthesized summary point to the correct visible items.
+
 ## [0.16.0] - 2026-09-15
 
 ### Added
@@ -277,7 +284,8 @@ Semantic Versioning and the Keep a Changelog structure.
 - Initial Bloomberg RSS monitoring, weighted alert rules, SQLite outbox, ntfy
   delivery, failure/recovery notifications, and baseline suppression.
 
-[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/Theycanp/EyeOfSauron/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/Theycanp/EyeOfSauron/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.3...v0.16.0
 [0.15.3]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.2...v0.15.3
 [0.15.2]: https://github.com/Theycanp/EyeOfSauron/compare/v0.15.1...v0.15.2

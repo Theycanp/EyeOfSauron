@@ -14,7 +14,7 @@ from argus.analysis import analyze_observation
 from argus.config import DigestConfig, _parse_rule, parse_source_config
 from argus.content import ContentDocumentDraft, ContentLevel
 from argus.database import Database
-from argus.digest import DigestScheduler, cluster_observations
+from argus.digest import DigestBuilder, DigestScheduler, cluster_observations
 from argus.digest_analysis import ApiDigestSummarizer
 from argus.host import HostHealthCollector, _matches
 from argus.model_analyzers import AnalyzerError, AnalyzerSettings, OpenAICompatibleAnalyzer
@@ -26,7 +26,7 @@ from argus.rss import FeedError, parse_feed
 from argus.rules import RuleSet
 from argus.runtime_rollout import plan_runtime_audit
 from tests.helpers import observation
-from tests.test_digest import _row
+from tests.test_digest import FakeDigestRepository, _row
 
 
 class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
@@ -101,6 +101,34 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('第二个模型成功', result)
         first.complete.assert_called_once()
         second.complete.assert_called_once()
+
+    def test_large_digest_preserves_original_topic_ids_in_synthesis(self):
+        rows = [
+            _row(index, f'独立主题 {index}', source_id=f'source_{index}', topic=f'topic_{index}')
+            for index in range(1, 14)
+        ]
+        digest = DigestBuilder(FakeDigestRepository(rows)).build(
+            digest_key='test:large', period_start=self.now - 86400, period_end=self.now,
+            timezone='Asia/Shanghai', created_at=self.now,
+        )
+        self.assertEqual(13, len(digest.items))
+        client = OpenAICompatibleAnalyzer(AnalyzerSettings('https://api.example.test/v1', 'model'))
+        calls = []
+
+        def complete(payload):
+            calls.append(json.loads(payload))
+            if len(calls) == 1:
+                return json.dumps({'expand_topics': [13, 7]})
+            return json.dumps({
+                'summary': '模型综合了原始编号十三和七的主题，引用仍能直接对应日报列表，并保留了可核对的事实、影响和后续观察信息。[13][7]',
+                'citations': [13, 7],
+            })
+
+        client.complete = Mock(side_effect=complete)  # type: ignore[method-assign]
+        result = ApiDigestSummarizer(client).summarize(digest)
+        self.assertIn('[13][7]', result)
+        self.assertEqual([13, 7], calls[1]['selected_topic_ids'])
+        self.assertEqual([13, 7], [item['id'] for item in calls[1]['items']])
 
     async def test_digest_full_text_and_budget_use_repository_before_worker(self):
         item = replace(observation('content', 'Official release', timestamp=self.now-10),

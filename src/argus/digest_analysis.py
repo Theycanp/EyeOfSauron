@@ -85,13 +85,16 @@ class ApiDigestSummarizer:
     ) -> str:
         limit = client.settings.max_input_chars
         per_item = max(80, (limit - 1200) // max(1, len(evidence_items)) - 120)
-        items = [{"id": index, "title": item.title[:min(300, per_item // 2)],
+        evidence_ids = tuple(index_ids or range(1, len(evidence_items) + 1))
+        if len(evidence_ids) != len(evidence_items):
+            raise AnalyzerError("digest evidence identifiers are inconsistent")
+        items = [{"id": evidence_id, "title": item.title[:min(300, per_item // 2)],
                   "summary": item.summary[:per_item], "regions": item.regions}
-                 for index, item in enumerate(evidence_items, 1)]
+                 for evidence_id, item in zip(evidence_ids, evidence_items, strict=True)]
         payload = json.dumps({
             "stage": "synthesis",
             "instruction": "基于证据完成最终日报。输出 JSON：{\"summary\":\"中文摘要\",\"citations\":[1,2]}。摘要必须覆盖最重要变化、主题关联、影响、不确定性和后续观察；每个事实段落使用 [编号] 引用。",
-            "selected_topic_ids": list(index_ids or range(1, len(items) + 1)),
+            "selected_topic_ids": list(evidence_ids),
             "items": items,
         }, ensure_ascii=False)
         if len(payload) > limit:
@@ -107,7 +110,7 @@ class ApiDigestSummarizer:
         if not isinstance(summary, str) or not 40 <= len(summary.strip()) <= 16000:
             raise AnalyzerError("digest summary length is invalid")
         if not isinstance(citations, list) or not citations or any(
-            type(number) is not int or not 1 <= number <= len(items) for number in citations
+            type(number) is not int or number not in evidence_ids for number in citations
         ):
             raise AnalyzerError("digest citations are invalid")
         references = {int(number) for number in re.findall(r"\[(\d+)\]", summary)}
