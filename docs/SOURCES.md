@@ -58,6 +58,11 @@ The UN OCHA RSS candidate is handled the same way: its endpoint returned HTTP
 406 (bot-activity rejection) to the EOS collector on 2026-09-16. It remains in
 the reviewed catalog but is not part of the default activation set.
 
+The Australian Prime Minister RSS candidate returned HTTP 403 during the
+production atomic rollout on 2026-09-16. It also remains catalog-only; the
+failed probe made no configuration change and the other verified sources were
+re-probed before a new rollout attempt.
+
 ## Activation and change control
 
 Use `scripts/operations/activate_news_sources.py` with the active configuration

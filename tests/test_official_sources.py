@@ -22,6 +22,13 @@ class OfficialSourcesTests(unittest.TestCase):
         )
         self.source = parse_source_config(self.raw)
 
+    def test_unavailable_catalog_candidates_are_not_in_atomic_rollout(self) -> None:
+        planned, _ = plan_official_news({})
+        source_ids = {source["id"] for source in planned["sources"]}
+        self.assertNotIn("australian_prime_minister_media", source_ids)
+        self.assertNotIn("un_ocha_news", source_ids)
+        self.assertNotIn("us_embassy_china_alerts", source_ids)
+
     def test_index_only_collects_dated_allowed_articles_and_deduplicates(self) -> None:
         payload = '''<html><script>var x="<a href='./202609/t20260911_9.htm'>Script false news</a>";</script>
         <a href="./202609/t20260911_1.htm" title="财政政策重要公告">截断...</a>
