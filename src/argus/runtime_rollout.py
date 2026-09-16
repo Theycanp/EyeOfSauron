@@ -76,7 +76,12 @@ def plan_runtime_audit(current: Mapping[str, Any]) -> tuple[dict[str, Any], list
                       'patterns':[{'label':'异常与恢复','regex':'.','title_weight':2,'summary_weight':1}]})
     # There was no semantic runtime configuration in production. Existing
     # operator choices, including a later explicit disable, remain authoritative.
-    planned.setdefault('analysis', {
+    default_region_weights = {
+        'EAST_ASIA':5, 'NORTH_AMERICA':4, 'EUROPE':4,
+        'AUSTRALIA_OCEANIA':4, 'SOUTHEAST_ASIA':3, 'MIDDLE_EAST':3,
+        'SOUTH_AMERICA':2, 'AFRICA':2, 'GLOBAL':3, 'OTHER':3,
+    }
+    analysis = planned.setdefault('analysis', {
         'enabled':True, 'api_enabled':True, 'api_triage_enabled':False,
         'local_enabled':False, 'shadow_mode':True,
         'api_base_url':'https://api.juggler.cc/v1', 'api_model':'gpt-5.6-sol',
@@ -84,11 +89,13 @@ def plan_runtime_audit(current: Mapping[str, Any]) -> tuple[dict[str, Any], list
         'api_key_env':'ARGUS_ANALYSIS_API_KEY', 'timeout_seconds':45,
         'max_input_chars':40000, 'max_response_bytes':65536, 'max_tokens':3000,
         'max_items_per_run':50, 'daily_api_budget':2, 'send_full_text':False,
-        'region_weights':{
-            'EAST_ASIA':5, 'NORTH_AMERICA':4, 'EUROPE':4,
-            'AUSTRALIA_OCEANIA':4, 'SOUTHEAST_ASIA':3, 'MIDDLE_EAST':3,
-            'SOUTH_AMERICA':2, 'AFRICA':2, 'GLOBAL':3, 'OTHER':3,
-        },
+        'region_weights':default_region_weights,
     })
-    planned.setdefault('digest', {}).setdefault('api_summary', True)
+    legacy_region_weights = {'CN':5, 'JP':4, 'US':5, 'GLOBAL':3, 'OTHER':3}
+    if analysis.get('region_weights') == legacy_region_weights:
+        analysis['region_weights'] = default_region_weights
+    digest = planned.setdefault('digest', {})
+    digest.setdefault('api_summary', True)
+    digest.setdefault('prompt_id', 'digest')
+    digest.setdefault('prompt_version', 4)
     return planned, probes
