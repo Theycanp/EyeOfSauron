@@ -7,7 +7,10 @@ local-day window. It includes observations handled as `digest` and those already
 sent as `immediate`, so a notification seen briefly during the day is still
 available in the daily review.
 
-Records are clustered by normalized title similarity. Ranking combines durable
+Records are clustered by the event-centric adapter (`cluster_events`) using
+normalized title, entities, numbers, topic, region, and time-window signals.
+Each event keeps first-party, secondary, and social reports as parallel
+evidence. Ranking combines durable
 importance, urgency, relevance, confidence, regional preference, corroboration,
 and long-term source-quality weight. A soft repeated-source penalty prevents a
 high-frequency feed from occupying the report, while immediate events stay ahead
@@ -35,7 +38,12 @@ topic, lets the model choose how many genuinely need deeper treatment, and then
 sends those topics for synthesis. There is no fixed target topic count or prose
 length. Input/output size limits and exact citation validation remain mandatory.
 
-The active built-in Prompt is `digest@3` in `src/argus/prompts.py`. Historical
+The active built-in Prompt is `digest@4` in `src/argus/prompts.py`. It explicitly
+treats Chinese as the output language rather than a regional preference. Topic
+selection is based on evidence and impact; similarly important material should
+retain reasonable cross-region and cross-sector coverage without mechanical
+quotas. A single region may dominate only when the supplied evidence warrants
+it. Historical
 versions stay registered so old reports remain auditable. The model must return
 JSON, cite only supplied numeric IDs, match citations to `[N]` references in the
 text, distinguish facts from inference, avoid external facts and instructions
@@ -64,13 +72,17 @@ this is separate from the per-observation remote-analysis daily budget.
    high-priority operator notification. Reprocessing the same day is idempotent.
    The next successful AI digest resets the streak.
 
-Persistent tables are `digest_retry_state`, `digest_api_usage`, and
-`digest_failure_state` (schema 15). Errors are sanitized before persistence and
+Persistent retry tables are `digest_retry_state`, `digest_api_usage`, and
+`digest_failure_state` (introduced in schema 15; the current database schema is
+17). Errors are sanitized before persistence and
 notification. The outbox remains responsible for actual delivery and retry.
 
 ## Versioning and reading
 
-Algorithmic and AI variants are immutable rows with increasing versions. Only one
+Algorithmic and AI variants are immutable rows with increasing versions. Event
+projections are persisted before the digest row; a repository without the event
+port remains supported for lightweight tests and backwards-compatible tools.
+Only one
 version is `published` at a time; earlier versions become `superseded` but remain
 available for audit. The ntfy body links to `/digests/<digest-key>`, where the
 authenticated reader shows the current version and evidence items.

@@ -16,6 +16,10 @@ Start here:
    current reviewed source set.
 6. `REPRODUCTION.md` — build a fresh instance from source and verify it.
 7. `OPERATIONS.md` — day-two commands, admin operation, deployment, and recovery.
+8. `EVENTS.md` — event-centric data model, clustering, report relationships, and
+   the staged migration from legacy digest clusters.
+9. `WORKFLOW.md` — the required implementation, documentation, PR, deployment,
+   and production-acceptance checklist for every substantive update.
 
 Reference documents:
 

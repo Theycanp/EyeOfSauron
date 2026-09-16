@@ -37,6 +37,23 @@ parser probe succeeds. Credential-dependent and device-control features remain
 off until explicitly configured. The admin UI exposes supported switches and
 labels the digest item value as a maximum, not a target.
 
+## Regional taxonomy and weighting
+
+New source templates should use macro-region codes: `EAST_ASIA`,
+`NORTH_AMERICA`, `EUROPE`, `AUSTRALIA_OCEANIA`, `SOUTHEAST_ASIA`,
+`MIDDLE_EAST`, `SOUTH_AMERICA`, or `AFRICA`. `GLOBAL` and `OTHER` remain
+valid neutral fallbacks. Existing `CN`, `JP`, and `US` observations and
+configuration keys remain valid; they are mapped to East Asia or North America
+only when resolving a policy weight, so historical data does not need a
+migration.
+
+Regional weights are soft ranking preferences, not quotas. The built-in
+defaults place East Asia first, North America/Europe/Australia-Oceania next,
+then Southeast Asia/Middle East, with South America/Africa lower. Operators can
+override any subset in `[analysis.region_weights]`; omitted regions continue to
+use the defaults. Exact legacy keys such as `CN` override their mapped macro
+family for backward-compatible control.
+
 ## Secrets
 
 Production secret files are `/etc/argus/ntfy.env`, `/etc/argus/providers.env`,

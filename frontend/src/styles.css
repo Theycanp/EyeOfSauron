@@ -991,6 +991,12 @@ input:disabled { background: var(--surface-soft); color: var(--text-faint); }
 .digest-tags span { padding: 3px 7px; border-radius: 5px; color: var(--text-soft); background: var(--surface-soft); font-size: 10px; }
 .digest-links a { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-size: 11px; text-decoration: none; }
 .digest-links a:hover { text-decoration: underline; }
+.digest-report-groups { display: grid; gap: 8px; margin-top: 12px; }
+.digest-report-group { display: flex; align-items: flex-start; gap: 8px; }
+.digest-report-group > .status-pill { flex: 0 0 auto; margin-top: 1px; }
+.digest-report-group .digest-links { margin-top: 0; }
+.digest-report { display: inline-flex; align-items: center; gap: 5px; }
+.digest-report small { color: var(--text-faint); font-size: 10px; }
 .coverage-panel { margin-top: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 .coverage-panel summary { display: flex; align-items: center; gap: 7px; padding: 14px 16px; cursor: pointer; color: var(--text-soft); font-weight: 650; }
 .coverage-panel > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 0 16px 16px; }

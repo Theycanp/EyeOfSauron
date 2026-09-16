@@ -18,6 +18,13 @@ from .content import (
     ContentLevel,
 )
 from .digest import DigestCluster, DigestDocument, DigestRetryState, SourceCoverage
+from .events import (
+    PersistedEvent,
+    PersistedEventClaim,
+    PersistedEventClaimEvidence,
+    PersistedEventReport,
+    PersistedEventTimelineItem,
+)
 from .manual_events import ManualEventSpec
 from .models import (
     AnalysisWorkItem,
@@ -35,7 +42,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 17
 
 
 def read_active_config(path: Path) -> dict[str, Any] | None:
@@ -812,6 +819,7 @@ class Database:
                             source_ids_json TEXT NOT NULL,
                             observation_ids_json TEXT NOT NULL,
                             links_json TEXT NOT NULL,
+                            source_tiers_json TEXT NOT NULL DEFAULT '[]',
                             UNIQUE (digest_id, position),
                             UNIQUE (digest_id, cluster_key)
                         )
@@ -1173,6 +1181,142 @@ class Database:
                 self.connection.rollback()
                 raise
             version = 15
+
+        if version < 16:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 16:
+                    digest_columns = {
+                        str(row[1])
+                        for row in self.connection.execute("PRAGMA table_info(digest_items)")
+                    }
+                    if "source_tiers_json" not in digest_columns:
+                        self.connection.execute(
+                            "ALTER TABLE digest_items ADD COLUMN source_tiers_json TEXT NOT NULL DEFAULT '[]'"
+                        )
+                    self.connection.execute("PRAGMA user_version=16")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 16
+
+        if version < 17:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+                if locked_version < 17:
+                    digest_columns = {
+                        str(row[1])
+                        for row in self.connection.execute("PRAGMA table_info(digest_items)")
+                    }
+                    if "event_id" not in digest_columns:
+                        self.connection.execute(
+                            "ALTER TABLE digest_items ADD COLUMN event_id INTEGER REFERENCES events(id) ON DELETE SET NULL"
+                        )
+                        self.connection.execute(
+                            "CREATE INDEX IF NOT EXISTS digest_items_event_idx ON digest_items(event_id)"
+                        )
+                    self.connection.executescript(
+                        """
+                        CREATE TABLE IF NOT EXISTS events (
+                            id INTEGER PRIMARY KEY,
+                            event_key TEXT NOT NULL UNIQUE,
+                            fingerprint TEXT NOT NULL,
+                            title TEXT NOT NULL,
+                            summary TEXT NOT NULL DEFAULT '',
+                            score REAL NOT NULL,
+                            importance INTEGER NOT NULL CHECK (importance BETWEEN 1 AND 5),
+                            urgency INTEGER NOT NULL CHECK (urgency BETWEEN 1 AND 5),
+                            relevance INTEGER NOT NULL CHECK (relevance BETWEEN 1 AND 5),
+                            confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+                            first_seen_at INTEGER NOT NULL,
+                            last_seen_at INTEGER NOT NULL,
+                            regions_json TEXT NOT NULL DEFAULT '[]',
+                            topics_json TEXT NOT NULL DEFAULT '[]',
+                            status TEXT NOT NULL CHECK (status IN ('active', 'quiet', 'closed')),
+                            independent_source_count INTEGER NOT NULL DEFAULT 0 CHECK (independent_source_count >= 0),
+                            created_at INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL,
+                            CHECK (last_seen_at >= first_seen_at)
+                        );
+                        CREATE INDEX IF NOT EXISTS events_fingerprint_idx
+                            ON events(fingerprint, last_seen_at DESC);
+                        CREATE INDEX IF NOT EXISTS events_period_idx
+                            ON events(first_seen_at DESC, last_seen_at DESC, status);
+
+                        CREATE TABLE IF NOT EXISTS event_reports (
+                            id INTEGER PRIMARY KEY,
+                            event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                            observation_id INTEGER NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+                            source_id TEXT NOT NULL,
+                            source_tier TEXT NOT NULL CHECK (source_tier IN ('primary', 'secondary', 'social')),
+                            relation TEXT NOT NULL CHECK (relation IN ('primary', 'corroborates', 'updates', 'contradicts', 'context', 'social')),
+                            match_score REAL NOT NULL CHECK (match_score BETWEEN 0 AND 1),
+                            is_representative INTEGER NOT NULL CHECK (is_representative IN (0, 1)),
+                            published_at INTEGER NOT NULL,
+                            title TEXT NOT NULL,
+                            summary TEXT NOT NULL DEFAULT '',
+                            url TEXT NOT NULL DEFAULT '',
+                            created_at INTEGER NOT NULL,
+                            UNIQUE (event_id, observation_id)
+                        );
+                        CREATE INDEX IF NOT EXISTS event_reports_event_idx
+                            ON event_reports(event_id, published_at DESC, id DESC);
+                        CREATE INDEX IF NOT EXISTS event_reports_observation_idx
+                            ON event_reports(observation_id);
+
+                        CREATE TABLE IF NOT EXISTS event_claims (
+                            id INTEGER PRIMARY KEY,
+                            event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                            claim_key TEXT NOT NULL,
+                            text TEXT NOT NULL,
+                            status TEXT NOT NULL CHECK (status IN ('active', 'superseded', 'disputed')),
+                            confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+                            first_seen_at INTEGER NOT NULL,
+                            last_seen_at INTEGER NOT NULL,
+                            supersedes_claim_id INTEGER REFERENCES event_claims(id) ON DELETE SET NULL,
+                            created_at INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL,
+                            UNIQUE (event_id, claim_key),
+                            CHECK (last_seen_at >= first_seen_at)
+                        );
+                        CREATE INDEX IF NOT EXISTS event_claims_event_idx
+                            ON event_claims(event_id, updated_at DESC, id DESC);
+
+                        CREATE TABLE IF NOT EXISTS event_claim_evidence (
+                            id INTEGER PRIMARY KEY,
+                            claim_id INTEGER NOT NULL REFERENCES event_claims(id) ON DELETE CASCADE,
+                            report_id INTEGER NOT NULL REFERENCES event_reports(id) ON DELETE CASCADE,
+                            stance TEXT NOT NULL CHECK (stance IN ('supports', 'refutes', 'context')),
+                            note TEXT NOT NULL DEFAULT '',
+                            created_at INTEGER NOT NULL,
+                            UNIQUE (claim_id, report_id, stance)
+                        );
+                        CREATE INDEX IF NOT EXISTS event_claim_evidence_claim_idx
+                            ON event_claim_evidence(claim_id, created_at DESC, id DESC);
+
+                        CREATE TABLE IF NOT EXISTS event_timeline (
+                            id INTEGER PRIMARY KEY,
+                            event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                            occurred_at INTEGER NOT NULL,
+                            kind TEXT NOT NULL,
+                            text TEXT NOT NULL,
+                            confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+                            report_id INTEGER REFERENCES event_reports(id) ON DELETE SET NULL,
+                            created_at INTEGER NOT NULL
+                        );
+                        CREATE INDEX IF NOT EXISTS event_timeline_event_idx
+                            ON event_timeline(event_id, occurred_at ASC, id ASC);
+                        """
+                    )
+                    self.connection.execute("PRAGMA user_version=17")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            version = 17
 
     def close(self) -> None:
         self.connection.close()
@@ -3546,6 +3690,280 @@ class Database:
             result.append(item)
         return result
 
+    # Event persistence -------------------------------------------------
+    # These methods intentionally expose domain models rather than sqlite rows;
+    # clustering and presentation code can therefore move to another database.
+    def save_event(self, event: PersistedEvent) -> PersistedEvent:
+        if not isinstance(event, PersistedEvent):
+            raise TypeError("event must be a PersistedEvent")
+        with self.unit_of_work():
+            self.connection.execute(
+                """
+                INSERT INTO events(
+                    event_key, fingerprint, title, summary, score, importance, urgency,
+                    relevance, confidence, first_seen_at, last_seen_at, regions_json,
+                    topics_json, status, independent_source_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_key) DO UPDATE SET
+                    fingerprint=excluded.fingerprint, title=excluded.title,
+                    summary=excluded.summary, score=excluded.score,
+                    importance=excluded.importance, urgency=excluded.urgency,
+                    relevance=excluded.relevance, confidence=excluded.confidence,
+                    first_seen_at=MIN(events.first_seen_at, excluded.first_seen_at),
+                    last_seen_at=MAX(events.last_seen_at, excluded.last_seen_at),
+                    regions_json=excluded.regions_json, topics_json=excluded.topics_json,
+                    status=excluded.status, independent_source_count=excluded.independent_source_count,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    event.event_key, event.fingerprint, event.title, event.summary, event.score,
+                    event.importance, event.urgency, event.relevance, event.confidence,
+                    event.first_seen_at, event.last_seen_at,
+                    json.dumps(event.regions, ensure_ascii=False),
+                    json.dumps(event.topics, ensure_ascii=False), event.status,
+                    event.independent_source_count, event.created_at, event.updated_at,
+                ),
+            )
+        result = self.get_event(event.event_key)
+        assert result is not None
+        return result
+
+    @staticmethod
+    def _event_from_row(row: sqlite3.Row) -> PersistedEvent:
+        try:
+            return PersistedEvent(
+                event_key=str(row["event_key"]), fingerprint=str(row["fingerprint"]),
+                title=str(row["title"]), summary=str(row["summary"]), score=float(row["score"]),
+                importance=int(row["importance"]), urgency=int(row["urgency"]),
+                relevance=int(row["relevance"]), confidence=float(row["confidence"]),
+                first_seen_at=int(row["first_seen_at"]), last_seen_at=int(row["last_seen_at"]),
+                regions=tuple(json.loads(row["regions_json"])),
+                topics=tuple(json.loads(row["topics_json"])), status=str(row["status"]),
+                independent_source_count=int(row["independent_source_count"]),
+                created_at=int(row["created_at"]), updated_at=int(row["updated_at"]),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"event row {row['id']} is corrupt") from exc
+
+    def get_event(self, event_key: str) -> PersistedEvent | None:
+        if not event_key or len(event_key) > 160:
+            raise ValueError("event key is invalid")
+        row = self.connection.execute("SELECT * FROM events WHERE event_key = ?", (event_key,)).fetchone()
+        return self._event_from_row(row) if row is not None else None
+
+    def list_events(
+        self, *, since: int | None = None, until: int | None = None,
+        status: str | None = None, limit: int = 100
+    ) -> list[PersistedEvent]:
+        if since is not None and since < 0 or until is not None and until < 0:
+            raise ValueError("event time range is invalid")
+        if since is not None and until is not None and until <= since:
+            raise ValueError("event time range is invalid")
+        if status is not None and status not in {"active", "quiet", "closed"}:
+            raise ValueError("event status is invalid")
+        if not 1 <= limit <= 1000:
+            raise ValueError("event limit is out of range")
+        clauses: list[str] = []
+        params: list[Any] = []
+        if since is not None:
+            clauses.append("last_seen_at >= ?"); params.append(since)
+        if until is not None:
+            clauses.append("first_seen_at < ?"); params.append(until)
+        if status is not None:
+            clauses.append("status = ?"); params.append(status)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = self.connection.execute(
+            f"SELECT * FROM events{where} ORDER BY last_seen_at DESC, id DESC LIMIT ?", params
+        )
+        return [self._event_from_row(row) for row in rows]
+
+    def save_event_report(self, report: PersistedEventReport) -> PersistedEventReport:
+        if not isinstance(report, PersistedEventReport):
+            raise TypeError("report must be a PersistedEventReport")
+        event_row = self.connection.execute("SELECT id FROM events WHERE event_key = ?", (report.event_key,)).fetchone()
+        if event_row is None:
+            raise KeyError(f"event does not exist: {report.event_key}")
+        observation = self.connection.execute(
+            "SELECT source_id FROM observations WHERE id = ?", (report.observation_id,)
+        ).fetchone()
+        if observation is None:
+            raise KeyError(f"observation does not exist: {report.observation_id}")
+        if str(observation["source_id"]) != report.source_id:
+            raise ValueError("event report source does not match observation")
+        with self.unit_of_work():
+            self.connection.execute(
+                """
+                INSERT INTO event_reports(
+                    event_id, observation_id, source_id, source_tier, relation, match_score,
+                    is_representative, published_at, title, summary, url, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_id, observation_id) DO UPDATE SET
+                    source_id=excluded.source_id, source_tier=excluded.source_tier,
+                    relation=excluded.relation, match_score=excluded.match_score,
+                    is_representative=excluded.is_representative, published_at=excluded.published_at,
+                    title=excluded.title, summary=excluded.summary, url=excluded.url
+                """,
+                (
+                    int(event_row["id"]), report.observation_id, report.source_id,
+                    report.source_tier, report.relation, report.match_score,
+                    int(report.is_representative), report.published_at, report.title,
+                    report.summary, report.url, report.created_at,
+                ),
+            )
+        row = self.connection.execute(
+            "SELECT er.id, e.event_key, er.* FROM event_reports er JOIN events e ON e.id = er.event_id "
+            "WHERE er.event_id = ? AND er.observation_id = ?", (int(event_row["id"]), report.observation_id)
+        ).fetchone()
+        assert row is not None
+        return self._event_report_from_row(row)
+
+    @staticmethod
+    def _event_report_from_row(row: sqlite3.Row) -> PersistedEventReport:
+        return PersistedEventReport(
+            event_key=str(row["event_key"]), observation_id=int(row["observation_id"]),
+            source_id=str(row["source_id"]), source_tier=str(row["source_tier"]),
+            relation=str(row["relation"]), match_score=float(row["match_score"]),
+            is_representative=bool(row["is_representative"]), published_at=int(row["published_at"]),
+            title=str(row["title"]), summary=str(row["summary"]), url=str(row["url"]),
+            report_id=int(row["id"]), created_at=int(row["created_at"]),
+        )
+
+    def list_event_reports(self, event_key: str, *, limit: int = 500) -> list[PersistedEventReport]:
+        event = self.connection.execute("SELECT id FROM events WHERE event_key = ?", (event_key,)).fetchone()
+        if event is None:
+            return []
+        if not 1 <= limit <= 2000:
+            raise ValueError("event report limit is out of range")
+        rows = self.connection.execute(
+            "SELECT er.id, e.event_key, er.* FROM event_reports er JOIN events e ON e.id = er.event_id "
+            "WHERE er.event_id = ? ORDER BY er.published_at DESC, er.id DESC LIMIT ?",
+            (int(event["id"]), limit),
+        )
+        return [self._event_report_from_row(row) for row in rows]
+
+    def save_event_claim(self, claim: PersistedEventClaim) -> PersistedEventClaim:
+        if not isinstance(claim, PersistedEventClaim):
+            raise TypeError("claim must be a PersistedEventClaim")
+        event = self.connection.execute("SELECT id FROM events WHERE event_key = ?", (claim.event_key,)).fetchone()
+        if event is None:
+            raise KeyError(f"event does not exist: {claim.event_key}")
+        supersedes_id = None
+        if claim.supersedes_claim_key:
+            row = self.connection.execute(
+                "SELECT id FROM event_claims WHERE event_id = ? AND claim_key = ?",
+                (int(event["id"]), claim.supersedes_claim_key),
+            ).fetchone()
+            supersedes_id = int(row["id"]) if row is not None else None
+        with self.unit_of_work():
+            self.connection.execute(
+                """
+                INSERT INTO event_claims(
+                    event_id, claim_key, text, status, confidence, first_seen_at,
+                    last_seen_at, supersedes_claim_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_id, claim_key) DO UPDATE SET
+                    text=excluded.text, status=excluded.status, confidence=excluded.confidence,
+                    first_seen_at=excluded.first_seen_at, last_seen_at=excluded.last_seen_at,
+                    supersedes_claim_id=excluded.supersedes_claim_id, updated_at=excluded.updated_at
+                """,
+                (int(event["id"]), claim.claim_key, claim.text, claim.status, claim.confidence,
+                 claim.first_seen_at, claim.last_seen_at, supersedes_id, claim.created_at, claim.updated_at),
+            )
+        row = self.connection.execute(
+            "SELECT ec.*, e.event_key, parent.claim_key AS supersedes_claim_key FROM event_claims ec "
+            "JOIN events e ON e.id=ec.event_id LEFT JOIN event_claims parent ON parent.id=ec.supersedes_claim_id "
+            "WHERE ec.event_id = ? AND ec.claim_key = ?", (int(event["id"]), claim.claim_key)
+        ).fetchone()
+        assert row is not None
+        return self._event_claim_from_row(row)
+
+    @staticmethod
+    def _event_claim_from_row(row: sqlite3.Row) -> PersistedEventClaim:
+        return PersistedEventClaim(
+            event_key=str(row["event_key"]), claim_key=str(row["claim_key"]), text=str(row["text"]),
+            status=str(row["status"]), confidence=float(row["confidence"]),
+            first_seen_at=int(row["first_seen_at"]), last_seen_at=int(row["last_seen_at"]),
+            supersedes_claim_key=(str(row["supersedes_claim_key"]) if row["supersedes_claim_key"] is not None else None),
+            claim_id=int(row["id"]), created_at=int(row["created_at"]), updated_at=int(row["updated_at"]),
+        )
+
+    def list_event_claims(self, event_key: str, *, limit: int = 500) -> list[PersistedEventClaim]:
+        if not 1 <= limit <= 2000:
+            raise ValueError("event claim limit is out of range")
+        rows = self.connection.execute(
+            "SELECT ec.*, e.event_key, parent.claim_key AS supersedes_claim_key FROM event_claims ec "
+            "JOIN events e ON e.id=ec.event_id LEFT JOIN event_claims parent ON parent.id=ec.supersedes_claim_id "
+            "WHERE e.event_key = ? ORDER BY ec.updated_at DESC, ec.id DESC LIMIT ?", (event_key, limit)
+        )
+        return [self._event_claim_from_row(row) for row in rows]
+
+    def save_claim_evidence(self, evidence: PersistedEventClaimEvidence) -> PersistedEventClaimEvidence:
+        if not isinstance(evidence, PersistedEventClaimEvidence):
+            raise TypeError("evidence must be PersistedEventClaimEvidence")
+        claim = self.connection.execute("SELECT id FROM event_claims WHERE claim_key = ?", (evidence.claim_key,)).fetchone()
+        if claim is None:
+            raise KeyError(f"claim does not exist: {evidence.claim_key}")
+        if self.connection.execute("SELECT 1 FROM event_reports WHERE id = ?", (evidence.report_id,)).fetchone() is None:
+            raise KeyError(f"report does not exist: {evidence.report_id}")
+        with self.unit_of_work():
+            self.connection.execute(
+                "INSERT INTO event_claim_evidence(claim_id, report_id, stance, note, created_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(claim_id, report_id, stance) DO UPDATE SET note=excluded.note",
+                (int(claim["id"]), evidence.report_id, evidence.stance, evidence.note, evidence.created_at),
+            )
+        row = self.connection.execute(
+            "SELECT ece.id, claim_key, report_id, stance, note, ece.created_at FROM event_claim_evidence ece "
+            "JOIN event_claims ec ON ec.id=ece.claim_id WHERE ece.claim_id = ? AND report_id = ? AND stance = ?",
+            (int(claim["id"]), evidence.report_id, evidence.stance),
+        ).fetchone()
+        assert row is not None
+        return PersistedEventClaimEvidence(claim_key=str(row["claim_key"]), report_id=int(row["report_id"]),
+                                  stance=str(row["stance"]), note=str(row["note"]),
+                                  created_at=int(row["created_at"]), evidence_id=int(row["id"]))
+
+    def list_claim_evidence(self, claim_key: str, *, limit: int = 500) -> list[PersistedEventClaimEvidence]:
+        if not 1 <= limit <= 2000:
+            raise ValueError("claim evidence limit is out of range")
+        rows = self.connection.execute(
+            "SELECT ece.id, ec.claim_key, ece.report_id, ece.stance, ece.note, ece.created_at "
+            "FROM event_claim_evidence ece JOIN event_claims ec ON ec.id=ece.claim_id "
+            "WHERE ec.claim_key = ? ORDER BY ece.created_at DESC, ece.id DESC LIMIT ?", (claim_key, limit)
+        )
+        return [PersistedEventClaimEvidence(claim_key=str(row["claim_key"]), report_id=int(row["report_id"]),
+                                   stance=str(row["stance"]), note=str(row["note"]),
+                                   created_at=int(row["created_at"]), evidence_id=int(row["id"])) for row in rows]
+
+    def save_event_timeline(self, item: PersistedEventTimelineItem) -> PersistedEventTimelineItem:
+        if not isinstance(item, PersistedEventTimelineItem):
+            raise TypeError("item must be a PersistedEventTimelineItem")
+        event = self.connection.execute("SELECT id FROM events WHERE event_key = ?", (item.event_key,)).fetchone()
+        if event is None:
+            raise KeyError(f"event does not exist: {item.event_key}")
+        if item.report_id is not None and self.connection.execute("SELECT 1 FROM event_reports WHERE id = ?", (item.report_id,)).fetchone() is None:
+            raise KeyError(f"report does not exist: {item.report_id}")
+        with self.unit_of_work():
+            cursor = self.connection.execute(
+                "INSERT INTO event_timeline(event_id, occurred_at, kind, text, confidence, report_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (int(event["id"]), item.occurred_at, item.kind, item.text, item.confidence, item.report_id, item.created_at),
+            )
+        return PersistedEventTimelineItem(event_key=item.event_key, occurred_at=item.occurred_at, kind=item.kind,
+                                 text=item.text, confidence=item.confidence, report_id=item.report_id,
+                                 timeline_id=int(cursor.lastrowid), created_at=item.created_at)
+
+    def list_event_timeline(self, event_key: str, *, limit: int = 500) -> list[PersistedEventTimelineItem]:
+        if not 1 <= limit <= 2000:
+            raise ValueError("event timeline limit is out of range")
+        rows = self.connection.execute(
+            "SELECT et.id, e.event_key, et.occurred_at, et.kind, et.text, et.confidence, et.report_id, et.created_at "
+            "FROM event_timeline et JOIN events e ON e.id=et.event_id WHERE e.event_key = ? "
+            "ORDER BY et.occurred_at ASC, et.id ASC LIMIT ?", (event_key, limit)
+        )
+        return [PersistedEventTimelineItem(event_key=str(row["event_key"]), occurred_at=int(row["occurred_at"]),
+                                  kind=str(row["kind"]), text=str(row["text"]), confidence=float(row["confidence"]),
+                                  report_id=(int(row["report_id"]) if row["report_id"] is not None else None),
+                                  timeline_id=int(row["id"]), created_at=int(row["created_at"])) for row in rows]
+
     def save_digest(self, digest: DigestDocument) -> DigestDocument:
         """Allocate and store the next immutable version of a digest."""
         if digest.version != 0 or digest.status != "draft" or digest.published_at is not None:
@@ -3588,14 +4006,20 @@ class Database:
             )
             digest_id = int(cursor.lastrowid)
             for position, item in enumerate(digest.items):
+                event_row = None
+                if item.event_id:
+                    event_row = self.connection.execute(
+                        "SELECT id FROM events WHERE event_key = ?", (item.event_id,)
+                    ).fetchone()
                 self.connection.execute(
                     """
                     INSERT INTO digest_items(
                         digest_id, position, cluster_key, title, summary, score,
                         importance, urgency, relevance, confidence, published_at,
                         regions_json, topics_json, source_ids_json,
-                        observation_ids_json, links_json, handling
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        observation_ids_json, links_json, handling, source_tiers_json,
+                        event_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         digest_id,
@@ -3615,6 +4039,8 @@ class Database:
                         json.dumps(item.observation_ids),
                         json.dumps(item.links, ensure_ascii=False),
                         item.handling,
+                        json.dumps(item.source_tiers, ensure_ascii=False),
+                        (int(event_row["id"]) if event_row is not None else None),
                     ),
                 )
             for item in digest.coverage:
@@ -3923,6 +4349,15 @@ class Database:
             "SELECT * FROM digest_items WHERE digest_id = ? ORDER BY position", (digest_id,)
         ):
             try:
+                event_key = None
+                event_reports: tuple[PersistedEventReport, ...] = ()
+                if item["event_id"] is not None:
+                    event_row = self.connection.execute(
+                        "SELECT event_key FROM events WHERE id = ?", (int(item["event_id"]),)
+                    ).fetchone()
+                    if event_row is not None:
+                        event_key = str(event_row["event_key"])
+                        event_reports = tuple(self.list_event_reports(event_key))
                 items.append(
                     DigestCluster(
                         cluster_key=str(item["cluster_key"]),
@@ -3939,7 +4374,10 @@ class Database:
                         source_ids=tuple(json.loads(item["source_ids_json"])),
                         observation_ids=tuple(int(value) for value in json.loads(item["observation_ids_json"])),
                         links=tuple(json.loads(item["links_json"])),
+                        source_tiers=tuple(json.loads(item["source_tiers_json"])),
                         handling=str(item["handling"]),
+                        event_id=event_key,
+                        reports=event_reports,
                     )
                 )
             except (TypeError, ValueError, json.JSONDecodeError) as exc:

@@ -24,14 +24,18 @@ Major table groups include:
 - admin users, server sessions, throttling, and authentication audit;
 - reminders and occurrence scheduling;
 - versioned digests, digest items, source coverage, retry state, digest API usage,
-  and consecutive failure state.
+  and consecutive failure state;
+- stable events, parallel source reports, claims, claim evidence, and timeline
+  items.
 
 ## Schema and migrations
 
 `SCHEMA_VERSION` in `database.py` and `PRAGMA user_version` are authoritative.
 Startup applies forward-only, transactional, idempotent migrations in order and
 refuses a database newer than the running code. Schema 15 adds persistent digest
-AI attempt usage, retry state, and consecutive failure state. Release metadata
+AI attempt usage, retry state, and consecutive failure state; schema 16 adds
+source-tier evidence to digest items; schema 17 adds the event/report/claim/
+timeline projection and links digest items to stable events. Release metadata
 records the required schema.
 
 A code rollback that cannot read the current schema must restore the matching

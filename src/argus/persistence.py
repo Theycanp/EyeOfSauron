@@ -6,6 +6,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 
 from .analysis_orchestrator import AnalysisRepository
 from .content import ContentDocumentDraft, ContentFetchWorkItem
+from .events import EventRepository
 from .digest import (
     DigestInputRepository,
     DigestNotificationRepository,
@@ -60,7 +61,7 @@ class SQLiteUnitOfWork:
 @runtime_checkable
 class RuntimeRepository(
     AnalysisRepository, DigestInputRepository, DigestRepository, DigestNotificationRepository,
-    DigestRetryRepository, Protocol
+    DigestRetryRepository, EventRepository, Protocol
 ):
     """Persistence port used by the always-on application service."""
 

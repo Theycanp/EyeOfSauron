@@ -564,8 +564,9 @@ def _digest_payload(digest: DigestDocument, *, details: bool) -> dict[str, Any]:
     }
     if not details:
         return payload
-    payload["items"] = [
-        {
+    items: list[dict[str, Any]] = []
+    for item in digest.items:
+        item_payload: dict[str, Any] = {
             "cluster_key": item.cluster_key,
             "title": item.title,
             "summary": item.summary,
@@ -580,10 +581,50 @@ def _digest_payload(digest: DigestDocument, *, details: bool) -> dict[str, Any]:
             "source_ids": list(item.source_ids),
             "observation_ids": list(item.observation_ids),
             "links": list(item.links),
+            "source_tiers": list(item.source_tiers),
             "handling": item.handling,
         }
-        for item in digest.items
-    ]
+        # Event-centric projections are optional during the migration. Keep the
+        # legacy item shape stable while exposing nested reports when present.
+        event_id = getattr(item, "event_id", None)
+        event_key = getattr(item, "event_key", None)
+        reports = getattr(item, "reports", None)
+        if event_id:
+            item_payload["event_id"] = str(event_id)
+        if event_key:
+            item_payload["event_key"] = str(event_key)
+        if reports:
+            serialized_reports: list[dict[str, Any]] = []
+            for report in reports:
+                if isinstance(report, Mapping):
+                    serialized_reports.append(dict(report))
+                    continue
+                serialized_reports.append(
+                    {
+                        key: value
+                        for key in (
+                            "report_id",
+                            "observation_id",
+                            "source_id",
+                            "publisher",
+                            "source_tier",
+                            "relation",
+                            "match_score",
+                            "is_representative",
+                            "published_at",
+                            "title",
+                            "summary",
+                            "url",
+                            "score",
+                            "contradicts",
+                        )
+                        if (value := getattr(report, key, None)) is not None
+                    }
+                )
+            if serialized_reports:
+                item_payload["reports"] = serialized_reports
+        items.append(item_payload)
+    payload["items"] = items
     payload["coverage"] = [
         {
             "source_id": item.source_id,

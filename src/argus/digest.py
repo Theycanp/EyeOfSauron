@@ -20,7 +20,10 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from .config import DigestConfig
+from .event_clustering import cluster_events, event_match_score
+from .events import PersistedEvent, PersistedEventReport
 from .reminders import next_daily_occurrence
+from .regions import effective_region_weights, region_weight
 from .util import sanitize_error
 
 
@@ -47,7 +50,12 @@ class DigestCluster:
     source_ids: tuple[str, ...]
     observation_ids: tuple[int, ...]
     links: tuple[str, ...]
+    # Aligned with source_ids; keeps primary/secondary/social reports visible
+    # as parallel evidence under one event cluster.
+    source_tiers: tuple[str, ...] = ()
     handling: str = "digest"
+    event_id: str | None = None
+    reports: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.cluster_key or len(self.cluster_key) > 128:
@@ -62,6 +70,10 @@ class DigestCluster:
             raise ValueError("digest cluster confidence is out of range")
         if self.published_at < 0 or any(identifier < 1 for identifier in self.observation_ids):
             raise ValueError("digest cluster observation identity is invalid")
+        if self.source_tiers and len(self.source_tiers) != len(self.source_ids):
+            raise ValueError("digest cluster source tier mapping is invalid")
+        if any(tier not in {"primary", "secondary", "social"} for tier in self.source_tiers):
+            raise ValueError("digest cluster source tier is invalid")
         if self.handling not in {"digest", "immediate"}:
             raise ValueError("digest cluster handling is invalid")
 
@@ -288,7 +300,7 @@ def _observation_score(
     relevance = _bounded_int(item.get("relevance"), 3)
     confidence = _bounded_float(item.get("confidence"), 0.5)
     region = str(item.get("region", "GLOBAL")).upper()
-    regional_interest = _bounded_int(region_weights.get(region, region_weights.get("OTHER", 3)), 3)
+    regional_interest = _bounded_int(region_weight(region_weights, region), 3)
     source_bonus = 0.35 if item.get("source_tier") == "primary" else 0.0
     base = (
         importance * 0.35
@@ -365,7 +377,7 @@ def cluster_observations(
         raise ValueError("digest similarity threshold is out of range")
     if not 1 <= max_items <= 500:
         raise ValueError("digest item limit is out of range")
-    weights = dict(region_weights or {"CN": 5, "US": 5, "JP": 4, "GLOBAL": 3, "OTHER": 3})
+    weights = effective_region_weights(region_weights)
     ordered = sorted(
         observations,
         key=lambda item: (
@@ -398,6 +410,14 @@ def cluster_observations(
         representative = group[0]
         source_ids = tuple(
             sorted({str(item.get("source_id", "")) for item in group if item.get("source_id")})
+        )
+        source_tiers = tuple(
+            next(
+                (str(item.get("source_tier", "secondary")) for item in group
+                 if str(item.get("source_id", "")) == source_id),
+                "secondary",
+            )
+            for source_id in source_ids
         )
         links_by_source: dict[str, str] = {}
         for item in group:
@@ -440,6 +460,7 @@ def cluster_observations(
                     for source_id in source_ids
                     if source_id in links_by_source
                 ),
+                source_tiers=source_tiers,
                 handling=(
                     "immediate"
                     if any(str(item.get("handling", "digest")) == "immediate" for item in group)
@@ -463,6 +484,84 @@ def cluster_observations(
         for source_id in chosen.source_ids:
             counts[source_id] = counts.get(source_id, 0) + 1
     return tuple(selected)
+
+
+def cluster_observations_event_centric(
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    region_weights: Mapping[str, int] | None = None,
+    similarity_threshold: float = 0.62,
+    max_items: int = 50,
+    source_quality_weights: Mapping[str, float] | None = None,
+    adaptive: bool = False,
+) -> tuple[DigestCluster, ...]:
+    """Build legacy digest items from the event-centric clustering domain.
+
+    The adapter intentionally leaves persistence and HTTP contracts unchanged:
+    callers receive ``DigestCluster`` values, while the event ID becomes the
+    stable ``cluster_key`` and report tiers remain aligned with source IDs.
+    New readers can call :func:`argus.event_clustering.cluster_events` to see
+    the full report relationships.
+    """
+    if not 0.5 <= similarity_threshold <= 1.0:
+        raise ValueError("digest similarity threshold is out of range")
+    if not 1 <= max_items <= 500:
+        raise ValueError("digest item limit is out of range")
+    weights = effective_region_weights(region_weights)
+    events = cluster_events(observations, similarity_threshold=similarity_threshold)
+    clusters: list[DigestCluster] = []
+    for event in events:
+        reports_by_source: dict[str, Any] = {}
+        for report in event.reports:
+            # Prefer the highest-scored/latest report as the source's link.
+            current = reports_by_source.get(report.source_id)
+            if current is None or (report.score, report.published_at, report.report_id) > (current.score, current.published_at, current.report_id):
+                reports_by_source[report.source_id] = report
+        source_ids = tuple(sorted(reports_by_source))
+        representative_reports = tuple(reports_by_source[source_id] for source_id in source_ids)
+        quality = max(
+            (
+                max(0.70, min(1.15, float(source_quality_weights.get(source_id, 1.0))))
+                for source_id in source_ids
+                if source_quality_weights is not None and isinstance(source_quality_weights.get(source_id, 1.0), (int, float))
+            ),
+            default=1.0,
+        )
+        regional_interest = max((region_weight(weights, region) for region in event.regions), default=3)
+        primary_bonus = 0.35 if any(report.source_tier == "primary" for report in event.reports) else 0.0
+        score = round(
+            event.score * quality
+            + max(0, regional_interest - 3) * 0.15
+            + primary_bonus,
+            4,
+        )
+        clusters.append(
+            DigestCluster(
+                cluster_key=event.event_id,
+                title=event.title,
+                summary=event.summary,
+                score=score,
+                importance=event.importance,
+                urgency=event.urgency,
+                relevance=event.relevance,
+                confidence=event.confidence,
+                published_at=event.published_at,
+                regions=event.regions,
+                topics=event.topics,
+                source_ids=source_ids,
+                observation_ids=tuple(sorted(report.observation_id for report in event.reports if report.observation_id is not None)),
+                links=tuple(report.url for report in representative_reports if report.url),
+                source_tiers=tuple(report.source_tier for report in representative_reports),
+                handling=("immediate" if any(str(item.get("handling", "digest")) == "immediate" for item in observations if item.get("id") in {report.observation_id for report in event.reports}) else "digest"),
+                event_id=event.event_id,
+                reports=event.reports,
+            )
+        )
+    if adaptive:
+        limit = adaptive_digest_item_count(clusters, max_items=max_items)
+    else:
+        limit = max_items
+    return tuple(clusters[:limit])
 
 
 def source_coverage_from_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[SourceCoverage, ...]:
@@ -532,13 +631,14 @@ class DigestBuilder:
             for item in observations
             if str(item.get("handling", "digest")) in {"digest", "immediate"}
         ]
-        clusters = cluster_observations(
+        clusters = cluster_observations_event_centric(
             observations,
             region_weights=self.region_weights,
             max_items=self.item_limit,
             source_quality_weights=self.source_quality_weights,
             adaptive=True,
         )
+        clusters = self._persist_events(clusters, created_at=created_at)
         coverage = source_coverage_from_rows(
             self.repository.list_source_coverage(
                 period_start, period_end, source_ids=source_ids
@@ -558,6 +658,88 @@ class DigestBuilder:
             coverage=coverage,
             created_at=created_at,
         )
+
+    def _persist_events(
+        self, clusters: Sequence[DigestCluster], *, created_at: int
+    ) -> tuple[DigestCluster, ...]:
+        save_event = getattr(self.repository, "save_event", None)
+        save_report = getattr(self.repository, "save_event_report", None)
+        if save_event is None or save_report is None:
+            return tuple(clusters)
+        list_events = getattr(self.repository, "list_events", None)
+        candidates = list_events(limit=1000) if list_events is not None else []
+        persisted: list[DigestCluster] = []
+        for cluster in clusters:
+            reports = tuple(cluster.reports)
+            if not reports:
+                continue
+            published = [int(report.published_at) for report in reports]
+            event_key = cluster.event_id or cluster.cluster_key
+            event_shape = {
+                "title": cluster.title,
+                "summary": cluster.summary,
+                "topic": cluster.topics[0] if cluster.topics else "general",
+                "region": cluster.regions[0] if cluster.regions else "GLOBAL",
+                "published_at": cluster.published_at,
+            }
+            compatible = [
+                candidate for candidate in candidates
+                if abs(candidate.last_seen_at - cluster.published_at) <= 72 * 3600
+            ]
+            if compatible:
+                best = max(
+                    compatible,
+                    key=lambda candidate: event_match_score(event_shape, {
+                        "title": candidate.title, "summary": candidate.summary,
+                        "topic": candidate.topics[0] if candidate.topics else "general",
+                        "region": candidate.regions[0] if candidate.regions else "GLOBAL",
+                        "published_at": candidate.last_seen_at,
+                    }),
+                )
+                best_score = event_match_score(event_shape, {
+                    "title": best.title, "summary": best.summary,
+                    "topic": best.topics[0] if best.topics else "general",
+                    "region": best.regions[0] if best.regions else "GLOBAL",
+                    "published_at": best.last_seen_at,
+                })
+                # Historical continuation has an additional 72-hour and
+                # topic/region gate, so it can use a slightly lower threshold
+                # than within-batch clustering without enabling chain merges.
+                if best_score >= 0.57:
+                    event_key = best.event_key
+                    cluster = replace(cluster, cluster_key=event_key, event_id=event_key)
+            representative_by_source: dict[str, Any] = {}
+            for report in reports:
+                current = representative_by_source.get(report.source_id)
+                if current is None or (report.score, report.published_at, report.report_id) > (
+                    current.score, current.published_at, current.report_id
+                ):
+                    representative_by_source[report.source_id] = report
+            save_event(PersistedEvent(
+                event_key=event_key, fingerprint=event_key, title=cluster.title,
+                summary=cluster.summary, score=cluster.score,
+                importance=cluster.importance, urgency=cluster.urgency,
+                relevance=cluster.relevance, confidence=cluster.confidence,
+                first_seen_at=min(published), last_seen_at=max(published),
+                regions=cluster.regions, topics=cluster.topics,
+                independent_source_count=len(cluster.source_ids),
+                created_at=created_at, updated_at=created_at,
+            ))
+            for report in reports:
+                if report.observation_id is None:
+                    continue
+                save_report(PersistedEventReport(
+                    event_key=event_key, observation_id=int(report.observation_id),
+                    source_id=report.source_id, source_tier=report.source_tier,
+                    relation=report.relation, match_score=report.match_score,
+                    is_representative=(
+                        representative_by_source.get(report.source_id) is report
+                    ),
+                    published_at=report.published_at, title=report.title,
+                    summary=report.summary, url=report.url, created_at=created_at,
+                ))
+            persisted.append(cluster)
+        return tuple(persisted)
 
     def build_and_save(self, **kwargs: Any) -> DigestDocument:
         repository = self.repository

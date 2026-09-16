@@ -401,6 +401,9 @@ export interface DigestSummary extends JsonRecord {
 
 export interface DigestItem extends JsonRecord {
   cluster_key: string
+  /** Stable event identity when the event-centric digest projection is enabled. */
+  event_key?: string
+  event_id?: string
   title: string
   summary: string
   score: number
@@ -414,7 +417,26 @@ export interface DigestItem extends JsonRecord {
   source_ids?: string[]
   observation_ids?: number[]
   links?: string[]
+  source_tiers?: ('primary' | 'secondary' | 'social')[]
+  reports?: DigestReport[]
   handling?: 'digest' | 'immediate'
+}
+
+export interface DigestReport extends JsonRecord {
+  report_id?: string
+  observation_id?: number
+  source_id?: string
+  publisher?: string
+  source_tier?: 'primary' | 'secondary' | 'social'
+  relation?: string
+  match_score?: number
+  score?: number
+  is_representative?: boolean
+  contradicts?: boolean
+  published_at?: number | null
+  title?: string
+  summary?: string
+  url?: string
 }
 
 export interface SourceQualityProfile extends JsonRecord {

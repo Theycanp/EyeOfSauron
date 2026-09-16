@@ -5,6 +5,27 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-16
+
+### Added
+
+- Add stable event, report, claim, evidence, and timeline repository contracts
+  with schema 17 persistence and event-aware digest/admin presentation.
+- Add reviewed regional primary and secondary sources across Europe,
+  Australia/Oceania, Southeast Asia, the Middle East, Africa, South America,
+  North America, and technology coverage; inaccessible candidates remain
+  catalog-only instead of breaking atomic rollout.
+- Add a maintainer workflow and PR checklist that require documentation,
+  migration, test, rollback, and production-acceptance updates with each change.
+
+### Changed
+
+- Add the versioned `digest@4` regional-neutrality policy: Chinese is only the
+  output language, selection remains evidence-led, similarly important topics
+  retain reasonable cross-region coverage, and no mechanical quotas are used.
+- Make event-centric clustering the default digest path, persist stable events
+  and parallel source reports (schema 17), and keep legacy digest reads intact.
+
 ## [0.17.0] - 2026-09-15
 
 ### Added

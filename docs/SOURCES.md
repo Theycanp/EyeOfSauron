@@ -20,6 +20,12 @@ first-party sources may queue bounded text extraction for published HTML/PDF.
 Exact host allowlists, public-address DNS checks, manual redirect validation,
 timeouts, compressed/output size limits, and content-type checks constrain access.
 
+Source regions use the macro taxonomy `EAST_ASIA`, `NORTH_AMERICA`, `EUROPE`,
+`AUSTRALIA_OCEANIA`, `SOUTHEAST_ASIA`, `MIDDLE_EAST`, `SOUTH_AMERICA`, and
+`AFRICA`, with `GLOBAL`/`OTHER` fallbacks. Historical `CN`, `JP`, and `US`
+values remain accepted and are mapped to their macro families only for ranking;
+there is no forced region quota.
+
 Normal government, science, and corporate announcements enter the digest.
 Auditable weighted rules send immediate messages only for high-signal patterns
 such as major emergencies, material monetary-policy changes, severe disasters,
@@ -28,12 +34,12 @@ urgent.
 
 ## 2026-09-15 additions
 
-- U.S. Embassy and Consulates in China official Alerts RSS:
-  `https://china.usembassy-china.org.cn/category/alert/feed/`. It covers consular,
-  weather, natural-disaster, and security alerts. A dedicated high-priority rule
-  recognizes alert/emergency/evacuation/disaster terms; ordinary reminders are
-  down-weighted. The edge intermittently rejects library-style user agents, so
-  Argus uses an honest browser-compatible product identity and bounded retries.
+- U.S. Embassy and Consulates in China official Alerts RSS remains a reviewed
+  catalog candidate. It previously returned parseable items, but on 2026-09-16
+  consistently returned HTTP 403 to the bounded EOS collector. It is excluded
+  from the default atomic rollout because one broken endpoint would roll back
+  every otherwise healthy source addition. The dedicated security rule remains
+  available for a future stable official endpoint.
 - NVIDIA Newsroom official RSS:
   `https://nvidianews.nvidia.com/rss.xml`. It provides first-party AI,
   semiconductor, product, and corporate announcements and is added to the daily
@@ -47,6 +53,10 @@ newest items were from 2018, so they were not enabled as if current. The system
 instead adds the verified NVIDIA primary feed and retains its pluggable catalog
 for future current Chinese technology sources. A source must be genuinely live;
 headline relevance alone is not enough to waive freshness and licensing checks.
+
+The UN OCHA RSS candidate is handled the same way: its endpoint returned HTTP
+406 (bot-activity rejection) to the EOS collector on 2026-09-16. It remains in
+the reviewed catalog but is not part of the default activation set.
 
 ## Activation and change control
 

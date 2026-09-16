@@ -16,6 +16,7 @@ from .providers import (
     ProviderRegistry,
 )
 from .safe_regex import UnsafeRegexError, compile_safe_regex
+from .regions import normalize_region
 
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
@@ -140,7 +141,7 @@ class DigestConfig:
     public_base_url: str = ""
     api_summary: bool = True
     prompt_id: str = "digest"
-    prompt_version: int = 3
+    prompt_version: int = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,8 +357,10 @@ def _parse_source(
     if not publisher or not section:
         raise ConfigError(f"{location} publisher and section cannot be empty")
     region = _required(data, "region", str, location).strip().upper() if "region" in data else "GLOBAL"
-    if region not in {"CN", "JP", "US", "GLOBAL", "OTHER"}:
-        raise ConfigError(f"{location}.region is invalid")
+    try:
+        region = normalize_region(region)
+    except ValueError as exc:
+        raise ConfigError(f"{location}.region is invalid") from exc
     source_tier = _required(data, "source_tier", str, location).strip().lower() if "source_tier" in data else "secondary"
     if source_tier not in {"primary", "secondary", "social"}:
         raise ConfigError(f"{location}.source_tier is invalid")
@@ -491,12 +494,18 @@ def _parse_analysis(raw: Any) -> AnalysisConfig:
     max_items_per_run = _bounded_int({"max_items_per_run": data.get("max_items_per_run", 50)}, "max_items_per_run", "analysis", 1, 500)
     daily_api_budget = _bounded_int({"daily_api_budget": data.get("daily_api_budget", 2)}, "daily_api_budget", "analysis", 0, 1000)
     weights = data.get("region_weights", {"CN": 5, "JP": 4, "US": 5, "GLOBAL": 3, "OTHER": 3})
-    if not isinstance(weights, Mapping) or set(weights) - {"CN", "JP", "US", "GLOBAL", "OTHER"}:
+    if not isinstance(weights, Mapping):
         raise ConfigError("analysis.region_weights has invalid regions")
     normalized_weights: dict[str, int] = {}
-    for region in ("CN", "JP", "US", "GLOBAL", "OTHER"):
+    for raw_region, raw_weight in weights.items():
+        if not isinstance(raw_region, str):
+            raise ConfigError("analysis.region_weights has invalid regions")
+        try:
+            region = normalize_region(raw_region)
+        except ValueError as exc:
+            raise ConfigError("analysis.region_weights has invalid regions") from exc
         normalized_weights[region] = _bounded_int(
-            {region: weights.get(region, 3)}, region, "analysis.region_weights", 1, 5
+            {region: raw_weight}, region, "analysis.region_weights", 1, 5
         )
     return AnalysisConfig(
         **values,
@@ -567,7 +576,7 @@ def _parse_digest(raw: Any) -> DigestConfig:
         public_base_url=public_base_url,
         api_summary=api_summary,
         prompt_id=prompt_id,
-        prompt_version=_bounded_int({"prompt_version": data.get("prompt_version", 3)}, "prompt_version", "digest", 1, 10000),
+        prompt_version=_bounded_int({"prompt_version": data.get("prompt_version", 4)}, "prompt_version", "digest", 1, 10000),
     )
 
 

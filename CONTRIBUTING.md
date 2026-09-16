@@ -6,13 +6,13 @@ framework or service by default.
 
 ## Development setup
 
-Argus has no third-party runtime dependency. Use Python 3.12 or newer and install
-CI-only tools in an isolated environment:
+Use Python 3.12 or newer and install the pinned runtime and CI tools in an
+isolated environment:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -r requirements/ci.txt
+python -m pip install -r requirements/runtime.txt -r requirements/ci.txt
 python -m pip install --no-deps -e .
 ```
 
@@ -40,6 +40,10 @@ coverage report
 argus --config config/argus.example.toml check-config
 bash -n scripts/operations/*.sh scripts/release/*.sh
 ```
+
+The backend gate uses Python's built-in `unittest` runner. `pytest` is not a
+project or CI dependency; the optional pytest settings in `pyproject.toml` are
+only for contributors who already have pytest installed.
 
 For frontend work:
 

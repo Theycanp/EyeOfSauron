@@ -97,7 +97,10 @@ class OfficialSourcesTests(unittest.TestCase):
             self.assertTrue(source.enabled)
             if source.region == "JP":
                 self.assertEqual(4, source.default_importance)
-        self.assertEqual({row["id"] for row in additions}, set(planned["rules"][0]["source_ids"]))
+        primary_additions = {
+            row["id"] for row in additions if row.get("source_tier") == "primary"
+        }
+        self.assertEqual(primary_additions, set(planned["rules"][0]["source_ids"]))
         _parse_rule(planned["rules"][0], 0)
         second, added = plan_official_news(planned)
         self.assertEqual([], added)

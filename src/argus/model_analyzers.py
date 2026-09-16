@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from .models import Observation
 from .prompts import PromptTemplate, get_prompt
+from .regions import normalize_region
 from .util import truncate
 
 
@@ -98,11 +99,13 @@ def _parse_advisory(payload: bytes, max_bytes: int) -> Mapping[str, Any]:
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
         raise AnalyzerError("analyzer field confidence is invalid")
     region = decoded.get("region")
-    if region is not None and (
-        not isinstance(region, str)
-        or region.upper() not in {"CN", "JP", "US", "GLOBAL", "OTHER"}
-    ):
-        raise AnalyzerError("analyzer field region is invalid")
+    if region is not None:
+        if not isinstance(region, str):
+            raise AnalyzerError("analyzer field region is invalid")
+        try:
+            normalize_region(region)
+        except ValueError as exc:
+            raise AnalyzerError("analyzer field region is invalid") from exc
     for name in ("topic", "rationale"):
         value = decoded.get(name)
         if value is not None and (not isinstance(value, str) or len(value) > 500):
