@@ -592,7 +592,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         (_feed("media", "Media releases", "Australian government and policy",
                "https://www.pm.gov.au/rss.xml", "www.pm.gov.au"),),
         "https://www.pm.gov.au/rss.xml",
-        "Official Australian Prime Minister RSS, verified current on 2026-09-16; Australia/Oceania follows the Europe priority tier.",
+        "Official Australian Prime Minister RSS candidate. The endpoint returned HTTP 403 to the bounded EOS collector during the production rollout on 2026-09-16, so it remains catalog-only until access is stable.",
         content_policy=ContentPolicy.PUBLIC_DOCUMENT.value,
         region="AUSTRALIA_OCEANIA", source_tier="primary", default_importance=4, topic="policy",
     ),

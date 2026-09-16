@@ -26,7 +26,6 @@ OFFICIAL_NEWS_SELECTION = (
     ("economist", "science_technology"),
     ("nvidia_newsroom", "news"),
     ("european_commission", "press"),
-    ("australian_prime_minister", "media"),
     ("uk_government", "government"),
     ("bank_of_england", "news"),
     ("asean_secretariat", "news"),

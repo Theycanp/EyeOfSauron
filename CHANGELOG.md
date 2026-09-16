@@ -5,6 +5,13 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-09-16
+
+### Fixed
+
+- Keep the Australian Prime Minister RSS catalog-only after its production
+  rollout probe returned HTTP 403, so it cannot roll back healthy additions.
+
 ## [0.18.0] - 2026-09-16
 
 ### Added
