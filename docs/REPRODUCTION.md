@@ -7,8 +7,16 @@ intentionally external and must be supplied by the operator.
 ## Build and test
 
 Requirements are documented in `COMPATIBILITY.md`. Clone the repository, create
-a Python virtual environment, install the project and development dependencies,
-install frontend dependencies from the lockfile, and run:
+a Python virtual environment, install the pinned runtime and CI dependencies,
+install the package without resolving a second dependency set, install frontend
+dependencies from the lockfile, and run:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements/runtime.txt -r requirements/ci.txt
+python -m pip install --no-deps -e .
+```
 
 ```bash
 scripts/ci/check.sh all

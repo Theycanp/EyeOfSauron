@@ -24,6 +24,7 @@ from .analysis import (
 )
 from .config import AnalysisConfig
 from .models import AnalysisWorkItem, Observation
+from .regions import region_weight
 from .util import now_epoch, sanitize_error
 
 
@@ -62,9 +63,7 @@ def _with_region_policy(
 ) -> InformationAnalysis:
     """Apply the explicit personal region preference without model input."""
 
-    weight = config.region_weights.get(
-        baseline.region, config.region_weights.get("OTHER", 3)
-    )
+    weight = region_weight(config.region_weights, baseline.region)
     relevance = max(baseline.relevance, max(1, min(5, int(weight))))
     handling = baseline.handling
     if handling != "immediate" and (baseline.importance >= 3 or relevance >= 3):

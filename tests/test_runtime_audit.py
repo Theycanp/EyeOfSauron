@@ -22,7 +22,7 @@ from argus.models import FeedFetchResult, SourceState
 from argus.news_catalog import NEWS_SOURCE_CATALOG
 from argus.news_rollout import plan_official_news
 from argus.official_list import OfficialListCollector
-from argus.prompts import DIGEST_V3
+from argus.prompts import DIGEST_V4
 from argus.rss import FeedError, parse_feed
 from argus.rules import RuleSet
 from argus.runtime_rollout import plan_runtime_audit
@@ -225,15 +225,18 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(15, len(calls[1]['items']))
 
     def test_digest_prompt_defines_distinct_index_and_synthesis_contracts(self):
-        self.assertEqual(3, DIGEST_V3.version)
-        self.assertIn('stage 为 index', DIGEST_V3.system_text)
-        self.assertIn('expand_topics', DIGEST_V3.system_text)
-        self.assertIn('自主决定需要深入阅读的主题数量', DIGEST_V3.system_text)
-        self.assertNotIn('最多选择 12 个', DIGEST_V3.system_text)
-        self.assertIn('stage 为 synthesis', DIGEST_V3.system_text)
-        self.assertIn('由你根据材料复杂度决定合适长度', DIGEST_V3.system_text)
-        self.assertNotIn('600 至 1200 字', DIGEST_V3.system_text)
-        self.assertIn('summary', DIGEST_V3.system_text)
+        self.assertEqual(4, DIGEST_V4.version)
+        self.assertIn('stage 为 index', DIGEST_V4.system_text)
+        self.assertIn('expand_topics', DIGEST_V4.system_text)
+        self.assertIn('自主决定需要深入阅读的主题数量', DIGEST_V4.system_text)
+        self.assertNotIn('最多选择 12 个', DIGEST_V4.system_text)
+        self.assertIn('stage 为 synthesis', DIGEST_V4.system_text)
+        self.assertIn('由你根据材料复杂度决定合适长度', DIGEST_V4.system_text)
+        self.assertNotIn('600 至 1200 字', DIGEST_V4.system_text)
+        self.assertIn('中文只是输出语言', DIGEST_V4.system_text)
+        self.assertIn('重要程度相近时，优先保持合理的跨地区、跨板块覆盖', DIGEST_V4.system_text)
+        self.assertIn('不得使用机械地区配额', DIGEST_V4.system_text)
+        self.assertIn('summary', DIGEST_V4.system_text)
 
     async def test_digest_full_text_and_budget_use_repository_before_worker(self):
         item = replace(observation('content', 'Official release', timestamp=self.now-10),

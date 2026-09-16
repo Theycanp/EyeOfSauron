@@ -8,6 +8,13 @@ records. Rules turn observations into
 `AlertCandidate` records. SQLite stores source cursors, deduplication state,
 rule output, and the notification outbox. Notifiers deliver outbox entries.
 
+For multi-source intelligence, the durable direction is
+`Observation -> Event -> EventReport -> Claim/Timeline`. An event is a stable
+real-world subject; reports remain parallel evidence with source-tier and
+conflict relationships. The event repository is enabled in the digest path;
+the legacy digest fields remain a compatibility projection for older readers.
+Matching and scoring belong to the event domain, not the React client or HTTP adapter.
+
 ```text
 collectors -> normalized observations -> triage -> rules -> incidents -> SQLite outbox -> notifiers
                      |                       |

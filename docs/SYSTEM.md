@@ -19,12 +19,18 @@ source adapter -> Observation -> deterministic triage -> rules -> Incident
                                                       |
                                             Notifier port -> ntfy
 
-Observations + coverage -> cluster/rank/select -> digest draft
+Observations + coverage -> event/report cluster -> rank/select -> digest draft
                                       |              |
                                       +-> optional AI summary
                                                      |
                                            versioned digest + outbox
 ```
+
+The event projection is deliberately layered: an `Event` groups related
+`EventReport` records, while primary, secondary, and social reports remain
+parallel evidence under that event. The digest reader can therefore explain
+why reports were grouped without replacing the original observations. See
+`EVENTS.md` for matching, conflict, lifecycle, and migration rules.
 
 Collectors own network access and source cursors. They return immutable,
 normalized observations; they do not send notifications. Deterministic triage

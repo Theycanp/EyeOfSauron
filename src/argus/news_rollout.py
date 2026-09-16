@@ -25,7 +25,19 @@ OFFICIAL_NEWS_SELECTION = (
     ("un_news", "chinese"),
     ("economist", "science_technology"),
     ("nvidia_newsroom", "news"),
-    ("us_embassy_china", "alerts"),
+    ("european_commission", "press"),
+    ("australian_prime_minister", "media"),
+    ("uk_government", "government"),
+    ("bank_of_england", "news"),
+    ("asean_secretariat", "news"),
+    ("channel_news_asia", "news"),
+    ("who_africa", "news"),
+    ("un_news_africa", "africa"),
+    ("who_paho", "news"),
+    ("un_news_middle_east", "middle_east"),
+    ("iaea_news", "news"),
+    ("nist_news", "news"),
+    ("new_york_times", "world"),
 )
 
 
@@ -85,6 +97,11 @@ def plan_official_news(
             rules.append(official_rule)
         covered = official_rule.setdefault("source_ids", [])
         for source in additions:
+            # Secondary and aggregator feeds provide context and corroboration;
+            # only reviewed primary sources may enter the first-party critical
+            # notification rule.
+            if source["source_tier"] != "primary":
+                continue
             if source["id"] not in covered:
                 covered.append(source["id"])
         embassy_source_id = "us_embassy_china_alerts"

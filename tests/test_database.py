@@ -119,8 +119,8 @@ class DatabaseTests(unittest.TestCase):
 
     def test_digest_prompt_upgrade_retains_old_version_and_activates_latest(self) -> None:
         rows = self.database.list_prompts("digest")
-        self.assertEqual([3, 2, 1], [row["version"] for row in rows])
-        self.assertEqual([3], [row["version"] for row in rows if row["active"]])
+        self.assertEqual([4, 3, 2, 1], [row["version"] for row in rows])
+        self.assertEqual([4], [row["version"] for row in rows if row["active"]])
 
     def test_outbox_lease_retry_and_delivery(self) -> None:
         self.assertTrue(self.database.enqueue_test_alert("eos", NOW))

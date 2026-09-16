@@ -20,4 +20,25 @@ describe('DigestsPage', () => {
     expect(screen.getByText('合并 3 次更新')).toBeVisible()
     expect(screen.getByText(/来源覆盖：1\/1 正常/)).toBeInTheDocument()
   })
+
+  it('renders event reports in parallel source-tier groups', async () => {
+    const digest = { digest_key: 'daily:event', version: 1, period_start: 1, period_end: 2, timezone: 'Asia/Shanghai', title: '事件日报', summary: '事件视图', generation_kind: 'algorithm', status: 'published' as const, created_at: 2, published_at: 2, item_count: 1, source_count: 3 }
+    const api = {
+      digests: vi.fn().mockResolvedValue({ digests: [digest] }),
+      digest: vi.fn().mockResolvedValue({ digest: { ...digest, items: [{ cluster_key: 'legacy', event_key: 'event-1', title: '同一事件', summary: '多层来源并列展示', score: 5, importance: 5, urgency: 4, relevance: 4, confidence: 0.9, reports: [
+        { report_id: 'r1', source_tier: 'primary', relation: 'primary', source_id: 'official', url: 'https://example.com/official', title: '官方公告' },
+        { report_id: 'r2', source_tier: 'secondary', relation: 'corroborates', source_id: 'wire', url: 'https://example.com/wire', title: '媒体报道' },
+        { report_id: 'r3', source_tier: 'social', relation: 'context', source_id: 'social', url: 'https://example.com/social', title: '社交讨论' },
+      ] }], coverage: [] } }),
+    } as unknown as AdminApi
+    render(<DigestsPage api={api} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByText('事件日报')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: /阅读日报/ }))
+    await waitFor(() => expect(screen.getByText('同一事件')).toBeInTheDocument())
+    expect(screen.getByText('一手')).toBeInTheDocument()
+    expect(screen.getByText('二手')).toBeInTheDocument()
+    expect(screen.getByText('社交/热度')).toBeInTheDocument()
+    expect(screen.getByText('交叉印证')).toBeInTheDocument()
+    expect(screen.getAllByRole('link')).toHaveLength(3)
+  })
 })

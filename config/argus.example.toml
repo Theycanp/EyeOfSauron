@@ -51,9 +51,14 @@ max_items_per_run = 50
 daily_api_budget = 2
 send_full_text = false
 [analysis.region_weights]
-CN = 5
-JP = 4
-US = 5
+EAST_ASIA = 5
+NORTH_AMERICA = 4
+EUROPE = 4
+AUSTRALIA_OCEANIA = 4
+SOUTHEAST_ASIA = 3
+MIDDLE_EAST = 3
+SOUTH_AMERICA = 2
+AFRICA = 2
 GLOBAL = 3
 OTHER = 3
 
@@ -69,7 +74,7 @@ notify = true
 public_base_url = "https://eos.example.com"
 api_summary = true
 prompt_id = "digest"
-prompt_version = 3
+prompt_version = 4
 
 [[sources]]
 id = "bloomberg_markets"
