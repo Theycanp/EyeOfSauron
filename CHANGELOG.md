@@ -25,6 +25,9 @@ Semantic Versioning and the Keep a Changelog structure.
   retain reasonable cross-region coverage, and no mechanical quotas are used.
 - Make event-centric clustering the default digest path, persist stable events
   and parallel source reports (schema 17), and keep legacy digest reads intact.
+- Migrate the previous built-in region-weight profile to macro regions and
+  explicitly activate `digest@4` during the reviewed production rollout while
+  preserving operator-customized weights.
 
 ## [0.17.0] - 2026-09-15
 

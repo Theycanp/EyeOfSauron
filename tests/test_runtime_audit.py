@@ -347,6 +347,31 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
         } <= memberships['global_breaking'])
         self.assertEqual({'host_health'}, memberships['host_health_notify'])
 
+    def test_runtime_rollout_migrates_only_the_legacy_region_defaults(self):
+        current, _ = plan_official_news({})
+        current['rules'].append({
+            'id': 'global_breaking', 'kind': 'weighted_text', 'source_ids': [],
+            'threshold': 1, 'max_item_age_seconds': 86400,
+            'notification_title': 'Global', 'priority': 4, 'tags': ['newspaper'],
+            'patterns': [{'label': 'all', 'regex': '.', 'title_weight': 1, 'summary_weight': 0}],
+        })
+        current['analysis'] = {
+            'enabled': True,
+            'region_weights': {'CN': 5, 'JP': 4, 'US': 5, 'GLOBAL': 3, 'OTHER': 3},
+        }
+        current['digest'] = {'api_summary': True}
+        planned, _ = plan_runtime_audit(current)
+        self.assertEqual(5, planned['analysis']['region_weights']['EAST_ASIA'])
+        self.assertEqual(4, planned['analysis']['region_weights']['NORTH_AMERICA'])
+        self.assertNotIn('CN', planned['analysis']['region_weights'])
+        self.assertEqual('digest', planned['digest']['prompt_id'])
+        self.assertEqual(4, planned['digest']['prompt_version'])
+
+        custom = dict(current)
+        custom['analysis'] = {'region_weights': {'CN': 3, 'US': 2}}
+        preserved, _ = plan_runtime_audit(custom)
+        self.assertEqual({'CN': 3, 'US': 2}, preserved['analysis']['region_weights'])
+
 
 if __name__ == '__main__':
     unittest.main()
