@@ -5,6 +5,30 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-17
+
+### Fixed
+
+- Share narrowly scoped central-bank decision identities between event matching
+  and immediate notifications, normalizing institution aliases and constraining
+  matches by local decision day, six-hour window and compatible rate direction.
+- Suppress same/lower-priority duplicate decision notifications across rules
+  using durable outbox history, while retaining announcement-to-direction
+  updates and priority upgrades. Dead/cancelled delivery does not block updates;
+  host/source recovery and explicit collector identities retain their old policy.
+- Preserve market-reaction reports as context without losing original evidence.
+- Restore daily-event filters from shareable URLs and browser navigation; retain
+  existing readable results when a refresh fails.
+
+### Added
+
+- Add read-only real-alert replay and explicit, evidence-checked decision-group
+  repair tools through a dedicated repository port. Repair retains observations,
+  notifications, historical digest snapshots and old event containers, and
+  records original assignments and source tiers in the event timeline.
+- Add a compare-and-swap rollout to fill missing legacy Federal Reserve source
+  metadata, preserving explicit settings and disabled-source choices.
+
 ## [0.19.0] - 2026-09-17
 
 ### Added

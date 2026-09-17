@@ -38,6 +38,68 @@ def _row(
 
 
 class EventClusteringTests(unittest.TestCase):
+    def test_fed_decision_reports_share_one_event_and_keep_market_context(self) -> None:
+        titles = (
+            "Federal Reserve issues FOMC statement",
+            "Federal Reserve Board and Federal Open Market Committee release economic projections from the September 15-16 FOMC meeting",
+            "Fed Raises Rates as Warsh Bucks Trump to Contain Inflation",
+            "Federal Reserve raises rates for first time since 2023",
+            "Key Takeaways From Fed Decision to Raise Interest Rates",
+            "Treasuries Hold Gains as Fed Hikes Rates, Signaling More Ahead",
+            "Fed Unanimously Raises Rates by a Quarter Point",
+            "Dollar Jumps After Fed Raises Rates, Sends Hawkish Signal",
+            "Federal Reserve raises fed funds rate with likely more to come",
+        )
+        rows = [
+            {
+                **_row(
+                    index,
+                    title,
+                    source_id=f"source-{index}",
+                    published_at=1_789_581_600 + index * 120,
+                ),
+                "topic": "general",
+                "region": "GLOBAL",
+            }
+            for index, title in enumerate(titles, 1)
+        ]
+        events = cluster_events(rows)
+        self.assertEqual(1, len(events))
+        self.assertEqual(9, len(events[0].reports))
+        relations = {report.title: report.relation for report in events[0].reports}
+        self.assertEqual("context", relations[titles[5]])
+        self.assertEqual("context", relations[titles[7]])
+
+    def test_distinct_central_bank_decisions_do_not_merge(self) -> None:
+        events = cluster_events([
+            _row(1, "Federal Reserve raises interest rates", source_id="fed"),
+            _row(2, "European Central Bank raises interest rates", source_id="ecb"),
+        ])
+        self.assertEqual(2, len(events))
+
+    def test_same_day_decisions_outside_window_have_unique_cluster_keys(self) -> None:
+        instant = 1_789_581_600
+        events = cluster_events([
+            _row(1, "Federal Reserve raises interest rates", source_id="fed", published_at=instant),
+            _row(2, "Federal Reserve raises interest rates", source_id="fed", published_at=instant + 7 * 3600),
+        ])
+        self.assertEqual(2, len(events))
+        self.assertEqual(2, len({event.event_id for event in events}))
+
+    def test_confirmed_identity_bridges_source_topic_and_region_taxonomies(self) -> None:
+        events = cluster_events([
+            {**_row(1, "Federal Reserve issues FOMC statement", source_id="fed"), "topic": "policy", "region": "US"},
+            {**_row(2, "Fed raises interest rates", source_id="media"), "topic": "markets", "region": "GLOBAL"},
+        ])
+        self.assertEqual(1, len(events))
+
+    def test_speculative_rate_story_has_no_semantic_override(self) -> None:
+        events = cluster_events([
+            _row(1, "Fed could cut rates later this year", source_id="a"),
+            _row(2, "Fed may raise rates if inflation returns", source_id="b"),
+        ])
+        self.assertEqual(2, len(events))
+
     def test_order_independent_and_stable_without_observation_ids(self) -> None:
         first = _row(1, "财政部向金融机构增资", source_id="official", tier="primary", entities=("财政部", "金融机构"))
         second = _row(2, "金融机构获财政部增资", source_id="media", entities=("财政部", "金融机构"), published_at=1_800_000_060)

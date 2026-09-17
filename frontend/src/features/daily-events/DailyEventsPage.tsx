@@ -8,6 +8,22 @@ import { formatDate } from '../../shared/utils'
 const PAGE_SIZE = 50
 const DEFAULT_HOURS = 28
 
+function readFilters(): { hours: number; sort: NewsEventSort } {
+  const params = new URLSearchParams(window.location.search)
+  const value = Number(params.get('hours'))
+  return {
+    hours: Number.isInteger(value) && value >= 1 && value <= 720 ? value : DEFAULT_HOURS,
+    sort: params.get('sort') === 'importance' ? 'importance' : 'newest',
+  }
+}
+
+function saveFilters(hours: number, sort: NewsEventSort) {
+  const url = new URL(window.location.href)
+  url.searchParams.set('hours', String(hours))
+  url.searchParams.set('sort', sort)
+  window.history.pushState(null, '', url)
+}
+
 interface DailyEventsPageProps {
   api: AdminApi
   onUnauthorized: () => void
@@ -42,9 +58,9 @@ function errorMessage(error: unknown): string {
 }
 
 export function DailyEventsPage({ api, onUnauthorized }: DailyEventsPageProps) {
-  const [hours, setHours] = useState(DEFAULT_HOURS)
-  const [hoursDraft, setHoursDraft] = useState(String(DEFAULT_HOURS))
-  const [sort, setSort] = useState<NewsEventSort>('newest')
+  const [hours, setHours] = useState(() => readFilters().hours)
+  const [hoursDraft, setHoursDraft] = useState(() => String(readFilters().hours))
+  const [sort, setSort] = useState<NewsEventSort>(() => readFilters().sort)
   const [events, setEvents] = useState<NewsEvent[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
@@ -54,11 +70,25 @@ export function DailyEventsPage({ api, onUnauthorized }: DailyEventsPageProps) {
   const [refreshKey, setRefreshKey] = useState(0)
   const requestSequence = useRef(0)
   const activeRequest = useRef<AbortController | null>(null)
+  const loadedFilters = useRef<string | null>(null)
 
   const invalidateRequests = useCallback(() => {
     requestSequence.current += 1
     activeRequest.current?.abort()
   }, [])
+
+  useEffect(() => {
+    const restore = () => {
+      const filters = readFilters()
+      invalidateRequests()
+      setHours(filters.hours)
+      setHoursDraft(String(filters.hours))
+      setSort(filters.sort)
+      setRefreshKey((value) => value + 1)
+    }
+    window.addEventListener('popstate', restore)
+    return () => window.removeEventListener('popstate', restore)
+  }, [invalidateRequests])
 
   useEffect(() => {
     let controller: AbortController | null = null
@@ -70,14 +100,18 @@ export function DailyEventsPage({ api, onUnauthorized }: DailyEventsPageProps) {
       setLoading(true)
       setLoadingMore(false)
       setError(null)
-      setEvents([])
-      setNextCursor(null)
-      setExpanded(new Set())
+      const filterKey = `${hours}:${sort}`
+      if (loadedFilters.current !== filterKey) {
+        setEvents([])
+        setNextCursor(null)
+        setExpanded(new Set())
+      }
 
       void api.newsEvents({ hours, sort, limit: PAGE_SIZE, signal: controller.signal })
         .then((response) => {
           if (sequence !== requestSequence.current) return
           setEvents(normalizedEvents(response))
+          loadedFilters.current = filterKey
           setNextCursor(response.pagination?.has_more === false ? null : String(response.pagination?.next_cursor || '') || null)
         })
         .catch((failure: unknown) => {
@@ -123,6 +157,7 @@ export function DailyEventsPage({ api, onUnauthorized }: DailyEventsPageProps) {
     const value = Number(hoursDraft)
     if (Number.isInteger(value) && value >= 1 && value <= 720 && value !== hours) {
       invalidateRequests()
+      saveFilters(value, sort)
       setHours(value)
     }
   }
@@ -130,6 +165,7 @@ export function DailyEventsPage({ api, onUnauthorized }: DailyEventsPageProps) {
   const changeSort = (value: NewsEventSort) => {
     if (value === sort) return
     invalidateRequests()
+    saveFilters(hours, value)
     setSort(value)
   }
 

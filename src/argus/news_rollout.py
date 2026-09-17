@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from .news_catalog import NEWS_SOURCE_CATALOG
 
@@ -38,6 +39,21 @@ OFFICIAL_NEWS_SELECTION = (
     ("nist_news", "news"),
     ("new_york_times", "world"),
 )
+
+
+def plan_event_metadata(current: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Fill legacy Fed defaults only; explicit operator choices are preserved."""
+    result = deepcopy(dict(current))
+    probes = []
+    for source in result.get("sources", []):
+        if source.get("id") != "fed_monetary" or urlsplit(str(source.get("url", ""))).hostname != "www.federalreserve.gov":
+            continue
+        before = dict(source)
+        for name, value in {"region": "US", "source_tier": "primary", "default_importance": 4}.items():
+            source.setdefault(name, value)
+        if source != before and source.get("enabled", True):
+            probes.append(source)
+    return result, probes
 
 
 def plan_official_news(

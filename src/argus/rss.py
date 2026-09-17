@@ -220,6 +220,9 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
                 url=link,
                 attributes={"section": source.section, "creator": truncate(creator, 500),
                             "published_at_inferred": parsed_date is None},
+                importance=source.default_importance,
+                region=source.region,
+                source_tier=source.source_tier,
                 content_documents=documents,
                 content_fetch=content_fetch,
             ))
@@ -261,6 +264,9 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
                 summary=summary,
                 url=link,
                 attributes={"section": source.section, "published_at_inferred": parsed_date is None},
+                importance=source.default_importance,
+                region=source.region,
+                source_tier=source.source_tier,
                 content_documents=documents,
                 content_fetch=content_fetch,
             ))

@@ -6,6 +6,7 @@ import unicodedata
 from datetime import datetime
 
 from .config import WeightedTextRuleConfig
+from .event_identity import identify_semantic_event
 from .models import AlertCandidate, Observation
 from .safe_regex import compile_safe_regex
 from .util import to_epoch, truncate
@@ -64,11 +65,16 @@ class WeightedTextRule:
         normalized = re.sub(r"\s+", " ", normalized).strip()[:240]
         if not normalized:
             normalized = hashlib.sha256(folded.encode("utf-8")).hexdigest()
-        normalized = explicit_identity or normalized
-        incident_key = hashlib.sha256(
-            f"{self.config.id}\x1f{normalized}".encode("utf-8")
-        ).hexdigest()
         stateful = bool(attributes.get("stateful") or attributes.get("recovery"))
+        semantic = (identify_semantic_event(observation.title, observation.summary)
+                    if not explicit_identity and not stateful else None)
+        if semantic is not None:
+            incident_key = semantic.notification_key(published)
+        else:
+            normalized = explicit_identity or normalized
+            incident_key = hashlib.sha256(
+                f"{self.config.id}\x1f{normalized}".encode("utf-8")
+            ).hexdigest()
         section = str(observation.attributes.get("section", "")).strip()
         source_label = observation.publisher if not section else f"{observation.publisher} · {section}"
         summary = truncate(observation.summary, 700)

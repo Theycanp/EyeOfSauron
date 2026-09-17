@@ -232,6 +232,46 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual("open", incident["status"])
         self.assertIsNone(incident["recovered_at"])
 
+    def test_event_notifications_suppress_same_or_lower_priority_across_rules(self) -> None:
+        def candidate(rule_id: str, dedupe_key: str, priority: int) -> AlertCandidate:
+            return AlertCandidate(
+                rule_id=rule_id,
+                dedupe_key=dedupe_key,
+                title="Central bank decision",
+                message="decision update",
+                priority=priority,
+                tags=("bank",),
+                click_url="",
+                topic="eos",
+                incident_key="news-event:shared-news-event",
+                incident_kind="event",
+            )
+
+        with self.database.connection:
+            self.assertTrue(self.database._insert_alert(candidate("official", "a", 4), None, NOW))
+            self.assertFalse(self.database._insert_alert(candidate("media", "b", 4), None, NOW + 60))
+            self.assertTrue(self.database._insert_alert(candidate("media", "c", 5), None, NOW + 120))
+            self.assertFalse(self.database._insert_alert(candidate("wire", "d", 5), None, NOW + 1900))
+            self.assertTrue(self.database._insert_alert(candidate("wire", "e", 5), None, NOW + 21721))
+        self.assertEqual(3, self.database.status()["outbox"]["pending"])
+
+    def test_semantic_news_suppression_survives_restart_but_not_failed_delivery(self) -> None:
+        candidate = AlertCandidate(
+            rule_id="news", dedupe_key="news-a", title="decision", message="decision",
+            priority=4, tags=(), click_url="", topic="eos", incident_key="news-event:restart",
+        )
+        with self.database.connection:
+            self.assertTrue(self.database._insert_alert(candidate, None, NOW))
+        path = self.database.path
+        self.database.close()
+        self.database = Database(path)
+        from dataclasses import replace
+        with self.database.connection:
+            self.assertFalse(self.database._insert_alert(replace(candidate, rule_id="other", dedupe_key="news-b"), None, NOW + 60))
+            self.database.connection.execute("UPDATE alerts SET status='dead' WHERE dedupe_key='news-a'")
+            self.assertTrue(self.database._insert_alert(replace(candidate, dedupe_key="news-c"), None, NOW + 120))
+
+
     def test_config_revision_history_and_activation(self) -> None:
         payload = {"sources": [], "rules": []}
         self.database.record_config_revision(1, payload, "tester", "initial")

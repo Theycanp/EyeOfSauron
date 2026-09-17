@@ -94,6 +94,95 @@ class EventPersistenceTests(unittest.TestCase):
         }
         self.assertTrue({"events", "event_reports", "event_claims", "event_claim_evidence", "event_timeline"} <= tables)
 
+    def _legacy_decision_events(self) -> list[str]:
+        instant = 1_789_581_600
+        titles = ("Federal Reserve issues FOMC statement", "Fed raises interest rates",
+                  "Dollar Jumps After Fed Raises Rates, Sends Hawkish Signal")
+        keys = []
+        for index, title in enumerate(titles):
+            source = f"decision-{index}"
+            self.database.record_source_success(source, FeedFetchResult((observation(
+                f"decision-{index}", title, source_id=source, timestamp=instant + index * 60,
+            ),), None, None), self.rules, instant + 180, "eos")
+            identifier = self.database.list_observations(instant, instant + 180)[0]["id"]
+            key = f"legacy-decision-{index}"
+            keys.append(key)
+            self.database.save_event(PersistedEvent(
+                event_key=key, fingerprint=key, title=title, summary=title,
+                score=4, importance=4, urgency=3, relevance=4, confidence=0.8,
+                first_seen_at=instant + index * 60, last_seen_at=instant + index * 60,
+            ))
+            self.database.save_event_report(PersistedEventReport(
+                event_key=key, observation_id=identifier, source_id=source, publisher=source,
+                source_tier="primary" if index == 0 else "secondary", relation="primary",
+                match_score=1, is_representative=True, published_at=instant + index * 60,
+                title=title, summary=title, url="https://example.test/decision",
+            ))
+        return keys
+
+    def test_guarded_repair_preserves_evidence_and_leaves_audit(self) -> None:
+        keys = self._legacy_decision_events()
+        ids = [report.observation_id for key in keys for report in self.database.list_event_reports(key)]
+        with self.assertRaisesRegex(ValueError, "evidence changed"):
+            self.database.merge_semantic_event_group(keys, expected_observation_ids=ids[:-1], actor="test", now=1_789_582_000)
+        self.assertEqual(1, len(self.database.list_event_reports(keys[1])))
+        target = self.database.merge_semantic_event_group(keys, expected_observation_ids=ids, actor="test", now=1_789_582_000)
+        self.assertEqual(keys[0], target)
+        reports = self.database.list_event_reports(target)
+        self.assertEqual(set(ids), {report.observation_id for report in reports})
+        self.assertEqual("context", next(report.relation for report in reports if report.source_id == "decision-2"))
+        self.assertEqual("repair_merge", self.database.list_event_timeline(target)[0].kind)
+        self.assertEqual("closed", self.database.get_event(keys[1]).status)  # type: ignore[union-attr]
+        self.assertEqual(4, self.database.connection.execute("SELECT COUNT(*) FROM observations").fetchone()[0])
+
+    def test_guarded_repair_refuses_existing_claim_graph(self) -> None:
+        keys = self._legacy_decision_events()
+        ids = [report.observation_id for key in keys for report in self.database.list_event_reports(key)]
+        self.database.save_event_claim(PersistedEventClaim(
+            event_key=keys[0], claim_key="decision", text="confirmed", status="active",
+            confidence=1, first_seen_at=100, last_seen_at=100,
+        ))
+        with self.assertRaisesRegex(ValueError, "claims or timeline"):
+            self.database.merge_semantic_event_group(keys, expected_observation_ids=ids, actor="test", now=1_789_582_000)
+
+    def test_guarded_repair_refuses_historical_digest_references(self) -> None:
+        keys = self._legacy_decision_events()
+        ids = [report.observation_id for key in keys for report in self.database.list_event_reports(key)]
+        instant = 1_789_581_600
+        saved = self.database.save_digest(DigestBuilder(self.database).build(
+            digest_key="daily:repair-history", period_start=instant - 1, period_end=instant + 180,
+            timezone="Asia/Shanghai", created_at=instant + 200,
+            source_ids=tuple(f"decision-{index}" for index in range(3)),
+        ))
+        with self.assertRaisesRegex(ValueError, "historical digests"):
+            self.database.merge_semantic_event_group(keys, expected_observation_ids=ids, actor="test", now=instant + 300)
+        self.assertEqual(saved, self.database.get_digest(saved.digest_key, saved.version))
+
+    def test_projector_does_not_join_opposite_directions_through_announcement(self) -> None:
+        instant = 1_789_581_600
+        for index, title in enumerate(("Federal Reserve issues FOMC statement", "Fed raises interest rates", "Fed cuts interest rates")):
+            self.database.record_source_success(f"fed-{index}", FeedFetchResult((observation(
+                f"fed-{index}", title, source_id=f"fed-{index}", timestamp=instant + index * 60,
+            ),), None, None), self.rules, instant + 180, "eos")
+        EventPoolProjector(self.database).project_pending(now=instant + 200, since=instant, until=instant + 180)
+        events = self.database.list_event_page(since=instant, until=instant + 180)
+        self.assertEqual(2, len(events.items))
+        for item in events.items:
+            titles = {report.title for report in item.reports}
+            self.assertFalse({"Fed raises interest rates", "Fed cuts interest rates"} <= titles)
+
+    def test_projector_preserves_distinct_same_day_decisions_outside_window(self) -> None:
+        instant = 1_789_581_600
+        for index in range(2):
+            published = instant + index * 7 * 3600
+            self.database.record_source_success(f"rate-{index}", FeedFetchResult((observation(
+                f"rate-{index}", "Fed raises interest rates", source_id=f"rate-{index}", timestamp=published,
+            ),), None, None), self.rules, published, "eos")
+            EventPoolProjector(self.database).project_pending(now=published, since=instant, until=published + 1)
+        items = self.database.list_event_page(since=instant, until=instant + 8 * 3600).items
+        self.assertEqual(2, len(items))
+        self.assertTrue(all(item.report_count == 1 for item in items))
+
     def test_digest_builder_projects_event_and_reports(self) -> None:
         digest = DigestBuilder(self.database).build(
             digest_key="daily:2026-09-06", period_start=0, period_end=2_000_000_000,

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
-from argus.config import load_config
+from argus.config import PatternConfig, load_config
 from argus.rules import RuleSet
 
 from helpers import PROJECT_ROOT, observation
@@ -58,6 +59,51 @@ class RuleTests(unittest.TestCase):
         first = self.rules.evaluate(observation("cn-1", "Breaking: 中国央行紧急行动"), NOW)[0]
         second = self.rules.evaluate(observation("cn-2", "Breaking: 日本央行紧急行动"), NOW)[0]
         self.assertNotEqual(first.incident_key, second.incident_key)
+
+    def test_central_bank_event_identity_is_shared_across_rules_and_headlines(self) -> None:
+        official_rule = replace(
+            self.rules.rules[0].config, id="fed_announcements", source_ids=("fed_monetary",),
+            patterns=(PatternConfig("official", ".", 10, 10),), priority=4,
+        )
+        rules = RuleSet.from_config((official_rule, self.rules.rules[0].config), "eos")
+        official = rules.evaluate(
+            observation(
+                "fed-statement",
+                "Federal Reserve issues FOMC statement",
+                source_id="fed_monetary",
+            ),
+            NOW,
+        )[0]
+        media = self.rules.evaluate(
+            observation(
+                "fed-report",
+                "Fed Raises Rates as Warsh Bucks Trump to Contain Inflation",
+                "The Federal Reserve raised interest rates by a quarter percentage point.",
+            ),
+            NOW,
+        )[0]
+        self.assertNotEqual(official.rule_id, media.rule_id)
+        # A concrete direction is a useful update to a generic announcement.
+        self.assertNotEqual(official.incident_key, media.incident_key)
+        other_media = self.rules.evaluate(observation("ft", "Federal Reserve raises interest rates"), NOW)[0]
+        self.assertEqual(media.incident_key, other_media.incident_key)
+
+    def test_distinct_central_banks_keep_distinct_incident_identity(self) -> None:
+        fed = self.rules.evaluate(
+            observation("fed", "Federal Reserve raises interest rates"), NOW
+        )[0]
+        ecb = self.rules.evaluate(
+            observation("ecb", "European Central Bank raises interest rates"), NOW
+        )[0]
+        self.assertNotEqual(fed.incident_key, ecb.incident_key)
+
+    def test_explicit_domain_identity_has_priority_over_semantic_news(self) -> None:
+        first = replace(observation("explicit-1", "Federal Reserve raises interest rates"), attributes={"incident_key": "check-a", "stateful": True})
+        second = replace(first, external_id="explicit-2", attributes={"incident_key": "check-b", "stateful": True})
+        left = self.rules.evaluate(first, NOW)[0]
+        right = self.rules.evaluate(second, NOW)[0]
+        self.assertNotEqual(left.incident_key, right.incident_key)
+        self.assertFalse(str(left.incident_key).startswith("news-event:"))
 
 
 if __name__ == "__main__":

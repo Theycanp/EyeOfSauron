@@ -216,8 +216,23 @@ test('manual event form creates a durable event and opens its saved detail', asy
   await page.screenshot({ path: testInfo.outputPath('manual-event-detail.png'), fullPage: true })
 })
 
-test('daily events reader is usable on desktop and mobile', async ({ page }) => {
+test('daily events reader is usable on desktop and mobile', async ({ page }, testInfo) => {
   await mockAdminApi(page)
+  await page.route('**/api/news-events**', async (route) => route.fulfill({ json: {
+    events: [{
+      event_key: 'fed-decision', title: 'Federal Reserve issues FOMC statement',
+      summary: '美联储利率决议，官方声明、媒体报道和市场反应并列保留。',
+      score: 4.8, importance: 5, urgency: 4, relevance: 4, confidence: 0.9,
+      first_seen_at: 1789581600, last_seen_at: 1789583306, status: 'active',
+      regions: ['US'], topics: ['policy'], independent_source_count: 3,
+      handling: 'immediate', report_count: 3, reports_truncated: false,
+      reports: [
+        { report_id: 1, observation_id: 1, source_id: 'fed', publisher: 'Federal Reserve', source_tier: 'primary', relation: 'primary', title: 'Federal Reserve issues FOMC statement', summary: '官方政策声明。', url: 'https://www.federalreserve.gov/', published_at: 1789581600 },
+        { report_id: 2, observation_id: 2, source_id: 'bloomberg', publisher: 'Bloomberg', source_tier: 'secondary', relation: 'corroborates', title: 'Fed Raises Rates as Warsh Bucks Trump to Contain Inflation', summary: '媒体对利率决议的报道。', url: 'https://www.bloomberg.com/', published_at: 1789581601 },
+        { report_id: 3, observation_id: 3, source_id: 'ft', publisher: 'Financial Times', source_tier: 'secondary', relation: 'context', title: 'Dollar Jumps After Fed Raises Rates, Sends Hawkish Signal', summary: '市场反应属于背景报道。', url: 'https://www.ft.com/', published_at: 1789583306 },
+      ],
+    }], pagination: { next_cursor: null, has_more: false },
+  } }))
   await login(page)
   const menu = page.getByRole('button', { name: '打开导航' })
   if (await menu.isVisible()) await menu.click()
@@ -225,6 +240,18 @@ test('daily events reader is usable on desktop and mobile', async ({ page }) => 
   await expect(page.getByRole('main').getByRole('heading', { name: '日常事件', level: 2 })).toBeVisible()
   await expect(page.getByLabel('时间窗（小时）')).toHaveValue('28')
   await expect(page.getByRole('button', { name: '最新' })).toHaveAttribute('aria-pressed', 'true')
+  await expect(page).toHaveURL(/\/daily-events$/)
+  await page.getByRole('button', { name: /Federal Reserve issues FOMC statement/ }).click()
+  await expect(page.getByText('一手', { exact: true })).toBeVisible()
+  await expect(page.getByText('背景信息', { exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('daily-events-expanded.png'), fullPage: true })
+  await page.getByRole('button', { name: '重要', exact: true }).click()
+  await expect(page).toHaveURL(/sort=importance/)
+  await page.getByLabel('时间窗（小时）').fill('48')
+  await page.getByRole('button', { name: '应用', exact: true }).click()
+  await expect(page).toHaveURL(/hours=48/)
+  await page.goBack()
+  await expect(page.getByLabel('时间窗（小时）')).toHaveValue('28')
   await expect(page.locator('body')).toHaveJSProperty(
     'scrollWidth',
     await page.locator('body').evaluate((node) => node.clientWidth),

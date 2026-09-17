@@ -34,6 +34,14 @@ const pages = [
 type PageId = typeof pages[number]['id']
 type Toast = { id: number; text: string; tone: 'success' | 'error' }
 
+function pageFromLocation(): PageId {
+  if (window.location.pathname.startsWith('/daily-events')) return 'daily-events'
+  if (window.location.pathname.startsWith('/events')) return 'events'
+  if (window.location.pathname.startsWith('/digests')) return 'digests'
+  const value = window.location.hash.replace('#/', '')
+  return pages.some((item) => item.id === value) ? value as PageId : 'overview'
+}
+
 export default function AdminApp() {
   const api = useMemo(() => new AdminApi(), [])
   const [identity, setIdentity] = useState<AdminIdentity | null>(null)
@@ -42,13 +50,12 @@ export default function AdminApp() {
   const [loginPassword, setLoginPassword] = useState('')
   const [loginError, setLoginError] = useState('')
   const [loginBusy, setLoginBusy] = useState(false)
-  const [page, setPage] = useState<PageId>(() => {
-    if (window.location.pathname.startsWith('/daily-events')) return 'daily-events'
-    if (window.location.pathname.startsWith('/events')) return 'events'
-    if (window.location.pathname.startsWith('/digests')) return 'digests'
-    const value = window.location.hash.replace('#/', '')
-    return pages.some((item) => item.id === value) ? value as PageId : 'overview'
-  })
+  const [page, setPage] = useState<PageId>(pageFromLocation)
+  useEffect(() => {
+    const restore = () => setPage(pageFromLocation())
+    window.addEventListener('popstate', restore)
+    return () => window.removeEventListener('popstate', restore)
+  }, [])
   const [theme, setTheme] = useState(() => localStorage.getItem('eosTheme') || (window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -167,7 +174,7 @@ export default function AdminApp() {
   const go = (next: PageId) => {
     setPage(next)
     setMobileNavOpen(false)
-    window.history.pushState(null, '', `#/${next}`)
+    window.history.pushState(null, '', next === 'daily-events' ? '/daily-events' : `/#/${next}`)
     const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
     window.scrollTo({ top: 0, behavior: reducedMotion ? 'auto' : 'smooth' })
   }
