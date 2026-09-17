@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import Any
 
 from .event_clustering import cluster_events, event_match_score
+from .event_identity import identify_semantic_event
 from .events import (
     EventPoolRepository,
     EventRepository,
@@ -55,7 +56,8 @@ class EventPoolProjector:
             "summary": event.summary,
             "topic": event.topics[0] if event.topics else "general",
             "region": event.regions[0] if event.regions else "GLOBAL",
-            "published_at": event.last_seen_at,
+            "published_at": (event.first_seen_at if identify_semantic_event(event.title) is not None
+                             else event.last_seen_at),
         }
 
     def _match(self, observation: dict[str, Any]) -> tuple[PersistedEvent | None, float]:
@@ -72,9 +74,22 @@ class EventPoolProjector:
             ),
             key=lambda item: (-item[0], item[1].event_key),
         )
-        if not ranked or ranked[0][0] < self.match_threshold:
-            return None, 0.0
-        return ranked[0][1], ranked[0][0]
+        semantic = identify_semantic_event(str(observation.get("title", "")))
+        for score, candidate in ranked:
+            if score < self.match_threshold:
+                break
+            if semantic is not None:
+                reports = self.repository.list_event_reports(candidate.event_key, limit=2000)
+                if len(reports) == 2000:
+                    continue
+                if any(
+                    prior is not None and not semantic.compatible(prior, published_at, report.published_at)
+                    for report in reports
+                    if (prior := identify_semantic_event(report.title)) is not None
+                ):
+                    continue
+            return candidate, score
+        return None, 0.0
 
     def project_pending(
         self,
@@ -101,7 +116,8 @@ class EventPoolProjector:
                 incoming = clustered[0]
                 report = incoming.reports[0]
                 existing, match_score = self._match(observation)
-                bucket = incoming.published_at // 86400
+                semantic = identify_semantic_event(report.title, report.summary)
+                bucket = incoming.published_at if semantic is not None else incoming.published_at // 86400
                 new_identity = hashlib.sha256(
                     f"{incoming.event_id}:{bucket}".encode("ascii")
                 ).hexdigest()[:24]
@@ -113,7 +129,9 @@ class EventPoolProjector:
                 )
                 prior_sources = {item.source_id for item in prior_reports}
                 has_primary = any(item.source_tier == "primary" for item in prior_reports)
-                if report.source_id in prior_sources:
+                if semantic is not None and semantic.relation_hint == "context":
+                    relation = "context"
+                elif report.source_id in prior_sources:
                     relation = "updates"
                 elif report.source_tier == "primary":
                     relation = "primary"

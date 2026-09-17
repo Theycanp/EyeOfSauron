@@ -264,3 +264,13 @@ class EventRepository(Protocol):
     def save_event_timeline(self, item: PersistedEventTimelineItem) -> PersistedEventTimelineItem: ...
 
     def list_event_timeline(self, event_key: str, *, limit: int = 500) -> list[PersistedEventTimelineItem]: ...
+
+
+@runtime_checkable
+class EventRepairRepository(Protocol):
+    """Explicit, audited repair port; never used automatically by a collector."""
+
+    def merge_semantic_event_group(
+        self, event_keys: Sequence[str], *, expected_observation_ids: Sequence[int],
+        actor: str, now: int, primary_source_ids: Sequence[str] = (),
+    ) -> str: ...

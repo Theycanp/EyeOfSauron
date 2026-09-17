@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AdminApi } from '../../shared/api'
 import type { NewsEvent, NewsEventResponse } from '../../shared/types'
 import { DailyEventsPage } from './DailyEventsPage'
@@ -36,6 +36,31 @@ function deferred<T>() {
 }
 
 describe('DailyEventsPage', () => {
+  beforeEach(() => window.history.replaceState(null, '', '/daily-events'))
+
+  it('restores URL filters and responds to browser navigation', async () => {
+    window.history.replaceState(null, '', '/daily-events?hours=72&sort=importance')
+    const newsEvents = vi.fn().mockResolvedValue({ events: [] })
+    render(<DailyEventsPage api={{ newsEvents } as unknown as AdminApi} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(newsEvents).toHaveBeenLastCalledWith(expect.objectContaining({ hours: 72, sort: 'importance' })))
+    act(() => {
+      window.history.replaceState(null, '', '/daily-events?hours=48&sort=newest')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    await waitFor(() => expect(newsEvents).toHaveBeenLastCalledWith(expect.objectContaining({ hours: 48, sort: 'newest' })))
+    expect(screen.getByLabelText('时间窗（小时）')).toHaveValue(48)
+  })
+
+  it('retains readable results when refresh fails', async () => {
+    const newsEvents = vi.fn().mockResolvedValueOnce({ events: [newsEvent('one', '保留的事件')] })
+      .mockRejectedValueOnce(new Error('刷新暂时失败'))
+    const user = userEvent.setup()
+    render(<DailyEventsPage api={{ newsEvents } as unknown as AdminApi} onUnauthorized={vi.fn()} />)
+    expect(await screen.findByText('保留的事件')).toBeVisible()
+    await user.click(screen.getByRole('button', { name: '刷新日常事件' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('刷新暂时失败')
+    expect(screen.getByText('保留的事件')).toBeVisible()
+  })
   it('loads the default 28-hour newest window and applies changed filters', async () => {
     const newsEvents = vi.fn().mockResolvedValue({ events: [] })
     const api = { newsEvents } as unknown as AdminApi

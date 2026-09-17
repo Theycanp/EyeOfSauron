@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any, Mapping, Sequence
 
+from .event_identity import identify_semantic_event
+
 
 _SPACE_RE = re.compile(r"\s+")
 _TOKEN_RE = re.compile(r"[a-z0-9]+|[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
@@ -163,8 +165,6 @@ def _region_compatible(left: str, right: str) -> bool:
 def _pair_score(left: Mapping[str, Any], right: Mapping[str, Any], *, window: int) -> tuple[float, bool]:
     topic_left = _text(left.get("topic", "general"))
     topic_right = _text(right.get("topic", "general"))
-    if topic_left != topic_right and "general" not in {topic_left, topic_right}:
-        return 0.0, False
     region_left = _text(left.get("region", "GLOBAL")).upper()
     region_right = _text(right.get("region", "GLOBAL")).upper()
     title = _title_similarity(left, right)
@@ -178,10 +178,28 @@ def _pair_score(left: Mapping[str, Any], right: Mapping[str, Any], *, window: in
         number_overlap = 0.5
     region_score = 1.0 if _region_compatible(region_left, region_right) else 0.0
     score = 0.35 * title + 0.25 * entity_score + 0.15 * time_score + 0.15 * number_overlap + 0.10 * region_score
+    semantic_left = identify_semantic_event(
+        str(left.get("title", "")), str(left.get("summary", ""))
+    )
+    semantic_right = identify_semantic_event(
+        str(right.get("title", "")), str(right.get("summary", ""))
+    )
+    shared_semantic = (
+        semantic_left is not None
+        and semantic_right is not None
+        and semantic_left.compatible(semantic_right, left_ts, right_ts)
+        and abs(left_ts - right_ts) <= window
+    )
+    if shared_semantic:
+        score = max(score, 0.96)
+    elif semantic_left is not None and semantic_right is not None:
+        return 0.0, False
+    elif topic_left != topic_right and "general" not in {topic_left, topic_right}:
+        return 0.0, False
     # Distinct figures in otherwise similar reports are retained as one event
     # with a contradiction marker, rather than silently replacing either fact.
     contradictory = bool(nums_left and nums_right and not (nums_left & nums_right) and title >= 0.72 and entity_score >= 0.2)
-    if not _region_compatible(region_left, region_right) and title < 0.88:
+    if not shared_semantic and not _region_compatible(region_left, region_right) and title < 0.88:
         return 0.0, contradictory
     return min(1.0, score), contradictory
 
@@ -292,7 +310,26 @@ def cluster_events(
         topics = tuple(sorted({_text(item.get("topic", "general")) for item in members}))
         regions = tuple(sorted({_text(item.get("region", "GLOBAL")).upper() for item in members}))
         entity_union = sorted(set().union(*(_entities(item) for item in members)))
-        fingerprint = "|".join([_text(title), ",".join(topics), ",".join(regions), ",".join(entity_union)])
+        semantic_keys = {
+            identity.dated_key(int(item.get("published_at", 0) or 0))
+            for item in members
+            if (identity := identify_semantic_event(
+                str(item.get("title", "")), str(item.get("summary", ""))
+            )) is not None
+        }
+        actions = {
+            identity.action for item in members
+            if (identity := identify_semantic_event(str(item.get("title", "")))) is not None
+            and identity.action != "announcement"
+        }
+        if len(semantic_keys) == 1:
+            fingerprint = ":".join((
+                next(iter(semantic_keys)),
+                next(iter(actions)) if len(actions) == 1 else "announcement",
+                str(min(int(item.get("published_at", 0) or 0) for item in members) // 21600),
+            ))
+        else:
+            fingerprint = "|".join([_text(title), ",".join(topics), ",".join(regions), ",".join(entity_union)])
         event_id = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
         primary_present = any(_tier(item.get("source_tier")) == "primary" for item in members)
         # Classify updates chronologically, then present reports newest first.
@@ -302,7 +339,12 @@ def cluster_events(
             item = items[index]
             tier = _tier(item.get("source_tier"))
             source_id = str(item.get("source_id", ""))
-            if source_id in source_seen:
+            semantic = identify_semantic_event(
+                str(item.get("title", "")), str(item.get("summary", ""))
+            )
+            if semantic is not None and semantic.relation_hint == "context":
+                relation_by_id[_report_id(item)] = "context"
+            elif source_id in source_seen:
                 relation_by_id[_report_id(item)] = "updates"
             elif tier == "primary":
                 relation_by_id[_report_id(item)] = "primary"

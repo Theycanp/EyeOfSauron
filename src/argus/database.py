@@ -22,7 +22,8 @@ from .content import (
     ContentLevel,
 )
 from .digest import DigestCluster, DigestDocument, DigestRetryState, SourceCoverage
-from .event_clustering import event_aggregate_score, event_evidence_score
+from .event_clustering import cluster_events, event_aggregate_score, event_evidence_score
+from .event_identity import identify_semantic_event
 from .events import (
     EventListItem,
     EventPage,
@@ -1870,16 +1871,25 @@ class Database:
         incident_id: int | None = None
         if candidate.incident_key:
             incident_id = self._upsert_incident(candidate, observation_id, now)
-            existing = self.connection.execute(
-                """
-                SELECT 1 FROM alerts
-                WHERE rule_id = ? AND incident_key = ? AND created_at >= ?
-                LIMIT 1
-                """,
-                (candidate.rule_id, candidate.incident_key, now - 1800),
-            ).fetchone()
-            if existing is not None and not candidate.recovery:
-                return False
+            semantic_news = candidate.incident_kind == "event" and candidate.incident_key.startswith("news-event:")
+            if semantic_news:
+                existing = self.connection.execute(
+                    """
+                    SELECT MAX(a.priority) AS max_priority FROM alerts a
+                    WHERE a.incident_id = ? AND a.topic = ? AND a.created_at >= ?
+                      AND a.status IN ('pending', 'sending', 'delivered')
+                    """,
+                    (incident_id, candidate.topic, now - 21600),
+                ).fetchone()
+                if existing is not None and existing["max_priority"] is not None and int(existing["max_priority"]) >= candidate.priority:
+                    return False
+            else:
+                existing = self.connection.execute(
+                    "SELECT 1 FROM alerts WHERE rule_id = ? AND incident_key = ? AND created_at >= ? LIMIT 1",
+                    (candidate.rule_id, candidate.incident_key, now - 1800),
+                ).fetchone()
+                if existing is not None and not candidate.recovery:
+                    return False
         cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO alerts(
@@ -4080,6 +4090,106 @@ class Database:
         with self.unit_of_work():
             return self._save_event_report(report)
 
+    def merge_semantic_event_group(
+        self, event_keys: Sequence[str], *, expected_observation_ids: Sequence[int],
+        actor: str, now: int, primary_source_ids: Sequence[str] = (),
+    ) -> str:
+        """Repair an explicitly selected pure decision group in one transaction.
+
+        Original observations, alert history, digest snapshots and old event
+        containers survive. Existing claims/timelines require a richer repair
+        workflow and are deliberately refused here.
+        """
+        keys = tuple(dict.fromkeys(event_keys))
+        expected = set(expected_observation_ids)
+        if not 2 <= len(keys) <= 20 or not 1 <= len(expected) <= 200 or not actor.strip() or len(actor) > 128 or now < 0:
+            raise ValueError("invalid semantic event repair request")
+        with self.unit_of_work():
+            events = [self.get_event(key) for key in keys]
+            if any(event is None for event in events):
+                raise ValueError("repair event no longer exists")
+            reports = [report for key in keys for report in self.list_event_reports(key, limit=201)]
+            if (len(reports) > 200 or {report.observation_id for report in reports} != expected
+                    or {report.event_key for report in reports} != set(keys)):
+                raise ValueError("repair evidence changed; preview again")
+            if any(self.list_event_claims(key, limit=1) or self.list_event_timeline(key, limit=1) for key in keys):
+                raise ValueError("repair refuses events with existing claims or timeline")
+            if any(self.connection.execute(
+                "SELECT 1 FROM digest_items di JOIN events e ON e.id=di.event_id WHERE e.event_key=? LIMIT 1", (key,),
+            ).fetchone() is not None for key in keys):
+                raise ValueError("repair refuses events referenced by historical digests")
+            original_tiers = {str(report.observation_id): report.source_tier for report in reports}
+            reports = [replace(report, source_tier="primary") if report.source_id in primary_source_ids else report for report in reports]
+            identities = [identify_semantic_event(report.title) for report in reports]
+            if any(identity is None for identity in identities):
+                raise ValueError("repair requires an explicit decision identity on every report")
+            rows = [
+                {"id": report.observation_id, "title": report.title, "summary": report.summary,
+                 "published_at": report.published_at, "source_id": report.source_id,
+                 "publisher": report.publisher, "source_tier": report.source_tier,
+                 "topic": "general", "region": "GLOBAL"}
+                for report in reports
+            ]
+            if len(cluster_events(rows)) != 1:
+                raise ValueError("repair reports do not describe one compatible decision")
+            # Prefer an existing official container, then the earliest evidence.
+            first = min(reports, key=lambda report: (report.source_tier != "primary", report.published_at, report.observation_id))
+            target = self.get_event(first.event_key)
+            assert target is not None
+            present = [event for event in events if event is not None]
+            target = replace(
+                target, score=max(event.score for event in present),
+                importance=max(event.importance for event in present),
+                urgency=max(event.urgency for event in present),
+                relevance=max(event.relevance for event in present),
+                confidence=max(event.confidence for event in present),
+                first_seen_at=min(report.published_at for report in reports),
+                last_seen_at=max(report.published_at for report in reports),
+                regions=tuple(sorted({region for event in present for region in event.regions})),
+                topics=tuple(sorted({topic for event in present for topic in event.topics})),
+                status="active", updated_at=now,
+            )
+            self._save_event(target)
+            target_id = self.connection.execute("SELECT id FROM events WHERE event_key=?", (target.event_key,)).fetchone()[0]
+            seen: set[str] = set()
+            for report in sorted(reports, key=lambda report: (report.published_at, report.observation_id)):
+                identity = identify_semantic_event(report.title)
+                assert identity is not None
+                relation = ("context" if identity.relation_hint == "context" else
+                            "updates" if report.source_id in seen else
+                            "primary" if report.source_tier == "primary" else "corroborates")
+                self.connection.execute(
+                    "UPDATE event_reports SET event_id=?, source_tier=?, relation=?, match_score=0.96, is_representative=0 WHERE id=?",
+                    (target_id, report.source_tier, relation, report.report_id),
+                )
+                seen.add(report.source_id)
+            self.connection.execute(
+                "UPDATE event_reports SET is_representative=1 WHERE id IN ("
+                "SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY source_id ORDER BY published_at DESC, id DESC) AS position "
+                "FROM event_reports WHERE event_id=?) WHERE position=1)", (target_id,),
+            )
+            self.connection.execute(
+                "UPDATE events SET independent_source_count=(SELECT COUNT(DISTINCT COALESCE(NULLIF(LOWER(TRIM(o.publisher)), ''), er.source_id)) "
+                "FROM event_reports er JOIN observations o ON o.id=er.observation_id WHERE er.event_id=?) WHERE id=?",
+                (target_id, target_id),
+            )
+            for key in keys:
+                if key != target.event_key:
+                    self.connection.execute("UPDATE events SET status='closed', updated_at=? WHERE event_key=?", (now, key))
+            audit_parts = [{"actor": actor, "event_keys": keys}]
+            for offset in range(0, len(reports), 10):
+                audit_parts.append({"assignments": {
+                    str(report.observation_id): {"event_key": report.event_key,
+                        "source_tier": original_tiers[str(report.observation_id)]}
+                    for report in reports[offset:offset + 10]
+                }})
+            for index, part in enumerate(audit_parts):
+                self._save_event_timeline(PersistedEventTimelineItem(
+                    event_key=target.event_key, occurred_at=now, kind="repair_merge",
+                    text=json.dumps({"part": index, **part}, sort_keys=True), confidence=1.0, created_at=now,
+                ))
+            return target.event_key
+
     def save_event_projection(
         self, event: PersistedEvent, report: PersistedEventReport
     ) -> PersistedEventReport:
@@ -4286,16 +4396,19 @@ class Database:
     def save_event_timeline(self, item: PersistedEventTimelineItem) -> PersistedEventTimelineItem:
         if not isinstance(item, PersistedEventTimelineItem):
             raise TypeError("item must be a PersistedEventTimelineItem")
+        with self.unit_of_work():
+            return self._save_event_timeline(item)
+
+    def _save_event_timeline(self, item: PersistedEventTimelineItem) -> PersistedEventTimelineItem:
         event = self.connection.execute("SELECT id FROM events WHERE event_key = ?", (item.event_key,)).fetchone()
         if event is None:
             raise KeyError(f"event does not exist: {item.event_key}")
         if item.report_id is not None and self.connection.execute("SELECT 1 FROM event_reports WHERE id = ?", (item.report_id,)).fetchone() is None:
             raise KeyError(f"report does not exist: {item.report_id}")
-        with self.unit_of_work():
-            cursor = self.connection.execute(
-                "INSERT INTO event_timeline(event_id, occurred_at, kind, text, confidence, report_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (int(event["id"]), item.occurred_at, item.kind, item.text, item.confidence, item.report_id, item.created_at),
-            )
+        cursor = self.connection.execute(
+            "INSERT INTO event_timeline(event_id, occurred_at, kind, text, confidence, report_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (int(event["id"]), item.occurred_at, item.kind, item.text, item.confidence, item.report_id, item.created_at),
+        )
         return PersistedEventTimelineItem(event_key=item.event_key, occurred_at=item.occurred_at, kind=item.kind,
                                  text=item.text, confidence=item.confidence, report_id=item.report_id,
                                  timeline_id=int(cursor.lastrowid), created_at=item.created_at)
