@@ -97,6 +97,14 @@ document used by `/events/<alert-id>`. These events are immediately eligible
 for ntfy delivery and remain available to the daily digest. Do not use this API
 for recurring reminders or recoverable health incidents.
 
+Do not confuse the manual-event command or `/events/<alert-id>` alert reader
+with the unified daily event pool. The read-only pool uses
+`GET /api/news-events?hours=28&sort=newest&limit=50`; `hours` is adjustable,
+`sort` accepts `newest` or `importance`, and subsequent requests pass the opaque
+`pagination.next_cursor`. The response reports its effective window and whether
+more rows remain. Operators must not query or edit the event tables directly.
+Capacity limits, diagnostics, and acceptance tests are maintained in `EVENTS.md`.
+
 Analysis policy uses `POST /api/analysis`; Prompt versions use
 `GET/POST /api/prompts`. Daily publication policy uses
 `POST /api/digest-config`. The authenticated read surface is

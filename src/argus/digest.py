@@ -21,7 +21,8 @@ from zoneinfo import ZoneInfo
 
 from .config import DigestConfig
 from .event_clustering import cluster_events, event_match_score
-from .events import PersistedEvent, PersistedEventReport
+from .event_pool import EventPoolProjector
+from .events import EventPoolRepository, EventRepository, PersistedEvent, PersistedEventReport
 from .reminders import next_daily_occurrence
 from .regions import effective_region_weights, region_weight
 from .util import sanitize_error
@@ -619,26 +620,61 @@ class DigestBuilder:
         created_at: int,
         source_ids: Sequence[str] | None = None,
         title: str | None = None,
+        project_events: bool = True,
     ) -> DigestDocument:
-        observations = self.repository.list_digest_observations(
-            period_start,
-            period_end,
-            source_ids=source_ids,
-            limit=self.observation_limit,
+        if project_events and isinstance(self.repository, EventPoolRepository) and isinstance(
+            self.repository, EventRepository
+        ):
+            # Close the small race between the latest source poll and the
+            # background projector. The batch is fixed so digest generation
+            # cannot turn into an unbounded history rebuild.
+            projector = EventPoolProjector(self.repository)
+            for _ in range((self.observation_limit + 499) // 500 + 1):
+                batch = projector.project_pending(
+                    now=created_at,
+                    since=period_start,
+                    until=period_end,
+                    limit=500,
+                )
+                if batch == 0:
+                    break
+        page_reader = getattr(self.repository, "list_event_page", None)
+        page = (
+            page_reader(
+                since=period_start,
+                until=period_end,
+                sort="importance",
+                limit=min(1000, self.observation_limit),
+                reports_per_event=100,
+            )
+            if page_reader is not None
+            else None
         )
-        observations = [
-            item
-            for item in observations
-            if str(item.get("handling", "digest")) in {"digest", "immediate"}
-        ]
-        clusters = cluster_observations_event_centric(
-            observations,
-            region_weights=self.region_weights,
-            max_items=self.item_limit,
-            source_quality_weights=self.source_quality_weights,
-            adaptive=True,
-        )
-        clusters = self._persist_events(clusters, created_at=created_at)
+        if page is not None and page.items:
+            clusters = self._clusters_from_event_pool(page.items, source_ids=source_ids)
+        else:
+            # Compatibility/backfill path for a newly migrated database. It is
+            # never used by HTTP reads; the dedicated projector will make this
+            # branch disappear once the bounded event-pool backfill catches up.
+            observations = self.repository.list_digest_observations(
+                period_start,
+                period_end,
+                source_ids=source_ids,
+                limit=self.observation_limit,
+            )
+            observations = [
+                item
+                for item in observations
+                if str(item.get("handling", "digest")) in {"digest", "immediate"}
+            ]
+            clusters = cluster_observations_event_centric(
+                observations,
+                region_weights=self.region_weights,
+                max_items=self.item_limit,
+                source_quality_weights=self.source_quality_weights,
+                adaptive=True,
+            )
+            clusters = self._persist_events(clusters, created_at=created_at)
         coverage = source_coverage_from_rows(
             self.repository.list_source_coverage(
                 period_start, period_end, source_ids=source_ids
@@ -659,6 +695,97 @@ class DigestBuilder:
             created_at=created_at,
         )
 
+    def _clusters_from_event_pool(
+        self, items: Sequence[Any], *, source_ids: Sequence[str] | None = None
+    ) -> tuple[DigestCluster, ...]:
+        weights = effective_region_weights(self.region_weights)
+        allowed_sources = set(source_ids) if source_ids is not None else None
+        candidates: list[DigestCluster] = []
+        for item in items:
+            event = item.event
+            reports_by_source: dict[str, PersistedEventReport] = {}
+            for report in item.reports:
+                if allowed_sources is not None and report.source_id not in allowed_sources:
+                    continue
+                current = reports_by_source.get(report.source_id)
+                if current is None or (
+                    report.is_representative,
+                    report.published_at,
+                    report.report_id or 0,
+                ) > (
+                    current.is_representative,
+                    current.published_at,
+                    current.report_id or 0,
+                ):
+                    reports_by_source[report.source_id] = report
+            source_ids = tuple(sorted(reports_by_source))
+            if not source_ids:
+                continue
+            reports = tuple(reports_by_source[source_id] for source_id in source_ids)
+            quality = max(
+                (
+                    max(0.70, min(1.15, float(self.source_quality_weights.get(source_id, 1.0))))
+                    for source_id in source_ids
+                    if isinstance(self.source_quality_weights.get(source_id, 1.0), (int, float))
+                ),
+                default=1.0,
+            )
+            regional_interest = max(
+                (region_weight(weights, region) for region in event.regions), default=3
+            )
+            primary_bonus = 0.35 if any(
+                report.source_tier == "primary" for report in reports
+            ) else 0.0
+            scoped_reports = tuple(reports)
+            candidates.append(DigestCluster(
+                cluster_key=event.event_key,
+                title=event.title,
+                summary=event.summary,
+                score=round(
+                    event.score * quality
+                    + max(0, regional_interest - 3) * 0.15
+                    + primary_bonus,
+                    4,
+                ),
+                importance=event.importance,
+                urgency=event.urgency,
+                relevance=event.relevance,
+                confidence=event.confidence,
+                published_at=event.last_seen_at,
+                regions=event.regions,
+                topics=event.topics,
+                source_ids=source_ids,
+                observation_ids=tuple(sorted(report.observation_id for report in scoped_reports)),
+                links=tuple(report.url for report in reports if report.url),
+                source_tiers=tuple(report.source_tier for report in reports),
+                handling=item.handling,
+                event_id=event.event_key,
+                reports=scoped_reports,
+            ))
+        selection_limit = adaptive_digest_item_count(
+            candidates, max_items=self.item_limit
+        )
+        selected: list[DigestCluster] = []
+        counts: dict[str, int] = {}
+        while candidates and len(selected) < selection_limit:
+            candidates.sort(key=lambda candidate: (
+                candidate.handling != "immediate",
+                -(
+                    candidate.score
+                    / (1 + 0.35 * min(
+                        (counts.get(source_id, 0) for source_id in candidate.source_ids),
+                        default=0,
+                    ))
+                ),
+                -candidate.published_at,
+                candidate.cluster_key,
+            ))
+            chosen = candidates.pop(0)
+            selected.append(chosen)
+            for source_id in chosen.source_ids:
+                counts[source_id] = counts.get(source_id, 0) + 1
+        return tuple(selected)
+
     def _persist_events(
         self, clusters: Sequence[DigestCluster], *, created_at: int
     ) -> tuple[DigestCluster, ...]:
@@ -668,13 +795,17 @@ class DigestBuilder:
             return tuple(clusters)
         list_events = getattr(self.repository, "list_events", None)
         candidates = list_events(limit=1000) if list_events is not None else []
-        persisted: list[DigestCluster] = []
+        persisted: dict[str, DigestCluster] = {}
         for cluster in clusters:
             reports = tuple(cluster.reports)
             if not reports:
                 continue
             published = [int(report.published_at) for report in reports]
-            event_key = cluster.event_id or cluster.cluster_key
+            fingerprint = cluster.event_id or cluster.cluster_key
+            event_key = hashlib.sha256(
+                f"{fingerprint}:{cluster.published_at // 86400}".encode("utf-8")
+            ).hexdigest()[:24]
+            cluster = replace(cluster, cluster_key=event_key, event_id=event_key)
             event_shape = {
                 "title": cluster.title,
                 "summary": cluster.summary,
@@ -707,7 +838,15 @@ class DigestBuilder:
                 # than within-batch clustering without enabling chain merges.
                 if best_score >= 0.57:
                     event_key = best.event_key
+                    fingerprint = best.fingerprint
                     cluster = replace(cluster, cluster_key=event_key, event_id=event_key)
+            if event_key in persisted:
+                # Conservative batch clusters can independently match the
+                # same historical event. Recombine their evidence before
+                # persisting and returning the unique digest event.
+                cluster = self._merge_event_clusters(persisted[event_key], cluster)
+                reports = tuple(cluster.reports)
+                published = [int(report.published_at) for report in reports]
             representative_by_source: dict[str, Any] = {}
             for report in reports:
                 current = representative_by_source.get(report.source_id)
@@ -716,13 +855,15 @@ class DigestBuilder:
                 ):
                     representative_by_source[report.source_id] = report
             save_event(PersistedEvent(
-                event_key=event_key, fingerprint=event_key, title=cluster.title,
+                event_key=event_key, fingerprint=fingerprint, title=cluster.title,
                 summary=cluster.summary, score=cluster.score,
                 importance=cluster.importance, urgency=cluster.urgency,
                 relevance=cluster.relevance, confidence=cluster.confidence,
                 first_seen_at=min(published), last_seen_at=max(published),
                 regions=cluster.regions, topics=cluster.topics,
-                independent_source_count=len(cluster.source_ids),
+                independent_source_count=len({
+                    report.publisher.strip().lower() or report.source_id for report in reports
+                }),
                 created_at=created_at, updated_at=created_at,
             ))
             for report in reports:
@@ -731,15 +872,53 @@ class DigestBuilder:
                 save_report(PersistedEventReport(
                     event_key=event_key, observation_id=int(report.observation_id),
                     source_id=report.source_id, source_tier=report.source_tier,
-                    relation=report.relation, match_score=report.match_score,
+                    publisher=report.publisher,
+                    relation=("context" if report.relation == "secondary" else report.relation),
+                    match_score=report.match_score,
                     is_representative=(
                         representative_by_source.get(report.source_id) is report
                     ),
                     published_at=report.published_at, title=report.title,
                     summary=report.summary, url=report.url, created_at=created_at,
                 ))
-            persisted.append(cluster)
-        return tuple(persisted)
+            persisted[event_key] = cluster
+        return tuple(persisted.values())
+
+    @staticmethod
+    def _merge_event_clusters(left: DigestCluster, right: DigestCluster) -> DigestCluster:
+        representative = max((left, right), key=lambda item: (item.score, item.published_at, item.title))
+        reports_by_identity = {
+            (report.source_id, report.observation_id, report.report_id): report
+            for item in (left, right) for report in item.reports
+        }
+        reports = tuple(sorted(
+            reports_by_identity.values(),
+            key=lambda report: (report.source_id, report.published_at, report.report_id),
+        ))
+        by_source: dict[str, Any] = {}
+        for report in reports:
+            current = by_source.get(report.source_id)
+            if current is None or (report.score, report.published_at, report.report_id) > (
+                current.score, current.published_at, current.report_id
+            ):
+                by_source[report.source_id] = report
+        source_ids = tuple(sorted(by_source))
+        return replace(
+            representative,
+            importance=max(left.importance, right.importance),
+            urgency=max(left.urgency, right.urgency),
+            relevance=max(left.relevance, right.relevance),
+            confidence=max(left.confidence, right.confidence),
+            published_at=max(left.published_at, right.published_at),
+            regions=tuple(sorted(set(left.regions) | set(right.regions))),
+            topics=tuple(sorted(set(left.topics) | set(right.topics))),
+            source_ids=source_ids,
+            observation_ids=tuple(sorted(set(left.observation_ids) | set(right.observation_ids))),
+            links=tuple(by_source[source_id].url for source_id in source_ids if by_source[source_id].url),
+            source_tiers=tuple(by_source[source_id].source_tier for source_id in source_ids),
+            handling="immediate" if "immediate" in {left.handling, right.handling} else "digest",
+            reports=reports,
+        )
 
     def build_and_save(self, **kwargs: Any) -> DigestDocument:
         repository = self.repository
@@ -819,7 +998,8 @@ class DigestScheduler:
 
     async def process_once_async(self, now: int) -> DigestDocument | None:
         self._finalize_expired_retries(now)
-        document = self._prepare(now)
+        await self._project_events_async(now)
+        document = self._prepare(now, project_events=False)
         if document is None:
             return None
 
@@ -1005,7 +1185,31 @@ class DigestScheduler:
             enqueue(digest_key=digest_key, streak=streak, error=error,
                     topic=self.topic, click_url=click_url, now=now)
 
-    def _prepare(self, now: int) -> DigestDocument | None:
+    async def _project_events_async(self, now: int) -> None:
+        """Yield between backlog batches so preparation cannot starve workers."""
+        if not self.config.enabled or not isinstance(self.repository, EventPoolRepository) or not isinstance(
+            self.repository, EventRepository
+        ):
+            return
+        scheduled_at = self._latest_occurrence(now)
+        if scheduled_at is None:
+            return
+        local_date = datetime.fromtimestamp(scheduled_at, ZoneInfo(self.config.timezone)).date()
+        if self.repository.get_digest(f"daily:{local_date.isoformat()}", published_only=True) is not None:
+            return
+        previous_at = self._latest_occurrence(scheduled_at - 1)
+        if previous_at is None:
+            raise RuntimeError("cannot resolve previous digest boundary")
+        projector = EventPoolProjector(self.repository)
+        for _ in range((self.builder.observation_limit + 49) // 50 + 1):
+            projected = projector.project_pending(
+                now=now, since=previous_at, until=scheduled_at, limit=50,
+            )
+            if projected == 0:
+                break
+            await asyncio.sleep(0)
+
+    def _prepare(self, now: int, *, project_events: bool = True) -> DigestDocument | None:
         if not self.config.enabled:
             return None
         scheduled_at = self._latest_occurrence(now)
@@ -1035,6 +1239,7 @@ class DigestScheduler:
                 created_at=now,
                 source_ids=self.source_ids,
                 title=f"EyeOfSauron 每日情报摘要 · {local_date.isoformat()}",
+                project_events=project_events,
             )
         return published
 

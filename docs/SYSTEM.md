@@ -19,16 +19,21 @@ source adapter -> Observation -> deterministic triage -> rules -> Incident
                                                       |
                                             Notifier port -> ntfy
 
-Observations + coverage -> event/report cluster -> rank/select -> digest draft
-                                      |              |
-                                      +-> optional AI summary
-                                                     |
-                                           versioned digest + outbox
+Observations -> bounded event projection -> daily-event reader
+                          |
+                          +-> event pool + coverage -> rank/select -> digest draft
+                                                        |
+                                                        +-> optional AI summary
+                                                                       |
+                                                             versioned digest + outbox
 ```
 
-The event projection is deliberately layered: an `Event` groups related
+The event projection runs continuously in bounded batches and is deliberately
+layered: an `Event` groups related
 `EventReport` records, while primary, secondary, and social reports remain
-parallel evidence under that event. The digest reader can therefore explain
+parallel evidence under that event. The daily-event reader defaults to the most
+recent 28 hours and the digest consumes this same pool, so browsing and daily
+selection do not create competing event identities. The digest reader can explain
 why reports were grouped without replacing the original observations. See
 `EVENTS.md` for matching, conflict, lifecycle, and migration rules.
 
@@ -54,6 +59,7 @@ produce a duplicate, but cannot silently lose the alert.
 - `persistence.py`: business-facing persistence protocols and unit-of-work boundary.
 - `service.py`: schedules collectors, analysis, reminders, digest, content jobs,
   and delivery workers.
+- `event_pool.py`, `events.py`: bounded continuous event projection and storage ports.
 - `digest.py`, `digest_analysis.py`: deterministic daily selection and optional
   model synthesis.
 - `prompts.py`: trusted, versioned built-in Prompt definitions.

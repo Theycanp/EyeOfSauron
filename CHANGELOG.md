@@ -5,6 +5,39 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-17
+
+### Added
+
+- Add a continuously maintained daily-event pool for all observations that pass
+  deterministic triage, with bounded incremental projection and stable event
+  identities independent from the daily digest schedule.
+- Add an authenticated, cursor-paginated daily-events API and responsive React
+  reader. It defaults to the latest 28 hours, supports a custom window, and can
+  sort by recency or importance while retaining the underlying source reports.
+
+### Changed
+
+- Build daily digest candidates from the same persisted event pool used by the
+  reader, while preserving immediate notifications, adaptive item counts,
+  source-quality weighting, regional policy, and source-diversity ranking.
+- Document the event-pool contract, operating boundaries, performance limits,
+  troubleshooting steps, and the remaining event-lifecycle work.
+- Yield between small event-backfill batches during async digest preparation so
+  notification, collection, and heartbeat workers can continue during rollout.
+
+### Fixed
+
+- Recombine digest candidates that resolve to the same historical event identity,
+  preserving all reports instead of rejecting the algorithmic fallback with
+  duplicate cluster keys.
+- Atomically persist event/report projections, including competing assignments,
+  and retain delayed immediate notifications in their notification-day window.
+- Keep historical digest evidence scoped to its frozen observation selection and
+  count multiple feeds from one publisher as one independent confirmation.
+- Read event pages in a consistent transaction, rank historical windows by their
+  own evidence, and freeze time/report/alert boundaries across pagination.
+
 ## [0.18.1] - 2026-09-16
 
 ### Fixed

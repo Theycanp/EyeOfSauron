@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import fcntl
+import base64
 import json
+import math
 import os
 import sqlite3
+from contextlib import nullcontext
+from dataclasses import replace
 import time
 import uuid
 from datetime import UTC, date, datetime
@@ -18,7 +22,10 @@ from .content import (
     ContentLevel,
 )
 from .digest import DigestCluster, DigestDocument, DigestRetryState, SourceCoverage
+from .event_clustering import event_aggregate_score, event_evidence_score
 from .events import (
+    EventListItem,
+    EventPage,
     PersistedEvent,
     PersistedEventClaim,
     PersistedEventClaimEvidence,
@@ -3694,36 +3701,39 @@ class Database:
     # These methods intentionally expose domain models rather than sqlite rows;
     # clustering and presentation code can therefore move to another database.
     def save_event(self, event: PersistedEvent) -> PersistedEvent:
+        with self.unit_of_work():
+            return self._save_event(event)
+
+    def _save_event(self, event: PersistedEvent) -> PersistedEvent:
         if not isinstance(event, PersistedEvent):
             raise TypeError("event must be a PersistedEvent")
-        with self.unit_of_work():
-            self.connection.execute(
-                """
-                INSERT INTO events(
-                    event_key, fingerprint, title, summary, score, importance, urgency,
-                    relevance, confidence, first_seen_at, last_seen_at, regions_json,
-                    topics_json, status, independent_source_count, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(event_key) DO UPDATE SET
-                    fingerprint=excluded.fingerprint, title=excluded.title,
-                    summary=excluded.summary, score=excluded.score,
-                    importance=excluded.importance, urgency=excluded.urgency,
-                    relevance=excluded.relevance, confidence=excluded.confidence,
-                    first_seen_at=MIN(events.first_seen_at, excluded.first_seen_at),
-                    last_seen_at=MAX(events.last_seen_at, excluded.last_seen_at),
-                    regions_json=excluded.regions_json, topics_json=excluded.topics_json,
-                    status=excluded.status, independent_source_count=excluded.independent_source_count,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    event.event_key, event.fingerprint, event.title, event.summary, event.score,
-                    event.importance, event.urgency, event.relevance, event.confidence,
-                    event.first_seen_at, event.last_seen_at,
-                    json.dumps(event.regions, ensure_ascii=False),
-                    json.dumps(event.topics, ensure_ascii=False), event.status,
-                    event.independent_source_count, event.created_at, event.updated_at,
-                ),
-            )
+        self.connection.execute(
+            """
+            INSERT INTO events(
+                event_key, fingerprint, title, summary, score, importance, urgency,
+                relevance, confidence, first_seen_at, last_seen_at, regions_json,
+                topics_json, status, independent_source_count, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_key) DO UPDATE SET
+                fingerprint=excluded.fingerprint, title=excluded.title,
+                summary=excluded.summary, score=excluded.score,
+                importance=excluded.importance, urgency=excluded.urgency,
+                relevance=excluded.relevance, confidence=excluded.confidence,
+                first_seen_at=MIN(events.first_seen_at, excluded.first_seen_at),
+                last_seen_at=MAX(events.last_seen_at, excluded.last_seen_at),
+                regions_json=excluded.regions_json, topics_json=excluded.topics_json,
+                status=excluded.status, independent_source_count=excluded.independent_source_count,
+                updated_at=excluded.updated_at
+            """,
+            (
+                event.event_key, event.fingerprint, event.title, event.summary, event.score,
+                event.importance, event.urgency, event.relevance, event.confidence,
+                event.first_seen_at, event.last_seen_at,
+                json.dumps(event.regions, ensure_ascii=False),
+                json.dumps(event.topics, ensure_ascii=False), event.status,
+                event.independent_source_count, event.created_at, event.updated_at,
+            ),
+        )
         result = self.get_event(event.event_key)
         assert result is not None
         return result
@@ -3778,7 +3788,324 @@ class Database:
         )
         return [self._event_from_row(row) for row in rows]
 
+    def list_unassigned_event_observations(
+        self, *, since: int | None = None, until: int | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """Return a bounded FIFO batch for the background event projector."""
+        if not 1 <= limit <= 500:
+            raise ValueError("event projection limit is out of range")
+        if since is not None and since < 0 or until is not None and until < 0:
+            raise ValueError("event projection time range is invalid")
+        if since is not None and until is not None and until <= since:
+            raise ValueError("event projection time range is invalid")
+        clauses = ["er.id IS NULL", "o.handling IN ('digest', 'immediate')"]
+        params: list[Any] = []
+        if since is not None:
+            clauses.append("o.published_at >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("o.published_at < ?")
+            params.append(until)
+        params.append(limit)
+        rows = self.connection.execute(
+            f"""
+            SELECT o.id, o.source_id, o.publisher, o.external_id, o.published_at,
+                   o.title, o.summary, o.url, o.attributes_json, o.importance,
+                   o.urgency, o.relevance, o.confidence, o.region, o.topic,
+                   o.source_tier, o.handling
+            FROM observations AS o
+            LEFT JOIN event_reports AS er ON er.observation_id = o.id
+            WHERE {' AND '.join(clauses)} AND trim(COALESCE(o.title, '')) <> ''
+            ORDER BY o.id DESC
+            LIMIT ?
+            """,
+            params,
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["attributes"] = json.loads(item.pop("attributes_json"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item["attributes"] = {}
+            result.append(item)
+        return result
+
+    def list_event_candidates(
+        self, since: int, until: int, *, limit: int = 200
+    ) -> list[PersistedEvent]:
+        if since < 0 or until <= since:
+            raise ValueError("event candidate time range is invalid")
+        if not 1 <= limit <= 1000:
+            raise ValueError("event candidate limit is out of range")
+        rows = self.connection.execute(
+            "SELECT * FROM events WHERE last_seen_at >= ? AND first_seen_at < ? "
+            "ORDER BY last_seen_at DESC, id DESC LIMIT ?",
+            (since, until, limit),
+        )
+        return [self._event_from_row(row) for row in rows]
+
+    @staticmethod
+    def _event_cursor(payload: Mapping[str, Any]) -> str:
+        raw = json.dumps(dict(payload), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_event_cursor(cursor: str, sort: str) -> dict[str, Any]:
+        if not cursor or len(cursor) > 512:
+            raise ValueError("event cursor is invalid")
+        try:
+            raw = base64.b64decode(
+                cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True
+            )
+            value = json.loads(raw)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("event cursor is invalid") from exc
+        if not isinstance(value, dict) or value.get("sort") != sort:
+            raise ValueError("event cursor does not match sort order")
+        expected = {"sort", "since", "until", "report_max", "alert_max", "last", "id"}
+        if sort == "importance":
+            expected |= {"importance", "score"}
+        integer_keys = expected - {"sort", "score"}
+        if set(value) != expected or any(
+            type(value[key]) is not int or not 0 <= value[key] <= 2**63 - 1
+            for key in integer_keys
+        ):
+            raise ValueError("event cursor is invalid")
+        if value["until"] <= value["since"] or value["id"] < 1:
+            raise ValueError("event cursor is invalid")
+        if sort == "importance" and (
+            not 1 <= value["importance"] <= 5
+            or isinstance(value["score"], bool)
+            or not isinstance(value["score"], (int, float))
+            or not 0 <= value["score"] <= 5
+            or not math.isfinite(value["score"])
+        ):
+            raise ValueError("event cursor is invalid")
+        return value
+
+    def list_event_page(
+        self,
+        *,
+        since: int,
+        until: int,
+        sort: str = "latest",
+        limit: int = 30,
+        cursor: str | None = None,
+        reports_per_event: int = 20,
+    ) -> EventPage:
+        """Read a consistent page with frozen time bounds and evidence membership.
+
+        Existing observation ratings remain live across separate page requests;
+        this cursor is not a versioned snapshot of later reanalysis.
+        """
+        if sort not in {"latest", "importance"}:
+            raise ValueError("event sort is invalid")
+        if not 1 <= limit <= 1000 or not 1 <= reports_per_event <= 100:
+            raise ValueError("event page limit is out of range")
+        anchor = self._decode_event_cursor(cursor, sort) if cursor is not None else None
+        if anchor is not None:
+            since, until = anchor["since"], anchor["until"]
+        if (
+            type(since) is not int or type(until) is not int
+            or not 0 <= since < until <= 2**63 - 1
+        ):
+            raise ValueError("event page time range is invalid")
+        self.connection.create_function(
+            "argus_event_window_score", 2, event_aggregate_score, deterministic=True
+        )
+        self.connection.create_function(
+            "argus_event_evidence_score", 4, event_evidence_score, deterministic=True
+        )
+        window_sql = """
+            WITH window_reports AS (
+                SELECT er.*, o.publisher, o.importance, o.urgency, o.relevance,
+                       o.confidence, o.region, o.topic,
+                       CASE WHEN o.handling='immediate' OR EXISTS (
+                           SELECT 1 FROM alerts a WHERE a.observation_id=er.observation_id
+                             AND a.id <= :alert_max
+                             AND a.created_at >= :since AND a.created_at < :until
+                             AND a.status != 'cancelled'
+                       ) THEN 1 ELSE 0 END AS is_immediate,
+                       argus_event_evidence_score(
+                           o.importance, o.urgency, o.relevance, o.confidence
+                       ) AS report_score
+                FROM event_reports er JOIN observations o ON o.id=er.observation_id
+                WHERE er.id <= :report_max AND (
+                    (er.published_at >= :since AND er.published_at < :until) OR EXISTS (
+                       SELECT 1 FROM alerts a WHERE a.observation_id=er.observation_id
+                         AND a.id <= :alert_max
+                         AND a.created_at >= :since AND a.created_at < :until
+                         AND a.status != 'cancelled'
+                    )
+                )
+            ), window_metrics AS (
+                SELECT event_id, COUNT(*) AS report_count,
+                       MIN(published_at) AS first_seen_at, MAX(published_at) AS last_seen_at,
+                       MAX(importance) AS importance, MAX(urgency) AS urgency,
+                       MAX(relevance) AS relevance, MAX(confidence) AS confidence,
+                       MAX(report_score) AS base_score,
+                       COUNT(DISTINCT COALESCE(
+                           NULLIF(LOWER(TRIM(publisher)), ''), NULLIF(source_id, '')
+                       )) AS independent_source_count,
+                       JSON_GROUP_ARRAY(DISTINCT region) AS regions_json,
+                       JSON_GROUP_ARRAY(DISTINCT topic) AS topics_json,
+                       CASE WHEN MAX(is_immediate)=1 THEN 'immediate' ELSE 'digest' END AS handling
+                FROM window_reports GROUP BY event_id
+            ), window_representatives AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY event_id
+                    ORDER BY (source_tier='primary') DESC, report_score DESC,
+                             published_at DESC, id DESC
+                ) AS representative_position
+                FROM window_reports
+            ), window_events AS (
+                SELECT e.id, e.event_key, e.fingerprint, r.title,
+                       CASE WHEN TRIM(r.summary) != '' THEN r.summary ELSE r.title END AS summary,
+                       argus_event_window_score(m.base_score, m.independent_source_count) AS score,
+                       m.importance, m.urgency, m.relevance, m.confidence,
+                       m.first_seen_at, m.last_seen_at, m.regions_json, m.topics_json,
+                       e.status, m.independent_source_count, e.created_at, e.updated_at,
+                       m.report_count, m.handling
+                FROM events e JOIN window_metrics m ON m.event_id=e.id
+                JOIN window_representatives r ON r.event_id=e.id AND r.representative_position=1
+            )
+        """
+        clauses: list[str] = []
+        params: dict[str, Any] = {"since": since, "until": until, "limit": limit + 1}
+        if anchor is not None:
+            params.update(anchor)
+            if sort == "latest":
+                clauses.append("(last_seen_at < :last OR (last_seen_at = :last AND id < :id))")
+            else:
+                clauses.append(
+                    "(importance < :importance OR (importance = :importance AND score < :score) OR "
+                    "(importance = :importance AND score = :score AND last_seen_at < :last) OR "
+                    "(importance = :importance AND score = :score AND last_seen_at = :last AND id < :id))"
+                )
+        order = (
+            "last_seen_at DESC, id DESC"
+            if sort == "latest"
+            else "importance DESC, score DESC, last_seen_at DESC, id DESC"
+        )
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        transaction = (
+            nullcontext() if self.connection.in_transaction else self.unit_of_work(immediate=False)
+        )
+        with transaction:
+            if anchor is None:
+                high_water = self.connection.execute(
+                    "SELECT (SELECT COALESCE(MAX(id), 0) FROM event_reports) AS report_max, "
+                    "(SELECT COALESCE(MAX(id), 0) FROM alerts) AS alert_max"
+                ).fetchone()
+                params.update(
+                    report_max=int(high_water["report_max"]),
+                    alert_max=int(high_water["alert_max"]),
+                )
+            rows = list(self.connection.execute(
+                f"{window_sql} SELECT * FROM window_events{where} ORDER BY {order} LIMIT :limit",
+                params,
+            ))
+            has_more = len(rows) > limit
+            visible = rows[:limit]
+            reports_by_event: dict[int, list[PersistedEventReport]] = {
+                int(row["id"]): [] for row in visible
+            }
+            if visible:
+                identifiers = list(reports_by_event)
+                placeholders = ",".join(f":event_{index}" for index in range(len(identifiers)))
+                report_params = {
+                    "since": since, "until": until, "reports_limit": reports_per_event,
+                    "report_max": params["report_max"], "alert_max": params["alert_max"],
+                }
+                report_params.update({
+                    f"event_{index}": identifier for index, identifier in enumerate(identifiers)
+                })
+                report_rows = self.connection.execute(
+                    f"""{window_sql}, source_reports AS (
+                        SELECT *, ROW_NUMBER() OVER (
+                            PARTITION BY event_id, source_id ORDER BY published_at DESC, id DESC
+                        ) AS source_position FROM window_reports WHERE event_id IN ({placeholders})
+                    ), ranked_reports AS (
+                        SELECT *, ROW_NUMBER() OVER (
+                            PARTITION BY event_id
+                            ORDER BY (source_position=1) DESC, published_at DESC, id DESC
+                        ) AS report_position FROM source_reports
+                    )
+                    SELECT r.id, e.event_key, r.event_id, r.observation_id, r.publisher,
+                           r.source_id, r.source_tier, r.relation, r.match_score,
+                           (r.source_position=1) AS is_representative,
+                           r.published_at, r.title, r.summary, r.url, r.created_at
+                    FROM ranked_reports r JOIN events e ON e.id=r.event_id
+                    WHERE report_position <= :reports_limit ORDER BY event_id, report_position
+                    """,
+                    report_params,
+                )
+                for report_row in report_rows:
+                    reports_by_event[int(report_row["event_id"])].append(
+                        self._event_report_from_row(report_row)
+                    )
+            items = tuple(
+                EventListItem(
+                    event=self._event_snapshot(self._event_from_row(row)),
+                    reports=tuple(reports_by_event[int(row["id"])]),
+                    report_count=int(row["report_count"]),
+                    handling=str(row["handling"]),
+                )
+                for row in visible
+            )
+        next_cursor = None
+        if has_more and visible:
+            last = visible[-1]
+            values: dict[str, Any] = {
+                "sort": sort, "since": since, "until": until,
+                "report_max": params["report_max"], "alert_max": params["alert_max"],
+                "last": int(last["last_seen_at"]), "id": int(last["id"])
+            }
+            if sort == "importance":
+                values.update(importance=int(last["importance"]), score=float(last["score"]))
+            next_cursor = self._event_cursor(values)
+        return EventPage(items, next_cursor, window_since=since, window_until=until)
+
+    @staticmethod
+    def _event_snapshot(event: PersistedEvent) -> PersistedEvent:
+        """Normalize the complete window aggregate independently of report limits."""
+        return replace(
+            event,
+            regions=tuple(sorted(event.regions)),
+            topics=tuple(sorted(event.topics)),
+        )
+
     def save_event_report(self, report: PersistedEventReport) -> PersistedEventReport:
+        with self.unit_of_work():
+            return self._save_event_report(report)
+
+    def save_event_projection(
+        self, event: PersistedEvent, report: PersistedEventReport
+    ) -> PersistedEventReport:
+        if event.event_key != report.event_key:
+            raise ValueError("event projection identities do not match")
+        with self.unit_of_work():
+            # Another projector may have assigned this observation while the
+            # caller computed a match. Its committed identity wins.
+            assigned = self.connection.execute(
+                "SELECT er.id, e.event_key, o.publisher, er.* FROM event_reports er "
+                "JOIN events e ON e.id=er.event_id JOIN observations o ON o.id=er.observation_id "
+                "WHERE er.observation_id=? ORDER BY er.id LIMIT 1", (report.observation_id,),
+            ).fetchone()
+            if assigned is not None:
+                return self._event_report_from_row(assigned)
+            self._save_event(event)
+            saved = self._save_event_report(report)
+            self.connection.execute(
+                "UPDATE events SET independent_source_count=("
+                "SELECT COUNT(DISTINCT COALESCE(NULLIF(LOWER(TRIM(o.publisher)), ''), er.source_id)) "
+                "FROM event_reports er JOIN observations o ON o.id=er.observation_id "
+                "WHERE er.event_id=events.id) WHERE event_key=?", (event.event_key,),
+            )
+            return saved
+
+    def _save_event_report(self, report: PersistedEventReport) -> PersistedEventReport:
         if not isinstance(report, PersistedEventReport):
             raise TypeError("report must be a PersistedEventReport")
         event_row = self.connection.execute("SELECT id FROM events WHERE event_key = ?", (report.event_key,)).fetchone()
@@ -3791,28 +4118,48 @@ class Database:
             raise KeyError(f"observation does not exist: {report.observation_id}")
         if str(observation["source_id"]) != report.source_id:
             raise ValueError("event report source does not match observation")
-        with self.unit_of_work():
+        assigned = self.connection.execute(
+            "SELECT er.id, er.event_id FROM event_reports er WHERE er.observation_id = ? "
+            "ORDER BY er.id LIMIT 1",
+            (report.observation_id,),
+        ).fetchone()
+        if assigned is not None and int(assigned["event_id"]) != int(event_row["id"]):
+            existing = self.connection.execute(
+                "SELECT er.id, e.event_key, o.publisher, er.* FROM event_reports er "
+                "JOIN events e ON e.id=er.event_id "
+                "JOIN observations o ON o.id=er.observation_id WHERE er.id = ?",
+                (int(assigned["id"]),),
+            ).fetchone()
+            assert existing is not None
+            return self._event_report_from_row(existing)
+        if report.is_representative:
             self.connection.execute(
-                """
-                INSERT INTO event_reports(
-                    event_id, observation_id, source_id, source_tier, relation, match_score,
-                    is_representative, published_at, title, summary, url, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(event_id, observation_id) DO UPDATE SET
-                    source_id=excluded.source_id, source_tier=excluded.source_tier,
-                    relation=excluded.relation, match_score=excluded.match_score,
-                    is_representative=excluded.is_representative, published_at=excluded.published_at,
-                    title=excluded.title, summary=excluded.summary, url=excluded.url
-                """,
-                (
-                    int(event_row["id"]), report.observation_id, report.source_id,
-                    report.source_tier, report.relation, report.match_score,
-                    int(report.is_representative), report.published_at, report.title,
-                    report.summary, report.url, report.created_at,
-                ),
+                "UPDATE event_reports SET is_representative = 0 "
+                "WHERE event_id = ? AND source_id = ? AND observation_id != ?",
+                (int(event_row["id"]), report.source_id, report.observation_id),
             )
+        self.connection.execute(
+            """
+            INSERT INTO event_reports(
+                event_id, observation_id, source_id, source_tier, relation, match_score,
+                is_representative, published_at, title, summary, url, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id, observation_id) DO UPDATE SET
+                source_id=excluded.source_id, source_tier=excluded.source_tier,
+                relation=excluded.relation, match_score=excluded.match_score,
+                is_representative=excluded.is_representative, published_at=excluded.published_at,
+                title=excluded.title, summary=excluded.summary, url=excluded.url
+            """,
+            (
+                int(event_row["id"]), report.observation_id, report.source_id,
+                report.source_tier, report.relation, report.match_score,
+                int(report.is_representative), report.published_at, report.title,
+                report.summary, report.url, report.created_at,
+            ),
+        )
         row = self.connection.execute(
-            "SELECT er.id, e.event_key, er.* FROM event_reports er JOIN events e ON e.id = er.event_id "
+            "SELECT er.id, e.event_key, o.publisher, er.* FROM event_reports er "
+            "JOIN events e ON e.id = er.event_id JOIN observations o ON o.id=er.observation_id "
             "WHERE er.event_id = ? AND er.observation_id = ?", (int(event_row["id"]), report.observation_id)
         ).fetchone()
         assert row is not None
@@ -3822,7 +4169,8 @@ class Database:
     def _event_report_from_row(row: sqlite3.Row) -> PersistedEventReport:
         return PersistedEventReport(
             event_key=str(row["event_key"]), observation_id=int(row["observation_id"]),
-            source_id=str(row["source_id"]), source_tier=str(row["source_tier"]),
+            source_id=str(row["source_id"]), publisher=str(row["publisher"]),
+            source_tier=str(row["source_tier"]),
             relation=str(row["relation"]), match_score=float(row["match_score"]),
             is_representative=bool(row["is_representative"]), published_at=int(row["published_at"]),
             title=str(row["title"]), summary=str(row["summary"]), url=str(row["url"]),
@@ -3836,7 +4184,8 @@ class Database:
         if not 1 <= limit <= 2000:
             raise ValueError("event report limit is out of range")
         rows = self.connection.execute(
-            "SELECT er.id, e.event_key, er.* FROM event_reports er JOIN events e ON e.id = er.event_id "
+            "SELECT er.id, e.event_key, o.publisher, er.* FROM event_reports er "
+            "JOIN events e ON e.id = er.event_id JOIN observations o ON o.id=er.observation_id "
             "WHERE er.event_id = ? ORDER BY er.published_at DESC, er.id DESC LIMIT ?",
             (int(event["id"]), limit),
         )
@@ -4357,7 +4706,24 @@ class Database:
                     ).fetchone()
                     if event_row is not None:
                         event_key = str(event_row["event_key"])
-                        event_reports = tuple(self.list_event_reports(event_key))
+                        # The event continues to grow, but a published digest
+                        # only references its immutable observation selection.
+                        report_rows = self.connection.execute(
+                            "SELECT er.id, e.event_key, o.publisher, er.* FROM event_reports er "
+                            "JOIN events e ON e.id=er.event_id JOIN observations o ON o.id=er.observation_id "
+                            "WHERE er.event_id=? AND er.observation_id IN "
+                            "(SELECT value FROM json_each(?)) ORDER BY er.published_at DESC, er.id DESC",
+                            (int(item["event_id"]), str(item["observation_ids_json"])),
+                        )
+                        frozen_reports = [self._event_report_from_row(report) for report in report_rows]
+                        representative_sources: set[str] = set()
+                        reconstructed = []
+                        for report in frozen_reports:
+                            reconstructed.append(replace(
+                                report, is_representative=report.source_id not in representative_sources,
+                            ))
+                            representative_sources.add(report.source_id)
+                        event_reports = tuple(reconstructed)
                 items.append(
                     DigestCluster(
                         cluster_key=str(item["cluster_key"]),

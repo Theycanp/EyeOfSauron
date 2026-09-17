@@ -17,6 +17,8 @@ from unittest.mock import patch
 from argus.admin import AdminError, ManagedConfigStore, _public, make_handler
 from argus.database import Database, read_active_config
 from argus.digest import DigestCluster, DigestDocument, SourceCoverage
+from argus.event_pool import EventPoolProjector
+from argus.manual_events import ManualEventSpec
 from argus.persistence import ControlPlaneRepository, RevisionConflictError, RuntimeRepository
 from argus.service import ArgusService
 
@@ -410,6 +412,31 @@ class ControlPlaneHTTPTests(unittest.TestCase):
         self.assertEqual(["mof_cn"], detail["items"][0]["source_ids"])
         self.assertEqual("covered", detail["coverage"][0]["status"])
 
+    def test_news_events_are_authenticated_paginated_and_read_only(self) -> None:
+        now = int(time.time())
+        self.database.create_manual_event(
+            ManualEventSpec(
+                title="Browsable event", summary="Event body", importance=4,
+                region="GLOBAL", topic="general", source_url="https://example.test/event",
+            ),
+            "test", now, "eos",
+        )
+        EventPoolProjector(self.database).project_pending(now=now, limit=50)
+        before = self.database.connection.total_changes
+        status, payload = self.request("/api/news-events?hours=28&sort=newest&limit=1")
+        self.assertEqual(200, status)
+        self.assertEqual(before, self.database.connection.total_changes)
+        self.assertEqual("Browsable event", payload["events"][0]["title"])
+        self.assertIn("event_key", payload["events"][0])
+        self.assertNotIn("event_id", payload["events"][0])
+        self.assertEqual("人工录入", payload["events"][0]["reports"][0]["publisher"])
+        self.assertEqual("immediate", payload["events"][0]["handling"])
+        self.assertEqual(401, self.request(
+            "/api/news-events", headers={"Authorization": "invalid"}
+        )[0])
+        self.assertEqual(400, self.request("/api/news-events?hours=0")[0])
+        self.assertEqual(400, self.request("/api/news-events?sort=random")[0])
+
     def test_digest_reader_supports_explicit_versions_and_validates_queries(self) -> None:
         first = self._save_digest(title="第一版")
         self.database.publish_digest(first.digest_key, first.version, 1_788_393_700)
@@ -439,7 +466,7 @@ class ControlPlaneHTTPTests(unittest.TestCase):
 
     def test_digest_spa_routes_serve_only_the_application_shell(self) -> None:
         self._save_digest(title="must not leak into static shell")
-        for path in ("/digests", "/digests/daily%3A2026-09-06"):
+        for path in ("/digests", "/digests/daily%3A2026-09-06", "/daily-events"):
             with urllib.request.urlopen(
                 f"http://127.0.0.1:{self.server.server_port}{path}", timeout=3
             ) as response:

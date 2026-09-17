@@ -17,6 +17,7 @@ from .adapters import build_collector
 from .analysis_orchestrator import AnalysisOrchestrator
 from .content import ContentFetchError, PublicDocumentFetcher
 from .digest import DigestScheduler
+from .event_pool import EventPoolProjector
 from .config import AppConfig, parse_source_config
 from .persistence import RuntimeRepository
 from .models import FeedFetchResult, SourceState
@@ -101,6 +102,7 @@ class ArgusService:
         self.config_revision = config_revision
         self.analysis_orchestrator = analysis_orchestrator
         self.digest_scheduler = digest_scheduler
+        self.event_pool = EventPoolProjector(database)
         self.content_fetcher = content_fetcher
         self.instance_id = uuid.uuid4().hex
         self._source_slots = asyncio.Semaphore(config.service.max_source_concurrency)
@@ -183,7 +185,6 @@ class ArgusService:
             self.config.ntfy.default_topic,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
-
         self.database.mark_source_runtime(
             source_id,
             "degraded" if result.warnings else "active",
@@ -440,6 +441,26 @@ class ArgusService:
             except TimeoutError:
                 pass
 
+    async def _event_pool_loop(self) -> None:
+        """Backfill and retry projections independently of source schedules."""
+        while not self.stop_event.is_set():
+            try:
+                projected = self.process_event_pool_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                projected = 0
+                LOGGER.error("event_pool_projection_failed error=%s", sanitize_error(exc))
+            delay = 0.25 if projected == 50 else 10.0
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=delay)
+            except TimeoutError:
+                pass
+
+    def process_event_pool_once(self) -> int:
+        """Project one deliberately small batch to protect daemon heartbeats."""
+        return self.event_pool.project_pending(now=now_epoch(), limit=50)
+
     async def _heartbeat_loop(self) -> None:
         interval = self.config.service.heartbeat_interval_seconds
         while not self.stop_event.is_set():
@@ -576,6 +597,7 @@ class ArgusService:
                 if self.digest_scheduler is not None:
                     group.create_task(self._digest_loop(), name="digest")
                 group.create_task(self._maintenance_loop(), name="maintenance")
+                group.create_task(self._event_pool_loop(), name="event-pool")
                 group.create_task(self._heartbeat_loop(), name="heartbeat")
                 group.create_task(self._admin_job_loop(), name="admin-jobs")
                 group.create_task(self._config_revision_loop(), name="config-revision")
@@ -595,6 +617,7 @@ class ArgusService:
 
     async def run_once(self, deliver: bool = False) -> None:
         await asyncio.gather(*(self.poll_source_once(source.id) for source in self.config.sources if source.id in self.collectors))
+        self.process_event_pool_once()
         if self.analysis_orchestrator is not None:
             await self.analysis_orchestrator.process_once()
         while await self.process_content_fetch_once():

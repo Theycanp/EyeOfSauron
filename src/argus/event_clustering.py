@@ -197,12 +197,37 @@ def _tier(value: Any) -> str:
     return tier if tier in {"primary", "secondary", "social"} else "secondary"
 
 
-def _score(item: Mapping[str, Any]) -> float:
-    def bounded(name: str, default: float) -> float:
-        value = item.get(name, default)
-        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else default
+def event_evidence_score(
+    importance: Any = 3, urgency: Any = 2, relevance: Any = 3, confidence: Any = 0.5
+) -> float:
+    """Score durable triage evidence with the same defaults for every projection."""
+    def numeric(value: Any, default: float) -> float:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            result = float(value)
+            if math.isfinite(result):
+                return result
+        return default
 
-    return bounded("importance", 3) * 0.35 + bounded("urgency", 2) * 0.15 + bounded("relevance", 3) * 0.25 + max(0.0, min(1.0, bounded("confidence", 0.5))) * 0.5
+    return (
+        numeric(importance, 3) * 0.35
+        + numeric(urgency, 2) * 0.15
+        + numeric(relevance, 3) * 0.25
+        + max(0.0, min(1.0, numeric(confidence, 0.5))) * 0.5
+    )
+
+
+def event_aggregate_score(base_score: float, independent_source_count: int) -> float:
+    """Add bounded independent-source corroboration to the strongest evidence."""
+    return round(
+        base_score + min(0.75, 0.25 * math.log2(max(1, independent_source_count))), 4
+    )
+
+
+def _score(item: Mapping[str, Any]) -> float:
+    return event_evidence_score(
+        item.get("importance", 3), item.get("urgency", 2),
+        item.get("relevance", 3), item.get("confidence", 0.5),
+    )
 
 
 def _component_guard(component: Sequence[int], items: Sequence[Mapping[str, Any]], edges: Mapping[tuple[int, int], float], threshold: float) -> bool:
@@ -317,8 +342,11 @@ def cluster_events(
         urgency = max(_bounded_score(item.get("urgency"), 2) for item in members)
         relevance = max(_bounded_score(item.get("relevance"), 3) for item in members)
         confidence = max(_bounded_float(item.get("confidence"), 0.5) for item in members)
-        independent = len({report.source_id for report in report_rows if report.source_id})
-        score = max(report.score for report in report_rows) + min(0.75, 0.25 * math.log2(max(1, independent)))
+        independent = len({
+            report.publisher.strip().lower() or report.source_id
+            for report in report_rows if report.publisher.strip() or report.source_id
+        })
+        score = event_aggregate_score(max(report.score for report in report_rows), independent)
         result.append(
             ClusteredEvent(
                 event_id=event_id,
