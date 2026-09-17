@@ -439,6 +439,53 @@ export interface DigestReport extends JsonRecord {
   url?: string
 }
 
+export type NewsEventSort = 'newest' | 'importance'
+
+export interface NewsEventReport extends JsonRecord {
+  report_id?: number | null
+  observation_id: number
+  source_id: string
+  publisher?: string
+  source_tier: 'primary' | 'secondary' | 'social'
+  relation: string
+  match_score: number
+  is_representative: boolean
+  published_at: number
+  title: string
+  summary: string
+  url: string
+  created_at?: number
+}
+
+export interface NewsEvent extends JsonRecord {
+  event_key: string
+  fingerprint?: string
+  title: string
+  summary: string
+  score: number
+  importance: number
+  urgency: number
+  relevance: number
+  confidence: number
+  first_seen_at: number
+  last_seen_at: number
+  regions: string[]
+  topics: string[]
+  status: 'active' | 'quiet' | 'closed'
+  independent_source_count: number
+  reports: NewsEventReport[]
+  report_count: number
+  reports_truncated: boolean
+  handling?: 'digest' | 'immediate'
+  created_at?: number
+  updated_at?: number
+}
+
+export interface NewsEventResponse {
+  events?: NewsEvent[]
+  pagination?: PaginationMeta & { has_more?: boolean }
+}
+
 export interface SourceQualityProfile extends JsonRecord {
   source_id: string
   weight: number

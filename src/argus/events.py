@@ -8,7 +8,7 @@ the clustering algorithm to SQLite.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Any, Protocol, Sequence, runtime_checkable
 
 
 EVENT_STATUSES = frozenset({"active", "quiet", "closed"})
@@ -67,6 +67,7 @@ class PersistedEventReport:
     event_key: str
     observation_id: int
     source_id: str
+    publisher: str
     source_tier: str
     relation: str
     match_score: float
@@ -163,6 +164,68 @@ class PersistedEventTimelineItem:
         if self.report_id is not None and self.report_id < 1:
             raise ValueError("event timeline report ID is invalid")
 
+
+@dataclass(frozen=True, slots=True)
+class EventListItem:
+    """Bounded read model shared by the event browser and digest selector."""
+
+    event: PersistedEvent
+    reports: tuple[PersistedEventReport, ...]
+    report_count: int
+    handling: str = "digest"
+
+    def __post_init__(self) -> None:
+        if self.report_count < len(self.reports):
+            raise ValueError("event report count is invalid")
+        if self.handling not in {"digest", "immediate"}:
+            raise ValueError("event handling is invalid")
+
+    @property
+    def reports_truncated(self) -> bool:
+        return self.report_count > len(self.reports)
+
+
+@dataclass(frozen=True, slots=True)
+class EventPage:
+    items: tuple[EventListItem, ...]
+    next_cursor: str | None
+    window_since: int | None = None
+    window_until: int | None = None
+
+
+@runtime_checkable
+class EventPageRepository(Protocol):
+    """Read-only event browser and digest selection port."""
+
+    def list_event_page(
+        self,
+        *,
+        since: int,
+        until: int,
+        sort: str = "latest",
+        limit: int = 30,
+        cursor: str | None = None,
+        reports_per_event: int = 20,
+    ) -> EventPage: ...
+
+
+@runtime_checkable
+class EventPoolRepository(EventPageRepository, Protocol):
+    """Bounded work port used by the continuous event projector."""
+
+    def save_event_projection(
+        self, event: PersistedEvent, report: PersistedEventReport
+    ) -> PersistedEventReport:
+        """Atomically update an event and attach its observation evidence."""
+        ...
+
+    def list_unassigned_event_observations(
+        self, *, since: int | None = None, until: int | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]: ...
+
+    def list_event_candidates(
+        self, since: int, until: int, *, limit: int = 200
+    ) -> list[PersistedEvent]: ...
 
 # Backward-compatible shorthand used by the repository protocol and API
 # adapters.  The persisted aggregate remains named explicitly above.

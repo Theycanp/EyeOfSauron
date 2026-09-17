@@ -28,6 +28,12 @@ Major table groups include:
 - stable events, parallel source reports, claims, claim evidence, and timeline
   items.
 
+Eligible `digest` and `immediate` observations are continuously projected into
+the event tables. The projector works in small batches and compares each new
+report with a bounded set of recent candidates; administration reads are
+read-only and use cursor pagination rather than clustering on demand. The daily
+digest and the default 28-hour event reader consume this same projection.
+
 ## Schema and migrations
 
 `SCHEMA_VERSION` in `database.py` and `PRAGMA user_version` are authoritative.

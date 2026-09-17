@@ -7,7 +7,11 @@ local-day window. It includes observations handled as `digest` and those already
 sent as `immediate`, so a notification seen briefly during the day is still
 available in the daily review.
 
-Records are clustered by the event-centric adapter (`cluster_events`) using
+Candidates are read from the continuously maintained event pool also used by the
+daily-events reader. Missing observations in the target period are projected
+before selection; async preparation yields between batches of 50, allowing other
+daemon workers to continue. The synchronous builder remains available to offline
+tools. Records are clustered by the event-centric adapter (`cluster_events`) using
 normalized title, entities, numbers, topic, region, and time-window signals.
 Each event keeps first-party, secondary, and social reports as parallel
 evidence. Ranking combines durable
@@ -15,6 +19,11 @@ importance, urgency, relevance, confidence, regional preference, corroboration,
 and long-term source-quality weight. A soft repeated-source penalty prevents a
 high-frequency feed from occupying the report, while immediate events stay ahead
 of ordinary entries.
+
+Stable event identities are unique within a digest. If conservative batch
+clusters resolve to the same historical identity, their evidence is recombined
+before AI synthesis and storage; reports are not discarded to satisfy uniqueness.
+Delayed notifications can contribute old evidence to the notification-day window.
 
 The configured `item_limit` is a hard ceiling, currently 50. The actual count is
 chosen without AI:
@@ -86,3 +95,14 @@ Only one
 version is `published` at a time; earlier versions become `superseded` but remain
 available for audit. The ntfy body links to `/digests/<digest-key>`, where the
 authenticated reader shows the current version and evidence items.
+
+## Missing-digest incident: 2026-09-16
+
+Production v0.18.1 failed to publish `daily:2026-09-16`. Multiple batch clusters
+resolved to the same historical event key but were returned as separate digest
+items. `save_digest` rejected them, including the AI-failure algorithmic fallback;
+the five-attempt allowance was consumed without establishing a published fallback
+or retry row. This was not just a model outage. v0.19.0 recombines these identities
+and has an actual SQLite save/publication regression test. Check publication and
+outbox status independently of the API-attempt counter when diagnosing missing
+reports; an exhausted allowance does not prove an algorithmic digest was sent.

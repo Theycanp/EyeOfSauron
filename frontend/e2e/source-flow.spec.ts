@@ -137,6 +137,7 @@ async function mockAdminApi(page: Page) {
       '/api/prompts': { prompts: [] },
       '/api/source-quality': { profiles: [], logic: {} },
       '/api/digests': { digests: [], pagination: { total: 0, truncated: false } },
+      '/api/news-events': { events: [], window: { hours: 28, until: now }, sort: 'newest', pagination: { next_cursor: null, has_more: false } },
     }
     const body = bodies[path]
     if (body) await route.fulfill({ json: body })
@@ -213,6 +214,21 @@ test('manual event form creates a durable event and opens its saved detail', asy
     await page.locator('body').evaluate((node) => node.clientWidth),
   )
   await page.screenshot({ path: testInfo.outputPath('manual-event-detail.png'), fullPage: true })
+})
+
+test('daily events reader is usable on desktop and mobile', async ({ page }) => {
+  await mockAdminApi(page)
+  await login(page)
+  const menu = page.getByRole('button', { name: '打开导航' })
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('button', { name: '日常事件' }).click()
+  await expect(page.getByRole('main').getByRole('heading', { name: '日常事件', level: 2 })).toBeVisible()
+  await expect(page.getByLabel('时间窗（小时）')).toHaveValue('28')
+  await expect(page.getByRole('button', { name: '最新' })).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.locator('body')).toHaveJSProperty(
+    'scrollWidth',
+    await page.locator('body').evaluate((node) => node.clientWidth),
+  )
 })
 
 test('typed source entry never repeats the provider picker', async ({ page }) => {

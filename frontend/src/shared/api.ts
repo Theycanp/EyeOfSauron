@@ -12,6 +12,8 @@ import type {
   ManualEventDraft,
   MutationResponse,
   NewsCatalogResponse,
+  NewsEventResponse,
+  NewsEventSort,
   OutboxResponse,
   OutboxStatus,
   PromptResponse,
@@ -169,6 +171,15 @@ export class AdminApi {
     return this.request('/api/events', { method: 'POST', body: JSON.stringify(body) })
   }
   newsCatalog(): Promise<NewsCatalogResponse> { return this.request('/api/news-catalog') }
+  newsEvents(options: { hours: number; sort: NewsEventSort; limit?: number; cursor?: string | null; signal?: AbortSignal }): Promise<NewsEventResponse> {
+    const query = new URLSearchParams({
+      hours: String(options.hours),
+      sort: options.sort,
+      limit: String(options.limit ?? 50),
+    })
+    if (options.cursor) query.set('cursor', options.cursor)
+    return this.request(`/api/news-events?${query}`, { signal: options.signal })
+  }
   prompts(): Promise<PromptResponse> { return this.request('/api/prompts') }
   sourceQuality(): Promise<SourceQualityResponse> { return this.request('/api/source-quality') }
   sourceQualityFeedback(sourceId: string, body: { signal: -1 | 0 | 1; reason: string; observation_id?: number }): Promise<MutationResponse> {

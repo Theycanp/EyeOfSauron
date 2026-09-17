@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from argus.database import Database, SCHEMA_VERSION
@@ -14,6 +15,8 @@ from argus.events import (
 )
 from argus.models import FeedFetchResult
 from argus.digest import DigestBuilder
+from argus.event_pool import EventPoolProjector
+from argus.manual_events import ManualEventSpec
 from argus.rules import RuleSet
 
 from helpers import observation, production_config
@@ -48,6 +51,7 @@ class EventPersistenceTests(unittest.TestCase):
         self.assertEqual("event-1", event.event_key)
         report = self.database.save_event_report(PersistedEventReport(
             event_key="event-1", observation_id=1, source_id="source-a", source_tier="primary",
+            publisher="Source A",
             relation="primary", match_score=1.0, is_representative=True, published_at=100,
             title="Official event", summary="Summary", url="https://example.test/1", created_at=100,
         ))
@@ -131,6 +135,222 @@ class EventPersistenceTests(unittest.TestCase):
         assert event is not None
         self.assertEqual(first_time, event.first_seen_at)
         self.assertEqual(first_time + 3600, event.last_seen_at)
+
+    def test_continuous_projector_and_cursor_page_are_read_only(self) -> None:
+        projector = EventPoolProjector(self.database)
+        self.assertEqual(1, projector.project_pending(now=200, limit=50))
+        page = self.database.list_event_page(
+            since=0, until=2_000_000_000, sort="latest", limit=1
+        )
+        self.assertEqual(1, len(page.items))
+        self.assertEqual("source-a", page.items[0].reports[0].source_id)
+        self.assertEqual("Bloomberg", page.items[0].reports[0].publisher)
+        before = self.database.connection.total_changes
+        repeated = self.database.list_event_page(
+            since=0, until=2_000_000_000, sort="latest", limit=1
+        )
+        self.assertEqual(before, self.database.connection.total_changes)
+        self.assertEqual(page.items, repeated.items)
+
+    def test_event_projection_failure_rolls_back_event(self) -> None:
+        EventPoolProjector(self.database).project_pending(now=200, limit=50)
+        existing = self.database.list_events()[0]
+        report = self.database.list_event_reports(existing.event_key)[0]
+        event = replace(existing, event_key="failed-projection")
+        invalid = replace(report, event_key=event.event_key, observation_id=999999)
+        with self.assertRaises(KeyError):
+            self.database.save_event_projection(event, invalid)
+        self.assertIsNone(self.database.get_event(event.event_key))
+
+    def test_event_projection_repeated_assignment_does_not_create_orphan(self) -> None:
+        projector = EventPoolProjector(self.database)
+        self.assertEqual(1, projector.project_pending(now=200, limit=50))
+        existing = self.database.list_events()[0]
+        report = self.database.list_event_reports(existing.event_key)[0]
+        competing = replace(existing, event_key="competing-projection")
+        saved = self.database.save_event_projection(
+            competing, replace(report, event_key=competing.event_key),
+        )
+        self.assertEqual(existing.event_key, saved.event_key)
+        self.assertIsNone(self.database.get_event(competing.event_key))
+        self.assertEqual(0, projector.project_pending(now=201, limit=50))
+
+    def test_multiple_feeds_from_one_publisher_are_one_independent_source(self) -> None:
+        now = 1_788_361_200
+        self.database.record_source_success(
+            "source-b", FeedFetchResult((observation(
+                "other-feed", "Official event", source_id="source-b", timestamp=now,
+            ),), None, None), self.rules, now, self.config.ntfy.default_topic,
+        )
+        EventPoolProjector(self.database).project_pending(now=now, limit=50)
+        events = self.database.list_events()
+        self.assertEqual(1, len(events))
+        self.assertEqual(1, events[0].independent_source_count)
+        self.assertEqual(2, len(self.database.list_event_reports(events[0].event_key)))
+
+    def test_recurring_title_outside_match_window_gets_new_event_key(self) -> None:
+        projector = EventPoolProjector(self.database)
+        projector.project_pending(now=200, limit=50)
+        old = self.database.list_events()[0]
+        later = old.last_seen_at + 10 * 86400
+        self.database.record_source_success(
+            "source-a",
+            FeedFetchResult((observation(
+                "obs-later", "Official event", source_id="source-a", timestamp=later,
+            ),), None, None),
+            self.rules, later, self.config.ntfy.default_topic,
+        )
+        projector.project_pending(now=later, limit=50)
+        self.assertEqual(2, len(self.database.list_events()))
+        self.assertEqual(2, len({item.event_key for item in self.database.list_events()}))
+
+    def test_event_page_reports_are_scoped_to_requested_window(self) -> None:
+        first_time = 1_788_361_200
+        self.database.record_source_success(
+            "source-a",
+            FeedFetchResult((observation(
+                "window-first", "Official policy decision", source_id="source-a",
+                timestamp=first_time,
+            ),), None, None),
+            self.rules, first_time, self.config.ntfy.default_topic,
+        )
+        EventPoolProjector(self.database).project_pending(
+            now=first_time, since=first_time - 1, until=first_time + 1, limit=50
+        )
+        future = first_time + 3600
+        self.database.record_source_success(
+            "source-a",
+            FeedFetchResult((observation(
+                "window-future", "Official policy decision update", source_id="source-a",
+                timestamp=future,
+            ),), None, None),
+            self.rules, future, self.config.ntfy.default_topic,
+        )
+        EventPoolProjector(self.database).project_pending(now=future, limit=50)
+        digest = DigestBuilder(self.database).build(
+            digest_key="daily:scoped", period_start=first_time - 1,
+            period_end=first_time + 1, timezone="Asia/Shanghai",
+            created_at=future + 1,
+        )
+        scoped_items = [
+            item for item in digest.items if 2 in item.observation_ids
+        ]
+        self.assertEqual(1, len(scoped_items))
+        self.assertEqual((2,), scoped_items[0].observation_ids)
+        page = self.database.list_event_page(
+            since=first_time - 1, until=first_time + 1, limit=30
+        )
+        matching = [
+            item for item in page.items
+            if any(report.observation_id == 2 for report in item.reports)
+        ]
+        self.assertEqual(1, len(matching))
+        self.assertEqual([2], [report.observation_id for report in matching[0].reports])
+
+    def test_published_digest_reports_do_not_grow_with_current_event(self) -> None:
+        first_time = 1_788_361_200
+        first = DigestBuilder(self.database).build_and_save(
+            digest_key="daily:frozen", period_start=first_time - 10,
+            period_end=first_time + 10, timezone="Asia/Shanghai",
+            created_at=first_time + 10,
+        )
+        published = self.database.publish_digest(first.digest_key, first.version, first_time + 10)
+        original_ids = tuple(report.observation_id for report in published.items[0].reports)
+        self.database.record_source_success(
+            "source-a", FeedFetchResult((observation(
+                "future-report", "Official event update", source_id="source-a",
+                timestamp=first_time + 3600,
+            ),), None, None), self.rules, first_time + 3600, self.config.ntfy.default_topic,
+        )
+        EventPoolProjector(self.database).project_pending(now=first_time + 3600, limit=50)
+        loaded = self.database.get_digest(first.digest_key, published_only=True)
+        assert loaded is not None
+        self.assertEqual(original_ids, tuple(report.observation_id for report in loaded.items[0].reports))
+        self.assertTrue(loaded.items[0].reports[0].is_representative)
+        self.assertEqual(2, len(self.database.list_event_reports(loaded.items[0].event_id or "")))
+
+    def test_digest_pool_keeps_low_score_immediate_event(self) -> None:
+        now = 1_788_361_200
+        detail = self.database.create_manual_event(
+            ManualEventSpec(
+                title="Low score but notified", summary="Operator notification",
+                importance=1, region="GLOBAL", topic="general",
+            ),
+            "test", now, self.config.ntfy.default_topic,
+        )
+        EventPoolProjector(self.database).project_pending(now=now, limit=50)
+        digest = DigestBuilder(self.database, item_limit=1).build(
+            digest_key="daily:immediate", period_start=0, period_end=2_000_000_000,
+            timezone="Asia/Shanghai", created_at=now + 1,
+        )
+        self.assertEqual(1, len(digest.items))
+        self.assertEqual("Low score but notified", digest.items[0].title)
+        self.assertEqual("immediate", digest.items[0].handling)
+        self.assertEqual(detail["observation"]["id"], digest.items[0].observation_ids[0])
+
+    def test_delayed_notification_enters_current_event_and_digest_window(self) -> None:
+        old = 1_700_000_000
+        notified_at = old + 86400
+        detail = self.database.create_manual_event(
+            ManualEventSpec(
+                title="Delayed official confirmation", summary="Evidence",
+                importance=4, region="GLOBAL", topic="general",
+            ),
+            "test", old, self.config.ntfy.default_topic,
+        )
+        with self.database.connection:
+            self.database.connection.execute(
+                "UPDATE alerts SET created_at=? WHERE observation_id=?",
+                (notified_at, detail["observation"]["id"]),
+            )
+        EventPoolProjector(self.database).project_pending(now=notified_at, limit=50)
+        page = self.database.list_event_page(
+            since=notified_at - 1, until=notified_at + 1,
+        )
+        self.assertEqual(1, len(page.items))
+        self.assertEqual("immediate", page.items[0].handling)
+        digest = DigestBuilder(self.database).build(
+            digest_key="daily:delayed", period_start=notified_at - 1,
+            period_end=notified_at + 1, timezone="Asia/Shanghai",
+            created_at=notified_at + 1,
+        )
+        self.assertEqual((detail["observation"]["id"],), digest.items[0].observation_ids)
+
+    def test_unassigned_backfill_prioritizes_latest_observations(self) -> None:
+        old = 1_700_000_000
+        recent = 1_800_000_000
+        self.database.record_source_success(
+            "source-a",
+            FeedFetchResult((
+                observation("old-backfill", "Old event", source_id="source-a", timestamp=old),
+                observation("recent-backfill", "Recent event", source_id="source-a", timestamp=recent),
+            ), None, None),
+            self.rules, recent, self.config.ntfy.default_topic,
+        )
+        rows = self.database.list_unassigned_event_observations(limit=1)
+        self.assertEqual("recent-backfill", rows[0]["external_id"])
+
+    def test_importance_cursor_paginates_without_duplicates(self) -> None:
+        EventPoolProjector(self.database).project_pending(now=200, limit=50)
+        self.database.record_source_success(
+            "source-a",
+            FeedFetchResult((observation(
+                "another-page", "Unrelated technology event", source_id="source-a",
+                timestamp=1_800_000_000,
+            ),), None, None),
+            self.rules, 1_800_000_000, self.config.ntfy.default_topic,
+        )
+        EventPoolProjector(self.database).project_pending(now=1_800_000_000, limit=50)
+        first = self.database.list_event_page(
+            since=0, until=2_000_000_000, sort="importance", limit=1
+        )
+        self.assertIsNotNone(first.next_cursor)
+        second = self.database.list_event_page(
+            since=0, until=2_000_000_000, sort="importance", limit=1,
+            cursor=first.next_cursor,
+        )
+        self.assertEqual(1, len(second.items))
+        self.assertNotEqual(first.items[0].event.event_key, second.items[0].event.event_key)
 
 
 if __name__ == "__main__":

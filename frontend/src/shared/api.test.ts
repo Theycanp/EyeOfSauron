@@ -50,6 +50,20 @@ describe('AdminApi', () => {
     expect(headers.get('If-Match')).toBe('"7"')
   })
 
+  it('builds cursor-based daily event queries and accepts caller cancellation', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ events: [], pagination: { has_more: false } }))
+    const api = new AdminApi()
+    const controller = new AbortController()
+
+    await api.newsEvents({ hours: 28, sort: 'newest' })
+    await api.newsEvents({ hours: 28, sort: 'newest', limit: 50, cursor: 'opaque cursor', signal: controller.signal })
+
+    expect(requestUrl(fetchMock.mock.calls[0]![0])).toBe('/api/news-events?hours=28&sort=newest&limit=50')
+    const [url, init] = fetchMock.mock.calls[1]!
+    expect(requestUrl(url)).toBe('/api/news-events?hours=28&sort=newest&limit=50&cursor=opaque+cursor')
+    expect(init?.signal).toBeInstanceOf(AbortSignal)
+  })
+
   it('turns a revision conflict into a clear refresh instruction', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ error: 'stale', code: 'revision_conflict' }, 409))
     const api = new AdminApi('secret')

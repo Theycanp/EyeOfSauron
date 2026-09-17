@@ -118,11 +118,13 @@ contracts with NATS JetStream if workers are ever split across hosts.
 
 ## Daily digests
 
-The daily digest builder reads normalized observations and source coverage only
-through repository ports. Its algorithmic version ranks by the durable triage
-fields and configured regional interest, then deterministically clusters similar
-headlines across publishers. Corroboration from independent sources raises a
-cluster modestly but never rewrites the underlying observations. The configured
+The daily digest builder reads the continuously maintained event pool and source
+coverage only through repository ports. New eligible observations are projected
+in bounded batches before selection, and the same event read model powers the
+28-hour daily-event browser. Its algorithmic version ranks by the durable triage
+fields, source quality, configured regional interest, and source diversity.
+Corroboration from independent sources raises an event modestly but never rewrites
+the underlying observations. The configured
 `item_limit` is a hard ceiling, not a fixed daily count: each ranked cluster's
 bounded score contributes to a signal budget, so quiet days yield shorter
 digests and information-dense days use more of the ceiling. Immediate events

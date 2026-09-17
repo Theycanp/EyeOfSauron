@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BellRing, CircleAlert, FileText, Gauge, Inbox, LayoutDashboard, LockKeyhole, LogOut, Menu, Moon, Radar, RefreshCw, Settings2, ShieldCheck, Sun, UserRoundCog, X } from 'lucide-react'
+import { BellRing, CircleAlert, FileText, Gauge, Inbox, LayoutDashboard, LockKeyhole, LogOut, Menu, Moon, Newspaper, Radar, RefreshCw, Settings2, ShieldCheck, Sun, UserRoundCog, X } from 'lucide-react'
 import { AdminApi, ApiError } from '../shared/api'
 import type { AdminIdentity, AdminResourceName, AnalysisConfig, ConfigRevision, DigestConfig, ManagedSource, NewsCatalogEntry, NewsCatalogFeed, OutboxAlert, Reminder, SourceKind, SourceQualityProfile } from '../shared/types'
 import { deriveHealth, formatDate } from '../shared/utils'
@@ -13,6 +13,7 @@ import { catalogSourceDraft, createSourceDraft, editSourceDraft, ruleForSource, 
 import { SourceDialog, SourcesPage } from '../features/sources/Sources'
 import { EventsPage } from '../features/events/EventsPage'
 import { DigestsPage } from '../features/digests/DigestsPage'
+import { DailyEventsPage } from '../features/daily-events/DailyEventsPage'
 import { OutboxPanel } from '../features/settings/OutboxPanel'
 import { SettingsPage } from '../features/settings/SettingsPage'
 import { SourceQualityPage } from '../features/source-quality/SourceQualityPage'
@@ -23,6 +24,7 @@ const pages = [
   { id: 'reminders', label: '提醒', subtitle: '安排未来要发送的消息', icon: BellRing },
   { id: 'sources', label: '监测来源', subtitle: '决定 EyeOfSauron 要观察什么', icon: Radar },
   { id: 'events', label: '事件', subtitle: '异常、恢复和重要动态', icon: Inbox },
+  { id: 'daily-events', label: '日常事件', subtitle: '浏览聚合事件和原始报道', icon: Newspaper },
   { id: 'digests', label: '日报', subtitle: '阅读每日汇总的重要信息', icon: FileText },
   { id: 'source-quality', label: '信源质量', subtitle: '长期校准来源可信度', icon: Gauge },
   { id: 'users', label: '用户与权限', subtitle: '管理后台访问和登录会话', icon: UserRoundCog },
@@ -41,6 +43,7 @@ export default function AdminApp() {
   const [loginError, setLoginError] = useState('')
   const [loginBusy, setLoginBusy] = useState(false)
   const [page, setPage] = useState<PageId>(() => {
+    if (window.location.pathname.startsWith('/daily-events')) return 'daily-events'
     if (window.location.pathname.startsWith('/events')) return 'events'
     if (window.location.pathname.startsWith('/digests')) return 'digests'
     const value = window.location.hash.replace('#/', '')
@@ -492,6 +495,7 @@ export default function AdminApp() {
         {page === 'reminders' && <RemindersPage reminders={reminders} total={resources.reminders.data?.pagination?.total} busy={busy || !can('reminders:write')} onOpen={openReminder} onToggle={(item) => { void toggleReminder(item) }} onDelete={deleteReminder} />}
         {page === 'sources' && <SourcesPage sources={managedSources} sourceStates={sourceStates} busy={busy || !can('sources:write')} query={sourceQuery} onQuery={setSourceQuery} onCreate={openSource} catalog={newsCatalog} catalogError={resources.newsCatalog.error} onCatalogFeed={prepareCatalogFeed} onEdit={editSource} onToggle={(source) => { void toggleSource(source) }} onDelete={deleteSource} />}
         {page === 'events' && <EventsPage api={api} onUnauthorized={logout} initialAlertId={/^\/events\/([1-9]\d*)$/.exec(window.location.pathname)?.[1]} incidents={incidents} managedSources={managedSources} total={resources.incidents.data?.pagination?.total} health={health} openCount={openIncidents} canCreate={can('events:write')} onCreated={() => { void refresh(true) }} notify={notify} />}
+        {page === 'daily-events' && <DailyEventsPage api={api} onUnauthorized={logout} />}
         {page === 'digests' && <DigestsPage api={api} onUnauthorized={logout} initialKey={window.location.pathname.startsWith('/digests/') ? decodeURIComponent(window.location.pathname.slice('/digests/'.length)) : undefined} />}
         {page === 'source-quality' && <SourceQualityPage profiles={sourceQuality} busy={busy || !can('quality:write')} onFeedback={submitQualityFeedback} onOverride={setQualityOverride} onClearOverride={clearQualityOverride} />}
         {page === 'users' && identity?.permissions.includes('users:manage') && <UsersPage api={api} currentUserId={identity.id} notify={notify} onUnauthorized={clearSession} />}

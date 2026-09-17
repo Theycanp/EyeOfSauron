@@ -17,6 +17,7 @@ from . import __version__
 from .auth import AdminAuth, AuthContext, AuthError, LoginBlockedError
 from .config import AdminConfig, ConfigError, _parse_analysis, _parse_digest, _parse_rule, _parse_source
 from .digest import DigestDocument
+from .events import EventListItem
 from .manual_events import ManualEventError, parse_manual_event
 from .news_catalog import NEWS_SOURCE_CATALOG
 from .persistence import ControlPlaneRepository, ManagedConfigRepository, RevisionConflictError
@@ -529,7 +530,8 @@ _STATIC_CONTENT_TYPES = {
 def _static_file(request_path: str) -> Path | None:
     path = urllib.parse.urlsplit(request_path).path
     is_spa_route = any(
-        path == root or path.startswith(f"{root}/") for root in ("/digests", "/events")
+        path == root or path.startswith(f"{root}/")
+        for root in ("/digests", "/events", "/daily-events")
     )
     relative = (
         "index.html" if path in {"/", "/index.html"} or is_spa_route else path.lstrip("/")
@@ -637,6 +639,46 @@ def _digest_payload(digest: DigestDocument, *, details: bool) -> dict[str, Any]:
         for item in digest.coverage
     ]
     return payload
+
+
+def _news_event_payload(item: EventListItem) -> dict[str, Any]:
+    event = item.event
+    return {
+        "event_key": event.event_key,
+        "title": event.title,
+        "summary": event.summary,
+        "score": event.score,
+        "importance": event.importance,
+        "urgency": event.urgency,
+        "relevance": event.relevance,
+        "confidence": event.confidence,
+        "first_seen_at": event.first_seen_at,
+        "last_seen_at": event.last_seen_at,
+        "regions": list(event.regions),
+        "topics": list(event.topics),
+        "status": event.status,
+        "independent_source_count": event.independent_source_count,
+        "report_count": item.report_count,
+        "reports_truncated": item.reports_truncated,
+        "handling": item.handling,
+        "reports": [
+            {
+                "report_id": report.report_id,
+                "observation_id": report.observation_id,
+                "source_id": report.source_id,
+                "publisher": report.publisher,
+                "source_tier": report.source_tier,
+                "relation": report.relation,
+                "match_score": report.match_score,
+                "is_representative": report.is_representative,
+                "published_at": report.published_at,
+                "title": report.title,
+                "summary": report.summary,
+                "url": report.url,
+            }
+            for report in item.reports
+        ],
+    }
 
 
 def make_handler(
@@ -896,6 +938,49 @@ def make_handler(
             if path.startswith("/api/source-quality/") and path.endswith("/audit"):
                 source_id = urllib.parse.unquote(path[len("/api/source-quality/") : -len("/audit")]).strip("/")
                 self._json(HTTPStatus.OK, {"source_id": source_id, "audit": database.list_source_quality_audit(source_id)})
+                return
+            if path == "/api/news-events":
+                try:
+                    hours = int(query.get("hours", ["28"])[0])
+                    limit = int(query.get("limit", ["50"])[0])
+                    sort = query.get("sort", ["newest"])[0]
+                    cursor = query.get("cursor", [None])[0]
+                    if not 1 <= hours <= 720:
+                        raise ValueError("event window must be between 1 and 720 hours")
+                    if not 1 <= limit <= 100:
+                        raise ValueError("event limit is out of range")
+                    if sort not in {"newest", "importance"}:
+                        raise ValueError("event sort is invalid")
+                    now = int(time.time())
+                    page = database.list_event_page(
+                        since=max(0, now - hours * 3600),
+                        until=now + 1,
+                        sort="latest" if sort == "newest" else "importance",
+                        limit=limit,
+                        cursor=cursor,
+                    )
+                except ValueError as exc:
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc), "code": "invalid_query"},
+                    )
+                    return
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "events": [_news_event_payload(item) for item in page.items],
+                        "window": {
+                            "hours": hours,
+                            "since": page.window_since,
+                            "until": page.window_until if page.window_until is not None else now + 1,
+                        },
+                        "sort": sort,
+                        "pagination": {
+                            "next_cursor": page.next_cursor,
+                            "has_more": page.next_cursor is not None,
+                        },
+                    },
+                )
                 return
             if path == "/api/digests":
                 status_filter = query.get("status", ["published"])[0]
