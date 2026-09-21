@@ -5,6 +5,21 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-21
+
+### Added
+
+- Add conservative multilingual event clustering for reviewed Chinese, English,
+  and Japanese institution and action aliases, with unit-normalized amounts,
+  contradiction retention, and persistent event-pool replay coverage.
+- Add matching explanations for canonical signals and decisive action boundaries;
+  primary, secondary, and social reports remain parallel evidence.
+
+### Fixed
+
+- Keep opposite rate decisions and unrelated capital actions in separate events
+  even when they share an institution or ministry.
+
 ## [0.21.0] - 2026-09-21
 
 ### Added
