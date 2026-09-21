@@ -23,6 +23,10 @@ class AdminAuthHttpTests(unittest.TestCase):
 
             def run_server() -> None:
                 database = Database(root / "state.db")
+                database.sync_source_runtime(
+                    [("diagnostic_feed", "rss", True, 300)], {"diagnostic_feed"},
+                    config_revision=1, now=100,
+                )
                 auth = AdminAuth(database)
                 database.create_admin_user(
                     "owner", "Owner", auth.hash_password("correct-horse-battery"),
@@ -49,6 +53,9 @@ class AdminAuthHttpTests(unittest.TestCase):
             server, port = ready.get(timeout=30)
             base_url = f"http://127.0.0.1:{port}"
             try:
+                with self.assertRaises(urllib.error.HTTPError) as unauthenticated:
+                    urllib.request.urlopen(f"{base_url}/api/source-health/diagnostic_feed")
+                self.assertEqual(401, unauthenticated.exception.code)
                 bad_login = urllib.request.Request(
                     f"{base_url}/api/auth/login",
                     data=json.dumps({"username": "owner", "password": "wrong-password-value"}).encode(),
@@ -80,6 +87,19 @@ class AdminAuthHttpTests(unittest.TestCase):
                 )
                 with urllib.request.urlopen(users) as response:
                     self.assertEqual(2, len(json.loads(response.read())["users"]))
+                diagnostics = urllib.request.Request(
+                    f"{base_url}/api/source-health/diagnostic_feed", headers={"Cookie": cookie_values}
+                )
+                with urllib.request.urlopen(diagnostics) as response:
+                    health = json.loads(response.read())["health"]
+                self.assertEqual("diagnostic_feed", health["source_id"])
+                self.assertIsNone(health["polling"]["success_rate"])
+                unknown = urllib.request.Request(
+                    f"{base_url}/api/source-health/unknown", headers={"Cookie": cookie_values}
+                )
+                with self.assertRaises(urllib.error.HTTPError) as missing:
+                    urllib.request.urlopen(unknown)
+                self.assertEqual(404, missing.exception.code)
                 missing_csrf = urllib.request.Request(
                     f"{base_url}/api/users",
                     data=b'{}', headers={
@@ -163,6 +183,10 @@ class AdminAuthHttpTests(unittest.TestCase):
                     )
                 with urllib.request.urlopen(urllib.request.Request(
                     f"{base_url}/api/config", headers={"Cookie": reader_cookies}
+                )) as response:
+                    self.assertEqual(200, response.status)
+                with urllib.request.urlopen(urllib.request.Request(
+                    f"{base_url}/api/source-health/diagnostic_feed", headers={"Cookie": reader_cookies}
                 )) as response:
                     self.assertEqual(200, response.status)
                 with self.assertRaises(urllib.error.HTTPError) as failure:

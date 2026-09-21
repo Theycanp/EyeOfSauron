@@ -82,6 +82,20 @@ the application tracks account/address and address-wide failures without storing
 raw addresses. The legacy bearer credential works only on a direct loopback
 request and the public reverse proxy removes incoming Authorization headers.
 
+Security review (2026-09-21, source review and regression tests): these controls
+already exist; they must not be described as future additions or replaced by
+another login system. The cookie is `SameSite=Strict`, not Lax. The readable
+CSRF cookie is intentionally distinct from the HttpOnly session cookie; the
+server binds its hash to the session. Password hashes and raw session tokens
+are never returned in user APIs. Source diagnostics and quality-audit reads
+require an authenticated reader; changes still require the corresponding write
+permission and CSRF/origin checks. This review does not change the 14-day login
+lifetime or force users to sign in again. MFA, fresh-password confirmation for
+sensitive actions and automatic hash-cost upgrades are not currently implemented
+and must not be claimed as deployed controls. Any future password-cost upgrade
+should use a conditional hash update after successful verification, preserving
+concurrent password resets and existing valid sessions.
+
 The same API also provides `POST /api/validate`, `POST /api/test-source`,
 `GET /api/revisions`, `POST /api/revisions/<id>/rollback`,
 `POST /api/sources/<id>/enable|disable`, `GET /api/incidents`, and `/metrics`.

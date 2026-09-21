@@ -20,6 +20,8 @@ import type {
   ReminderResponse,
   RevisionResponse,
   SourceQualityResponse,
+  SourceHealth,
+  SourceQualityAudit,
   SourceTestResult,
 } from './types'
 
@@ -182,6 +184,12 @@ export class AdminApi {
   }
   prompts(): Promise<PromptResponse> { return this.request('/api/prompts') }
   sourceQuality(): Promise<SourceQualityResponse> { return this.request('/api/source-quality') }
+  sourceHealth(sourceId: string, signal?: AbortSignal): Promise<{ health: SourceHealth }> {
+    return this.request(`/api/source-health/${encodeURIComponent(sourceId)}`, { signal })
+  }
+  sourceQualityAudit(sourceId: string, signal?: AbortSignal): Promise<{ audit: SourceQualityAudit[] }> {
+    return this.request(`/api/source-quality/${encodeURIComponent(sourceId)}/audit`, { signal })
+  }
   sourceQualityFeedback(sourceId: string, body: { signal: -1 | 0 | 1; reason: string; observation_id?: number }): Promise<MutationResponse> {
     return this.request(`/api/source-quality/${encodeURIComponent(sourceId)}/feedback`, { method: 'POST', body: JSON.stringify(body) })
   }

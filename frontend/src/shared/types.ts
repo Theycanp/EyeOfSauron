@@ -93,6 +93,41 @@ export interface SourceState extends JsonRecord {
   registered_at?: number | null
   heartbeat_at?: number | null
   runtime_updated_at?: number | null
+  runtime_error?: string | null
+}
+
+export interface SourceHealth {
+  source_id: string
+  as_of: number
+  current: SourceState
+  polling: {
+    basis: 'cumulative_persisted_counters'
+    attempts: number
+    successes: number
+    failures: number
+    success_rate: number | null
+    window_success_rate: null
+  }
+  evidence: {
+    basis: 'retained_observations_by_ingestion_time'
+    since: number
+    until: number
+    observations_24h: number
+    observations_7d: number
+    with_full_text: number
+    full_text_coverage: number | null
+    content_jobs: Record<string, number>
+    content_failure_kinds: Record<string, number>
+  }
+}
+
+export interface SourceQualityAudit {
+  id: number
+  source_id: string
+  action: string
+  actor: string
+  details: Record<string, unknown>
+  created_at: number
 }
 
 export interface Reminder extends JsonRecord {

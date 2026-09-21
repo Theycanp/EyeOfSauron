@@ -18,6 +18,7 @@ from .models import FeedFetchResult, IngestReport, OutboxMessage, SourceState
 from .manual_events import ManualEventSpec
 from .reminders import ReminderSpec
 from .rules import RuleSet
+from .source_health import SourceHealthRepository
 
 
 class RevisionConflictError(RuntimeError):
@@ -230,7 +231,7 @@ class PromptRepository(Protocol):
 @runtime_checkable
 class ControlPlaneRepository(
     ManagedConfigRepository, PromptRepository, DigestReaderRepository,
-    EventPageRepository, Protocol
+    EventPageRepository, SourceHealthRepository, Protocol
 ):
     """Narrow persistence port used by the local administration API."""
 

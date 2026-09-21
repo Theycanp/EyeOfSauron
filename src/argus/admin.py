@@ -935,6 +935,18 @@ def make_handler(
                     },
                 })
                 return
+            if path.startswith("/api/source-health/"):
+                source_id = urllib.parse.unquote(path[len("/api/source-health/"):])
+                try:
+                    health = database.get_source_health(source_id)
+                except ValueError:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid source ID"})
+                    return
+                if health is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "source not found"})
+                else:
+                    self._json(HTTPStatus.OK, {"health": health})
+                return
             if path.startswith("/api/source-quality/") and path.endswith("/audit"):
                 source_id = urllib.parse.unquote(path[len("/api/source-quality/") : -len("/audit")]).strip("/")
                 self._json(HTTPStatus.OK, {"source_id": source_id, "audit": database.list_source_quality_audit(source_id)})

@@ -1,11 +1,14 @@
-import { forwardRef, useRef, type ChangeEvent, type Dispatch, type SetStateAction } from 'react'
+import { forwardRef, useRef, useState, type ChangeEvent, type Dispatch, type SetStateAction } from 'react'
 import { Activity, Check, Clock3, ExternalLink, LockKeyhole, Newspaper, Pencil, Plus, Radar, RefreshCw, ShieldAlert, ShieldCheck, Trash2, X } from 'lucide-react'
 import type { ManagedSource, NewsCatalogEntry, NewsCatalogFeed, SourceKind, SourceState, Tone } from '../../shared/types'
 import { knownSources, relativeTime } from '../../shared/utils'
 import { Modal } from '../../shared/ui/Modal'
 import { chooseProvider, providerList, providerRegistry, type SourceDraft } from './providers'
+import type { AdminApi } from '../../shared/api'
+import { SourceDiagnostics } from './SourceDiagnostics'
 
 interface SourcesPageProps {
+  api: AdminApi
   sources: ManagedSource[]
   sourceStates: SourceState[]
   busy: boolean
@@ -46,7 +49,8 @@ function catalogAccess(entry: NewsCatalogEntry): { label: string; tone: Tone } {
   return { label: '公开 / 订阅混合', tone: 'neutral' }
 }
 
-export function SourcesPage({ sources, sourceStates, busy, query, onQuery, onCreate, catalog, catalogError, onCatalogFeed, onEdit, onToggle, onDelete }: SourcesPageProps) {
+export function SourcesPage({ api, sources, sourceStates, busy, query, onQuery, onCreate, catalog, catalogError, onCatalogFeed, onEdit, onToggle, onDelete }: SourcesPageProps) {
+  const [diagnosticSource, setDiagnosticSource] = useState('')
   const state = (id: string) => sourceStates.find((item) => item.source_id === id)
   const catalogEntry = (id?: string) => catalog.find((entry) => entry.id === id)
   const tone = (source: ManagedSource): Tone => source.enabled === false ? 'neutral' : sourceStateTone(state(source.id))
@@ -59,6 +63,8 @@ export function SourcesPage({ sources, sourceStates, busy, query, onQuery, onCre
   return <>
     <div className="page-actions"><div><h2>监测来源</h2></div><button className="button primary" onClick={() => onCreate(null, 'generic')}><Plus size={18} />添加来源</button></div>
     <div className="source-kind-grid" aria-label="快速添加来源类型">{providerList.map((provider) => <button key={provider.kind} className="source-kind-card" onClick={() => onCreate(provider.kind, 'typed')}><span className="source-kind-icon"><provider.icon size={21} /></span><span><strong>{provider.label}</strong><small>{provider.description}</small></span><Plus size={17} aria-hidden="true" /></button>)}</div>
+    <section className="panel source-diagnostic-picker"><label><span>查看来源诊断</span><select value={diagnosticSource} onChange={(event) => setDiagnosticSource(event.target.value)}><option value="">选择一个来源</option>{sourceStates.map((source) => <option key={source.source_id} value={source.source_id}>{sources.find((item) => item.id === source.source_id)?.publisher || knownSources[source.source_id] || source.source_id} · {source.source_id}</option>)}</select></label><p>查看当前连续失败、累计采集计数、近期产出和正文覆盖。停用来源也保留诊断记录。</p></section>
+    {diagnosticSource && <SourceDiagnostics key={diagnosticSource} sourceId={diagnosticSource} api={api} onClose={() => setDiagnosticSource('')} />}
     <section className="source-section catalog-section"><div className="section-heading"><div><h3>新闻目录 <span className="section-count">{catalog.length || 0}</span></h3><p>这里是可添加的官方模板；生成草稿后仍需在弹窗中保存，保存前不会开始采集。</p></div><Newspaper size={18} /></div>
       {catalogError && <div className="inline-error" role="status"><ShieldAlert size={17} /><span>新闻目录暂时无法读取：{catalogError}</span></div>}
       {catalog.length ? <div className="catalog-grid">{catalog.map((entry) => {

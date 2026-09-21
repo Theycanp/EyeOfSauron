@@ -3529,6 +3529,84 @@ class Database:
             )
         return result
 
+    def get_source_health(
+        self, source_id: str, *, now: int | None = None
+    ) -> dict[str, Any] | None:
+        """Read one consistent diagnostics snapshot without changing source state."""
+        source_id = self._validate_source_quality_source_id(source_id)
+        current = int(time.time()) if now is None else now
+        if current < 0:
+            raise ValueError("source diagnostics time is invalid")
+        since = max(0, current - 7 * 86400)
+        with self.unit_of_work(immediate=False):
+            row = self.connection.execute(
+                "SELECT c.source_id, c.last_attempt_at, c.last_success_at, "
+                "c.consecutive_failures, c.last_error, c.last_error_kind, "
+                "c.last_http_status, c.last_warning, c.poll_count, c.success_count, "
+                "c.failure_count, r.runtime_status, r.configured_enabled, r.last_error AS runtime_error "
+                "FROM collector_state c LEFT JOIN source_runtime r "
+                "ON r.source_id = c.source_id WHERE c.source_id = ?",
+                (source_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            state = dict(row)
+            polls = int(state.pop("poll_count"))
+            successes = int(state.pop("success_count"))
+            failures = int(state.pop("failure_count"))
+            evidence = self.connection.execute(
+                "SELECT COUNT(*) AS observations, "
+                "COALESCE(SUM(o.fetched_at >= ?), 0) AS observations_24h, "
+                "COALESCE(SUM(EXISTS (SELECT 1 FROM content_documents d "
+                "WHERE d.observation_id = o.id AND d.level IN ('full_text', 'document') "
+                "AND length(trim(d.body)) > 0)), 0) AS with_full_text "
+                "FROM observations o WHERE o.source_id = ? "
+                "AND o.fetched_at >= ? AND o.fetched_at <= ?",
+                (max(0, current - 86400), source_id, since, current),
+            ).fetchone()
+            jobs = list(self.connection.execute(
+                "SELECT j.status, j.failure_kind, COUNT(*) AS count "
+                "FROM content_fetch_jobs j JOIN observations o ON o.id = j.observation_id "
+                "WHERE o.source_id = ? AND o.fetched_at >= ? AND o.fetched_at <= ? "
+                "GROUP BY j.status, j.failure_kind ORDER BY j.status, j.failure_kind",
+                (source_id, since, current),
+            ))
+        states: dict[str, int] = {}
+        error_kinds: dict[str, int] = {}
+        for job in jobs:
+            status = str(job["status"])
+            count = int(job["count"])
+            states[status] = states.get(status, 0) + count
+            if status in {"dead", "retry"}:
+                kind = str(job["failure_kind"] or "unknown")
+                error_kinds[kind] = error_kinds.get(kind, 0) + count
+        observations = int(evidence["observations"])
+        full_text = int(evidence["with_full_text"])
+        return {
+            "source_id": source_id,
+            "as_of": current,
+            "current": state,
+            "polling": {
+                "basis": "cumulative_persisted_counters",
+                "attempts": polls,
+                "successes": successes,
+                "failures": failures,
+                "success_rate": successes / polls if polls else None,
+                "window_success_rate": None,
+            },
+            "evidence": {
+                "basis": "retained_observations_by_ingestion_time",
+                "since": since,
+                "until": current,
+                "observations_24h": int(evidence["observations_24h"]),
+                "observations_7d": observations,
+                "with_full_text": full_text,
+                "full_text_coverage": full_text / observations if observations else None,
+                "content_jobs": states,
+                "content_failure_kinds": error_kinds,
+            },
+        }
+
     @staticmethod
     def _validate_source_quality_source_id(source_id: str) -> str:
         normalized = source_id.strip()

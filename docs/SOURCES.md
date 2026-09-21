@@ -32,6 +32,53 @@ such as major emergencies, material monetary-policy changes, severe disasters,
 or embassy security alerts. A source being primary does not mean every item is
 urgent.
 
+## Source diagnostics and long-term quality
+
+In the administration **监测来源** page, use **查看来源诊断** to inspect an
+enabled or disabled source. The read-only route
+`GET /api/source-health/<source_id>` uses `SourceHealthRepository`; SQL remains
+inside the SQLite adapter. It reads one consistent transaction and never creates
+collector state or changes quality weights. No schema migration is required.
+
+The fields deliberately describe different things:
+
+| Field | Evidence and interpretation |
+|---|---|
+| Last success / consecutive failures | Current collector state; a recovered failure is not an active outage. |
+| Cumulative success rate | Persisted `success_count / poll_count`; a successful 304 counts as a successful poll. Counters include no per-attempt transport retry history. The start timestamp is unknown for migrated counters. |
+| 24-hour / 7-day output | Distinct retained observations first ingested in the requested window, not all articles published then. Shared-scope deduplication attributes an item only to its first stored source. |
+| Full-text coverage | Distinct observations in that 7-day ingestion cohort with a non-empty `full_text` or `document`; multiple document versions count once. This is content availability, not extraction success rate. |
+| Content queue / error kinds | Current statuses of enrichment jobs attached to the same cohort. Metadata-only sources and first-poll baseline articles need not have such jobs. |
+
+There is no per-poll history table, so `window_success_rate` is explicitly null;
+the UI must not label cumulative counters as a 7-day success rate. Short
+observation retention can make output counts incomplete; all counts refer to
+data still retained. The diagnostic timestamp is displayed and refresh failures
+retain the last readable snapshot with an error. This page does not trigger any
+network request to the publisher. Connection tests remain a separate, bounded,
+read-only action in the source editor; enable/disable still creates a managed
+configuration revision.
+
+**信源质量 → 权重调整记录** shows the existing audited feedback, override and
+override-removal operations (latest 100), including actor, time and reason.
+Quality remains based on explicit feedback: a 90-day decay half-life, at least
+30 effective samples spanning at least 90 days, an 8-positive/2-negative prior,
+automatic weights between 0.70 and 1.15, and at most 0.05 change per 30 days.
+Manual bounded overrides take precedence. Transport failures and missing paid
+article bodies do not become negative quality votes. Existing feedback/audit
+records are preserved to support long-horizon evidence and accountability.
+The UI also exposes the formula: each sample decays by `0.5^(age_days/90)`,
+score is `(8 + positive) / (10 + positive + negative)`, and target weight is
+`1 + (score - 0.8) * 0.75`, followed by eligibility, bounds and rate limiting.
+Neutral votes count toward effective sample size but not the score denominator.
+
+To roll back this UI/API addition, use the previous compatible release; no
+source configuration or historical evidence is rewritten. Exact 7-day poll
+availability remains deferred until a bounded history repository has an agreed
+retention and schema migration. It must record every completed poll, including
+304 and failures, survive restarts, and expose missing coverage before its rate
+can be displayed honestly.
+
 ## 2026-09-15 additions
 
 - U.S. Embassy and Consulates in China official Alerts RSS remains a reviewed

@@ -15,6 +15,17 @@ This separates four concerns:
 3. `adapters.py` binds source kinds to collector factories.
 4. collectors normalize results into the existing `Observation` contract.
 
+`SourceCollector.fetch(SourceState) -> FeedFetchResult` is the runtime contract.
+The registry rejects factories without a callable `fetch`; the result batches
+retain the established `Observation`, conditional-cache fields, warning and
+cursor contracts. Collectors never commit cursors or send notifications. The
+repository atomically records a batch and its cursor only after a successful
+fetch; adapter-specific partial-page/UID handling must preserve unseen items.
+The extension contract test registers a custom replay collector, verifies first
+poll baselining, replays the batch without duplicates and confirms that cursor
+state changes only on ingestion. This extends the existing registry rather than
+adding a second source-plugin dispatcher.
+
 The default registry is immutable. An embedding application can call
 `DEFAULT_PROVIDER_REGISTRY.extend(spec)` and pass that registry plus a factory to
 configuration loading and `build_collector`; adding a provider no longer
@@ -25,6 +36,7 @@ requires another core `if kind == ...` branch.
 | Kind | Main capabilities | Credential references | Connection test | Runtime |
 |---|---|---|---|---|
 | `rss` | feed/news items | none | one bounded HTTPS fetch | active |
+| `official_list` | dated official news announcements | none | one bounded HTTPS fetch/parser pass | active |
 | `youtube` | feed/video updates | none | one bounded official channel-feed fetch | active |
 | `x` | social posts | `bearer_token_env` | read-only API call | active |
 | `imap` | email messages | `username_env`, `password_env` | read-only mailbox probe | active |

@@ -159,6 +159,31 @@ async function openSources(page: Page) {
   await page.getByRole('button', { name: '监测来源' }).click()
 }
 
+test('source diagnostics keep recovered polling and blocked content distinct', async ({ page }, testInfo) => {
+  await mockAdminApi(page)
+  const now = Math.floor(Date.now() / 1000)
+  await page.route('**/api/config', (route) => route.fulfill({ json: {
+    managed: { sources: [], rules: [], analysis: { enabled: false }, digest: { enabled: false } },
+    revision: { revision: 1 },
+    status: { observations: 10, sources: [{ source_id: 'official', last_success_at: now, consecutive_failures: 0, runtime_status: 'active' }], outbox: {}, incidents: {}, runtime: { heartbeat_at: now, applied_revision: 1 } },
+  } }))
+  await page.route('**/api/source-health/official', (route) => route.fulfill({ json: { health: {
+    source_id: 'official', as_of: now,
+    current: { source_id: 'official', last_success_at: now, consecutive_failures: 0 },
+    polling: { basis: 'cumulative_persisted_counters', attempts: 10, successes: 9, failures: 1, success_rate: 0.9, window_success_rate: null },
+    evidence: { basis: 'retained_observations_by_ingestion_time', since: now - 604800, until: now, observations_24h: 2, observations_7d: 10, with_full_text: 6, full_text_coverage: 0.6, content_jobs: { completed: 6, dead: 1 }, content_failure_kinds: { http_403: 1 } },
+  } } }))
+  await login(page)
+  await openSources(page)
+  await page.getByLabel('查看来源诊断').selectOption('official')
+  const diagnostics = page.getByRole('region', { name: 'official来源诊断' })
+  await expect(diagnostics.getByText('90.0%')).toBeVisible()
+  await expect(diagnostics.getByText(/正文受限不代表来源停止采集/)).toBeVisible()
+  await expect(diagnostics.getByText(/无法计算近 7 天采集成功率/)).toBeVisible()
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', await page.locator('body').evaluate((node) => node.clientWidth))
+  await page.screenshot({ path: testInfo.outputPath('source-diagnostics.png'), fullPage: true })
+})
+
 test('login screen exposes the EyeOfSauron identity and accessible account fields', async ({ page }) => {
   await mockAdminApi(page)
   await page.goto('/')
