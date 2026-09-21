@@ -146,6 +146,13 @@ JMA's feed title is a bulletin category, so that source explicitly promotes the
 entry content to the headline before rule evaluation; the category label alone
 must never trigger a severe-weather alert.
 
+JMA is intentionally a local evidence source, not an interrupt source. It polls
+every 15 minutes with default importance 2 and does not belong to an immediate
+notification rule. Its observations remain available to the event pool and
+daily digest. Internationally significant disasters are alerted through the
+USGS significant-earthquake feed and reviewed global breaking-news sources,
+which retain their higher importance and faster cadence.
+
 Catalog entries are templates, not live configuration. The requested September
 2026 regional rollout is selected in `argus.news_rollout`; use
 `scripts/operations/activate_news_sources.py --config /etc/argus/config.toml

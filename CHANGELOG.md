@@ -5,6 +5,15 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.22.2] - 2026-09-21
+
+### Changed
+
+- Treat the Japan Meteorological Agency high-frequency feed as digest-only local
+  evidence: poll it every 15 minutes at importance 2 and exclude it from all
+  immediate notification rules. USGS significant earthquakes and reviewed
+  global breaking-news sources retain their existing alert cadence and weight.
+
 ## [0.22.1] - 2026-09-21
 
 ### Fixed

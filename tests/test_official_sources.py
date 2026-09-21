@@ -102,12 +102,21 @@ class OfficialSourcesTests(unittest.TestCase):
         for raw in additions:
             source = parse_source_config(raw)
             self.assertTrue(source.enabled)
-            if source.region == "JP":
+            if source.region == "JP" and source.id != "japan_meteorological_agency_high_frequency":
                 self.assertEqual(4, source.default_importance)
+            if source.id == "japan_meteorological_agency_high_frequency":
+                self.assertEqual(2, source.default_importance)
+                self.assertEqual(900, source.poll_interval_seconds)
         primary_additions = {
-            row["id"] for row in additions if row.get("source_tier") == "primary"
+            row["id"] for row in additions
+            if row.get("source_tier") == "primary"
+            and row["id"] != "japan_meteorological_agency_high_frequency"
         }
         self.assertEqual(primary_additions, set(planned["rules"][0]["source_ids"]))
+        self.assertNotIn(
+            "japan_meteorological_agency_high_frequency",
+            planned["rules"][0]["source_ids"],
+        )
         _parse_rule(planned["rules"][0], 0)
         second, added = plan_official_news(planned)
         self.assertEqual([], added)
