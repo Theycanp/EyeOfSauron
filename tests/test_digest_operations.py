@@ -82,6 +82,28 @@ class DigestRunRepositoryTests(unittest.TestCase):
         self.assertEqual("failed", trace["status"])
         self.assertEqual("succeeded", summarizer.last_attempts[1]["status"])
 
+    def test_corrupt_provider_trace_does_not_break_the_read_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "state.db")
+            try:
+                attempt_id = database.start_digest_attempt("daily:corrupt", now=NOW)
+                second_attempt_id = database.start_digest_attempt("daily:corrupt", now=NOW + 1)
+                database.connection.execute(
+                    "UPDATE digest_generation_attempts SET providers_json=? WHERE id=?",
+                    ("not-json", attempt_id),
+                )
+                database.connection.execute(
+                    "UPDATE digest_generation_attempts SET providers_json=? WHERE id=?",
+                    ('[{"provider":"' + ("x" * 10000) + '"}]', second_attempt_id),
+                )
+                database.connection.commit()
+                run = database.get_digest_run("daily:corrupt", now=NOW + 1)
+                assert run is not None
+                self.assertEqual(500, len(run["attempts"][0]["providers"][0]["provider"]))
+                self.assertEqual([], run["attempts"][1]["providers"])
+            finally:
+                database.close()
+
     def test_retry_budget_and_window_are_enforced_without_reopening_exhausted_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "state.db")

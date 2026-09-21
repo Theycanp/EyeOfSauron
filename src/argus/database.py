@@ -60,6 +60,38 @@ from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, T
 SCHEMA_VERSION = 19
 
 
+_DIGEST_PROVIDER_TRACE_FIELDS = frozenset({
+    "provider", "model", "prompt_id", "prompt_version", "prompt_hash",
+    "status", "error", "elapsed_ms",
+})
+
+
+def _read_digest_provider_trace(value: object) -> list[dict[str, Any]]:
+    """Decode bounded diagnostics without letting one legacy row break the read API."""
+    if not isinstance(value, str):
+        return []
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(decoded, list):
+        return []
+    traces: list[dict[str, Any]] = []
+    for row in decoded[:12]:
+        if not isinstance(row, Mapping):
+            continue
+        traces.append({
+            str(key): (
+                item[:500] if isinstance(item, str)
+                else item if item is None or isinstance(item, (bool, int, float))
+                else sanitize_error(str(item))[:500]
+            )
+            for key, item in row.items()
+            if str(key) in _DIGEST_PROVIDER_TRACE_FIELDS
+        })
+    return traces
+
+
 def read_active_config(path: Path) -> dict[str, Any] | None:
     """Read the desired configuration without creating or migrating a database."""
     if not path.exists():
@@ -1407,7 +1439,7 @@ class Database:
         if digest is None and retry is None and not attempts:
             return None
         for attempt in attempts:
-            attempt["providers"] = json.loads(attempt.pop("providers_json"))
+            attempt["providers"] = _read_digest_provider_trace(attempt.pop("providers_json", None))
         generation_kind = str(digest["generation_kind"]) if digest else None
         return {
             "digest_key": digest_key,

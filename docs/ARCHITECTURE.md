@@ -141,7 +141,7 @@ reader can inspect the evidence behind a summary.
 The API digest stage runs only after deterministic selection and receives every
 selected item within a distributed input budget. Its JSON output must cite valid
 item numbers. A first-attempt failure publishes and notifies the algorithmic draft
-immediately; four persistent retries follow at 75-minute intervals inside a
+immediately; four persistent retries follow at hourly intervals inside a
 five-hour window. Success publishes a new immutable API version and notifies it.
 Each digest has its own five-attempt budget, separate from per-observation API
 triage. Fully exhausted days form a durable streak; the third consecutive day
