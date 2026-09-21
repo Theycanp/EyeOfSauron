@@ -510,7 +510,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         (_feed("high_frequency", "High-frequency alerts", "Disaster and Weather", "https://www.data.jma.go.jp/developer/xml/feed/extra.xml", "www.data.jma.go.jp"),),
         "https://www.data.jma.go.jp/developer/xml/feed/",
         "Official JMAXML Atom feed for high-frequency weather and disaster information.",
-        region="JP", source_tier="primary", default_importance=4, topic="disaster",
+        region="JP", source_tier="primary", default_importance=2, topic="disaster",
     ),
     NewsSourceEntry(
         "world_health_organization",

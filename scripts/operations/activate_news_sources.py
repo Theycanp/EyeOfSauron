@@ -11,7 +11,11 @@ from argus.admin import ManagedConfigStore
 from argus.config import load_config, parse_source_config
 from argus.database import Database
 from argus.models import SourceState
-from argus.news_rollout import plan_event_metadata, plan_official_news
+from argus.news_rollout import (
+    plan_disaster_signal_policy,
+    plan_event_metadata,
+    plan_official_news,
+)
 from argus.runtime_rollout import plan_runtime_audit
 
 
@@ -20,8 +24,13 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--expect-revision", type=int, required=True)
-    parser.add_argument("--runtime-audit", action="store_true", help="apply the reviewed v0.15 runtime fixes")
-    parser.add_argument("--event-metadata", action="store_true", help="fill missing legacy Fed source metadata")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--runtime-audit", action="store_true", help="apply the reviewed v0.15 runtime fixes")
+    mode.add_argument("--event-metadata", action="store_true", help="fill missing legacy Fed source metadata")
+    mode.add_argument(
+        "--disaster-signal-policy", action="store_true",
+        help="demote local JMA bulletins while preserving global disaster alerts",
+    )
     args = parser.parse_args()
     base = load_config(args.config, include_managed=False)
     if base.service.managed_sources_path is None:
@@ -33,7 +42,9 @@ def main() -> None:
         if revision != args.expect_revision:
             parser.error(f"configuration changed: expected {args.expect_revision}, found {revision}")
         current = active["payload"] if active else {}
-        if args.event_metadata:
+        if args.disaster_signal_policy:
+            planned, additions = plan_disaster_signal_policy(current)
+        elif args.event_metadata:
             planned, additions = plan_event_metadata(current)
         else:
             planned, additions = (plan_runtime_audit(current) if args.runtime_audit
@@ -62,7 +73,9 @@ def main() -> None:
             {source.id for source in base.sources}, {rule.id for rule in base.rules}, database,
         )
         revision = store.write(planned, actor="operations:news-rollout",
-                               reason=("fill legacy Fed source metadata" if args.event_metadata else
+                               reason=("demote local JMA bulletins to digest-only evidence"
+                                       if args.disaster_signal_policy else
+                                       "fill legacy Fed source metadata" if args.event_metadata else
                                        "runtime audit: host monitoring, API digest, official sources and JMA correction"
                                        if args.runtime_audit else "activate user-requested CN/JP/US/international official sources"),
                                expected_revision=args.expect_revision)

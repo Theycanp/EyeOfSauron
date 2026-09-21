@@ -40,6 +40,14 @@ OFFICIAL_NEWS_SELECTION = (
     ("new_york_times", "world"),
 )
 
+# These first-party feeds are valuable evidence for the event pool and digest,
+# but their local bulletin cadence is not itself evidence of international
+# significance. Global media and reviewed global disaster feeds decide whether
+# the event should interrupt the user.
+DIGEST_ONLY_OFFICIAL_SOURCES = frozenset({
+    "japan_meteorological_agency_high_frequency",
+})
+
 
 def plan_event_metadata(current: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Fill legacy Fed defaults only; explicit operator choices are preserved."""
@@ -54,6 +62,24 @@ def plan_event_metadata(current: Mapping[str, Any]) -> tuple[dict[str, Any], lis
         if source != before and source.get("enabled", True):
             probes.append(source)
     return result, probes
+
+
+def plan_disaster_signal_policy(
+    current: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Demote local JMA bulletins without weakening global disaster coverage."""
+    result = deepcopy(dict(current))
+    source_id = "japan_meteorological_agency_high_frequency"
+    for source in result.get("sources", []):
+        if source.get("id") != source_id:
+            continue
+        source["poll_interval_seconds"] = 900
+        source["default_importance"] = 2
+    for rule in result.get("rules", []):
+        source_ids = rule.get("source_ids")
+        if isinstance(source_ids, list):
+            rule["source_ids"] = [item for item in source_ids if item != source_id]
+    return result, []
 
 
 def plan_official_news(
@@ -74,7 +100,7 @@ def plan_official_news(
         source_id = f"{entry_id}_{feed_id}"
         source = NEWS_SOURCE_CATALOG.source_template(
             entry_id, feed_id, source_id, enabled=True, user_confirmed=True,
-            poll_interval_seconds=300 if entry_id in {"japan_meteorological_agency", "usgs_earthquakes"} else 900,
+            poll_interval_seconds=300 if entry_id == "usgs_earthquakes" else 900,
         )
         if source_id in ids or source["url"] in urls:
             continue
@@ -115,7 +141,8 @@ def plan_official_news(
             # Secondary and aggregator feeds provide context and corroboration;
             # only reviewed primary sources may enter the first-party critical
             # notification rule.
-            if source["source_tier"] != "primary":
+            if (source["source_tier"] != "primary"
+                    or source["id"] in DIGEST_ONLY_OFFICIAL_SOURCES):
                 continue
             if source["id"] not in covered:
                 covered.append(source["id"])

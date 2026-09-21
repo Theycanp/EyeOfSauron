@@ -181,6 +181,10 @@ class NewsCatalogTests(unittest.TestCase):
             NEWS_SOURCE_CATALOG.require("reuters").integration_mode,
         )
         self.assertEqual("JP", NEWS_SOURCE_CATALOG.require("bank_of_japan").region)
+        self.assertEqual(
+            2,
+            NEWS_SOURCE_CATALOG.require("japan_meteorological_agency").default_importance,
+        )
         self.assertEqual("CN", NEWS_SOURCE_CATALOG.require("china_ndrc").region)
         self.assertEqual("primary", NEWS_SOURCE_CATALOG.require("world_health_organization").source_tier)
         nvidia = NEWS_SOURCE_CATALOG.require("nvidia_newsroom")
