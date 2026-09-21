@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from argus.database import SCHEMA_VERSION, Database
@@ -270,6 +271,22 @@ class DatabaseTests(unittest.TestCase):
             self.assertFalse(self.database._insert_alert(replace(candidate, rule_id="other", dedupe_key="news-b"), None, NOW + 60))
             self.database.connection.execute("UPDATE alerts SET status='dead' WHERE dedupe_key='news-a'")
             self.assertTrue(self.database._insert_alert(replace(candidate, dedupe_key="news-c"), None, NOW + 120))
+
+    def test_weather_event_suppression_is_persistent(self) -> None:
+        candidate = AlertCandidate(
+            rule_id="jma", dedupe_key="weather-a", title="warning", message="warning",
+            priority=5, tags=(), click_url="", topic="eos",
+            incident_key="weather-event:stable-warning",
+        )
+        with self.database.connection:
+            self.assertTrue(self.database._insert_alert(candidate, None, NOW))
+            self.assertFalse(self.database._insert_alert(
+                replace(candidate, rule_id="jma-other", dedupe_key="weather-b"), None, NOW + 86400
+            ))
+            self.assertTrue(self.database._insert_alert(
+                replace(candidate, dedupe_key="weather-c", incident_key="weather-event:escalated-warning"),
+                None, NOW + 86401,
+            ))
 
 
     def test_config_revision_history_and_activation(self) -> None:

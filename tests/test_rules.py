@@ -105,6 +105,34 @@ class RuleTests(unittest.TestCase):
         self.assertNotEqual(left.incident_key, right.incident_key)
         self.assertFalse(str(left.incident_key).startswith("news-event:"))
 
+    def test_jma_republication_uses_persistent_weather_identity(self) -> None:
+        jma_rule = replace(
+            self.rules.rules[0].config,
+            id="jma_critical",
+            source_ids=("japan_meteorological_agency_high_frequency",),
+            threshold=8,
+            patterns=(PatternConfig("重大灾害", r"特別警報", 8, 4),),
+        )
+        rules = RuleSet.from_config((jma_rule,), "eos")
+        first = rules.evaluate(
+            observation(
+                "jma-1",
+                "【東京都土砂災害警報・注意報】【特別警報（土砂災害）】大島に特別警報を発表しています。",
+                source_id="japan_meteorological_agency_high_frequency",
+            ),
+            NOW,
+        )[0]
+        second = rules.evaluate(
+            observation(
+                "jma-2",
+                "【東京都気象特別警報報知】【特別警報（土砂災害）】東京都に特別警報を発表しました。",
+                source_id="japan_meteorological_agency_high_frequency",
+            ),
+            NOW + 3600,
+        )[0]
+        self.assertEqual(first.incident_key, second.incident_key)
+        self.assertTrue(first.incident_key.startswith("weather-event:"))
+
 
 if __name__ == "__main__":
     unittest.main()
