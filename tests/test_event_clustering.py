@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from argus.event_clustering import cluster_events
+from argus.event_clustering import cluster_events, event_match_score, explain_event_match
 from argus.digest import cluster_observations_event_centric
 
 
@@ -76,6 +76,63 @@ class EventClusteringTests(unittest.TestCase):
             _row(2, "European Central Bank raises interest rates", source_id="ecb"),
         ])
         self.assertEqual(2, len(events))
+
+    def test_reviewed_multilingual_aliases_merge_parallel_reports(self) -> None:
+        events = cluster_events([
+            {
+                **_row(1, "Federal Reserve raises interest rates by 25 basis points", source_id="fed", tier="primary", published_at=1_800_000_000),
+                "region": "US",
+                "attributes": {"entities": ("Federal Reserve",)},
+            },
+            {
+                **_row(2, "美联储加息25个基点", source_id="cn-wire", tier="secondary", published_at=1_800_000_060),
+                "region": "US",
+                "attributes": {"entities": ("美联储",)},
+            },
+        ])
+        self.assertEqual(1, len(events))
+        self.assertEqual({"primary", "secondary"}, {report.source_tier for report in events[0].reports})
+        self.assertEqual("corroborates", next(report.relation for report in events[0].reports if report.source_id == "cn-wire"))
+
+    def test_multilingual_opposite_rate_directions_remain_separate(self) -> None:
+        events = cluster_events([
+            {
+                **_row(1, "Federal Reserve raises interest rates", source_id="fed", tier="primary"),
+                "region": "US",
+                "attributes": {"entities": ("Federal Reserve",)},
+            },
+            {
+                **_row(2, "美联储降息", source_id="cn-wire", tier="secondary"),
+                "region": "US",
+                "attributes": {"entities": ("美联储",)},
+            },
+        ])
+        self.assertEqual(2, len(events))
+
+    def test_reviewed_japanese_aliases_merge_with_english_report(self) -> None:
+        events = cluster_events([
+            {
+                **_row(1, "Bank of Japan raises interest rates by 25 basis points", source_id="boj", tier="primary"),
+                "region": "JP",
+                "attributes": {"entities": ("Bank of Japan",)},
+            },
+            {
+                **_row(2, "日本銀行が利上げ、25ベーシスポイント", source_id="jp-wire", tier="secondary", published_at=1_800_000_060),
+                "region": "JP",
+                "attributes": {"entities": ("日本銀行",)},
+            },
+        ])
+        self.assertEqual(1, len(events))
+        self.assertEqual({"primary", "secondary"}, {report.source_tier for report in events[0].reports})
+
+    def test_explanation_exposes_reviewed_signals_and_action_boundary(self) -> None:
+        left = _row(1, "Federal Reserve raises interest rates", source_id="fed")
+        right = _row(2, "美联储降息", source_id="cn-wire")
+        evidence = explain_event_match(left, right)
+        self.assertEqual(0.0, event_match_score(left, right))
+        self.assertIn("entity_federal_reserve", evidence["shared_canonical_signals"])
+        self.assertEqual(["action_rate_hike"], evidence["left_canonical_actions"])
+        self.assertEqual(["action_rate_cut"], evidence["right_canonical_actions"])
 
     def test_same_day_decisions_outside_window_have_unique_cluster_keys(self) -> None:
         instant = 1_789_581_600

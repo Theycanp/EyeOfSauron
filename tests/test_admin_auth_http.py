@@ -94,6 +94,12 @@ class AdminAuthHttpTests(unittest.TestCase):
                     health = json.loads(response.read())["health"]
                 self.assertEqual("diagnostic_feed", health["source_id"])
                 self.assertIsNone(health["polling"]["success_rate"])
+                invalid_audit = urllib.request.Request(
+                    f"{base_url}/api/source-quality/%20/audit", headers={"Cookie": cookie_values}
+                )
+                with self.assertRaises(urllib.error.HTTPError) as invalid:
+                    urllib.request.urlopen(invalid_audit)
+                self.assertEqual(400, invalid.exception.code)
                 unknown = urllib.request.Request(
                     f"{base_url}/api/source-health/unknown", headers={"Cookie": cookie_values}
                 )
