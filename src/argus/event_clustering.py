@@ -386,6 +386,15 @@ def _pair_score(left: Mapping[str, Any], right: Mapping[str, Any], *, window: in
     decisive_right = {term for term in actions_right if term.startswith("action_rate_")}
     if decisive_left and decisive_right and decisive_left.isdisjoint(decisive_right):
         return 0.0, False
+    # A shared ministry or company is insufficient to merge unrelated action
+    # types.  In particular, a budget announcement must not absorb a capital
+    # injection merely because both mention the finance ministry.  Keep the
+    # guard narrow so an official announcement and a later detailed report can
+    # still be joined when their titles are clearly about the same decision.
+    capital_left = "action_capital_injection" in actions_left
+    capital_right = "action_capital_injection" in actions_right
+    if capital_left != capital_right and title < 0.72:
+        return 0.0, False
     canonical_left = _canonical_terms(f"{left.get('title', '')} {left.get('summary', '')}")
     canonical_right = _canonical_terms(f"{right.get('title', '')} {right.get('summary', '')}")
     shared_canonical = canonical_left & canonical_right
