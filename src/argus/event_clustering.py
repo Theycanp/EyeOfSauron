@@ -14,6 +14,7 @@ import math
 import re
 import unicodedata
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 from typing import Any, Mapping, Sequence
 
@@ -22,7 +23,11 @@ from .event_identity import identify_semantic_event
 
 _SPACE_RE = re.compile(r"\s+")
 _TOKEN_RE = re.compile(r"[a-z0-9]+|[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
-_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?%?")
+_NUMBER_RE = re.compile(
+    r"(?P<number>\d+(?:[.,]\d+)?)\s*(?P<unit>%|％|bp|bps|basis\s+points?|基点|个基点|亿元|万亿元|亿|万亿|百万|十亿|"
+    r"trillion|billion|million|thousand|bn|mn|tn)?",
+    re.IGNORECASE,
+)
 _CJK_RUN_RE = re.compile(r"[\u3400-\u9fff]{2,}")
 _STOPWORDS = frozenset(
     "表示 发布 关于 相关 记者 消息 最新 今日 日前 将在 以及 进行 召开".split()
@@ -31,6 +36,139 @@ _GENERIC_TITLES = frozenset({
     "politics", "business", "world", "news", "technology", "the weekly cartoon",
     "latest news", "breaking news", "新闻", "国际新闻", "财经", "时政", "科技",
 })
+
+# A small, explicit vocabulary makes the deterministic matcher useful across
+# the languages used by the reviewed source set.  It is deliberately limited
+# to stable institutions, actions and event nouns; it must never become a
+# machine translation system or turn a shared generic word into an event key.
+_MULTILINGUAL_ALIASES = (
+    ("federal reserve", "entity_federal_reserve"),
+    ("fomc", "entity_federal_reserve"),
+    ("fed", "entity_federal_reserve"),
+    ("federal funds", "policy_rate"),
+    ("interest rate", "policy_rate"),
+    ("bank of japan", "entity_bank_of_japan"),
+    ("boj", "entity_bank_of_japan"),
+    ("european central bank", "entity_european_central_bank"),
+    ("ecb", "entity_european_central_bank"),
+    ("people's bank of china", "entity_people_bank_of_china"),
+    ("peoples bank of china", "entity_people_bank_of_china"),
+    ("pboc", "entity_people_bank_of_china"),
+    ("finance ministry", "entity_finance_ministry"),
+    ("ministry of finance", "entity_finance_ministry"),
+    ("industrial and commercial bank of china", "entity_icbc"),
+    ("icbc", "entity_icbc"),
+    ("central bank", "central_bank"),
+    ("美联储", "entity_federal_reserve"),
+    ("联储", "entity_federal_reserve"),
+    ("日银", "entity_bank_of_japan"),
+    ("日銀", "entity_bank_of_japan"),
+    ("日本银行", "entity_bank_of_japan"),
+    ("日本銀行", "entity_bank_of_japan"),
+    ("欧洲央行", "entity_european_central_bank"),
+    ("中国人民银行", "entity_people_bank_of_china"),
+    ("财政部", "entity_finance_ministry"),
+    ("财务省", "entity_finance_ministry"),
+    ("工商银行", "entity_icbc"),
+    ("中国工商银行", "entity_icbc"),
+    ("日本央行", "entity_bank_of_japan"),
+    ("日元", "entity_japanese_yen"),
+    ("日圆", "entity_japanese_yen"),
+    ("央行", "central_bank"),
+    ("加息", "action_rate_hike"),
+    ("上调利率", "action_rate_hike"),
+    ("利上げ", "action_rate_hike"),
+    ("rate hike", "action_rate_hike"),
+    ("rate hikes", "action_rate_hike"),
+    ("raises rates", "action_rate_hike"),
+    ("raise rates", "action_rate_hike"),
+    ("raises interest rates", "action_rate_hike"),
+    ("raise interest rates", "action_rate_hike"),
+    ("hikes interest rates", "action_rate_hike"),
+    ("hike interest rates", "action_rate_hike"),
+    ("raises policy rate", "action_rate_hike"),
+    ("raise policy rate", "action_rate_hike"),
+    ("hikes policy rate", "action_rate_hike"),
+    ("raised rates", "action_rate_hike"),
+    ("hiked rates", "action_rate_hike"),
+    ("提高利率", "action_rate_hike"),
+    ("利率上调", "action_rate_hike"),
+    ("降息", "action_rate_cut"),
+    ("下调利率", "action_rate_cut"),
+    ("利下げ", "action_rate_cut"),
+    ("rate cut", "action_rate_cut"),
+    ("rate cuts", "action_rate_cut"),
+    ("cuts rates", "action_rate_cut"),
+    ("cuts interest rates", "action_rate_cut"),
+    ("cut interest rates", "action_rate_cut"),
+    ("lowers interest rates", "action_rate_cut"),
+    ("lower interest rates", "action_rate_cut"),
+    ("cuts policy rate", "action_rate_cut"),
+    ("cut policy rate", "action_rate_cut"),
+    ("lowers policy rate", "action_rate_cut"),
+    ("lowers rates", "action_rate_cut"),
+    ("cut rates", "action_rate_cut"),
+    ("降低利率", "action_rate_cut"),
+    ("利率下调", "action_rate_cut"),
+    ("维持利率", "action_rate_hold"),
+    ("利率不变", "action_rate_hold"),
+    ("rate hold", "action_rate_hold"),
+    ("holds rates", "action_rate_hold"),
+    ("keeps policy rate", "action_rate_hold"),
+    ("holds policy rate", "action_rate_hold"),
+    ("rate unchanged", "action_rate_hold"),
+    ("unchanged", "action_rate_hold"),
+    ("据え置き", "action_rate_hold"),
+    ("维持政策利率", "action_rate_hold"),
+    ("利率上げ", "action_rate_hike"),
+    ("注资", "action_capital_injection"),
+    ("增资", "action_capital_injection"),
+    ("capital injection", "action_capital_injection"),
+    ("injects", "action_capital_injection"),
+    ("event decision", "action_decision"),
+    ("policy decision", "action_decision"),
+    ("decision", "action_decision"),
+    ("决议", "action_decision"),
+    ("会合", "action_decision"),
+    ("earthquake", "event_earthquake"),
+    ("地震", "event_earthquake"),
+    ("explosion", "event_explosion"),
+    ("爆炸", "event_explosion"),
+    ("resigns", "event_resignation"),
+    ("resignation", "event_resignation"),
+    ("辞职", "event_resignation"),
+    ("sanctions", "event_sanctions"),
+    ("制裁", "event_sanctions"),
+    ("ceasefire", "event_ceasefire"),
+    ("停火", "event_ceasefire"),
+    ("election", "event_election"),
+    ("选举", "event_election"),
+    ("大选", "event_election"),
+    ("tariff", "event_tariff"),
+    ("tariffs", "event_tariff"),
+    ("关税", "event_tariff"),
+)
+
+
+def _canonical_terms(value: Any) -> frozenset[str]:
+    """Return reviewed multi-word signals before they are split into tokens."""
+    return frozenset(
+        term
+        for term in re.findall(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", _canonicalize(value))
+        if term.startswith(("entity_", "action_", "event_", "policy_"))
+    )
+
+
+def _canonicalize(value: Any) -> str:
+    """Replace only reviewed cross-language aliases with stable signal terms."""
+    text = _text(value)
+    for alias, canonical in sorted(_MULTILINGUAL_ALIASES, key=lambda pair: len(pair[0]), reverse=True):
+        if all(ord(character) < 128 for character in alias):
+            pattern = rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])"
+        else:
+            pattern = re.escape(alias)
+        text = re.sub(pattern, f" {canonical} ", text)
+    return _SPACE_RE.sub(" ", text).strip()
 
 
 def generic_event_title(title: str) -> bool:
@@ -120,7 +258,7 @@ def _text(value: Any) -> str:
 
 
 def _tokens(value: str) -> frozenset[str]:
-    normalized = _text(value)
+    normalized = _canonicalize(value)
     raw = _TOKEN_RE.findall(normalized)
     result = {token for token in raw if token and token not in _STOPWORDS}
     cjk = "".join(token for token in raw if len(token) == 1 and ord(token) >= 0x3400)
@@ -132,7 +270,30 @@ def _tokens(value: str) -> frozenset[str]:
 
 
 def _numbers(item: Mapping[str, Any]) -> frozenset[str]:
-    return frozenset(_NUMBER_RE.findall(_text(f"{item.get('title', '')} {item.get('summary', '')}")))
+    """Return unit-normalized figures while preserving incompatible values."""
+    text = _text(f"{item.get('title', '')} {item.get('summary', '')}")
+    multipliers = {
+        "万亿元": Decimal("1e12"), "trillion": Decimal("1e12"), "tn": Decimal("1e12"),
+        "亿元": Decimal("1e8"), "billion": Decimal("1e9"), "bn": Decimal("1e9"), "十亿": Decimal("1e9"),
+        "亿": Decimal("1e8"), "million": Decimal("1e6"), "mn": Decimal("1e6"), "百万": Decimal("1e6"),
+        "万亿": Decimal("1e12"), "thousand": Decimal("1e3"),
+    }
+    values: set[str] = set()
+    for match in _NUMBER_RE.finditer(text):
+        try:
+            number = Decimal(match.group("number").replace(",", ""))
+        except InvalidOperation:
+            continue
+        unit = (match.group("unit") or "").replace("％", "%").lower().replace(" ", "")
+        if unit == "%":
+            values.add(f"pct:{number.normalize()}")
+        elif unit in {"bp", "bps", "basispoints", "basispoint", "基点", "个基点"}:
+            values.add(f"bp:{number.normalize()}")
+        elif unit in multipliers:
+            values.add(f"amount:{(number * multipliers[unit]).normalize()}")
+        else:
+            values.add(f"number:{number.normalize()}")
+    return frozenset(values)
 
 
 def _entities(item: Mapping[str, Any]) -> frozenset[str]:
@@ -140,18 +301,25 @@ def _entities(item: Mapping[str, Any]) -> frozenset[str]:
     if isinstance(attrs, Mapping):
         explicit = attrs.get("entities")
         if isinstance(explicit, (list, tuple, set)):
-            values = {_text(value) for value in explicit if str(value).strip()}
+            values = {_canonicalize(value) for value in explicit if str(value).strip()}
             if values:
-                return frozenset(values)
-    title = _text(item.get("title", ""))
+                return frozenset(values) | frozenset(
+                    term for term in _canonical_terms(
+                        f"{item.get('title', '')} {item.get('summary', '')}"
+                    ) if term.startswith("entity_")
+                )
+    title = _canonicalize(f"{item.get('title', '')} {item.get('summary', '')}")
     # Keep longer CJK runs as coarse entities.  This is intentionally light;
     # richer NER can be layered on later without changing this interface.
-    return frozenset(run for run in _CJK_RUN_RE.findall(title) if run not in _STOPWORDS)
+    return (
+        frozenset(run for run in _CJK_RUN_RE.findall(title) if run not in _STOPWORDS)
+        | frozenset(term for term in _canonical_terms(title) if term.startswith("entity_"))
+    )
 
 
 def _title_similarity(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
-    a = _text(left.get("title", ""))
-    b = _text(right.get("title", ""))
+    a = _canonicalize(left.get("title", ""))
+    b = _canonicalize(right.get("title", ""))
     if not a or not b:
         return 0.0
     if a == b:
@@ -161,6 +329,25 @@ def _title_similarity(left: Mapping[str, Any], right: Mapping[str, Any]) -> floa
     jaccard = len(ta & tb) / len(union) if union else 0.0
     sequence = SequenceMatcher(None, a, b, autojunk=False).ratio()
     return max(jaccard, sequence * 0.9)
+
+
+def _canonical_actions(item: Mapping[str, Any]) -> frozenset[str]:
+    return frozenset(
+        term for term in _canonical_terms(
+            f"{item.get('title', '')} {item.get('summary', '')}"
+        ) if term.startswith("action_")
+    )
+
+
+def _is_context_report(item: Mapping[str, Any]) -> bool:
+    text = _text(f"{item.get('title', '')} {item.get('summary', '')}")
+    markers = (
+        " after ", " following ", " reaction", " reacts ", " market ",
+        "上涨", "下跌", "反应", "之后", "受影响",
+    )
+    return str(item.get("source_tier", "")).lower() == "social" or any(
+        marker in f" {text} " for marker in markers
+    )
 
 
 def _region_compatible(left: str, right: str) -> bool:
@@ -191,6 +378,30 @@ def _pair_score(left: Mapping[str, Any], right: Mapping[str, Any], *, window: in
         number_overlap = 0.5
     region_score = 1.0 if _region_compatible(region_left, region_right) else 0.0
     score = 0.35 * title + 0.25 * entity_score + 0.15 * time_score + 0.15 * number_overlap + 0.10 * region_score
+    # A reviewed decisive action is a hard semantic boundary. Reports that
+    # share an institution but describe opposite policy directions remain
+    # sibling reports under separate events (for example, hike vs cut).
+    actions_left, actions_right = _canonical_actions(left), _canonical_actions(right)
+    decisive_left = {term for term in actions_left if term.startswith("action_rate_")}
+    decisive_right = {term for term in actions_right if term.startswith("action_rate_")}
+    if decisive_left and decisive_right and decisive_left.isdisjoint(decisive_right):
+        return 0.0, False
+    canonical_left = _canonical_terms(f"{left.get('title', '')} {left.get('summary', '')}")
+    canonical_right = _canonical_terms(f"{right.get('title', '')} {right.get('summary', '')}")
+    shared_canonical = canonical_left & canonical_right
+    shared_entities = _entities(left) & _entities(right)
+    if shared_canonical and (actions_left & actions_right or _is_context_report(left) or _is_context_report(right)):
+        score = max(
+            score,
+            min(
+                0.92,
+                0.42
+                + 0.28 * (len(shared_entities) / max(1, len(_entities(left) | _entities(right))))
+                + 0.12 * time_score
+                + 0.10 * region_score
+                + 0.10 * number_overlap,
+            ),
+        )
     semantic_left = identify_semantic_event(
         str(left.get("title", "")), str(left.get("summary", ""))
     )
@@ -208,10 +419,14 @@ def _pair_score(left: Mapping[str, Any], right: Mapping[str, Any], *, window: in
     elif semantic_left is not None and semantic_right is not None:
         return 0.0, False
     elif topic_left != topic_right and "general" not in {topic_left, topic_right}:
-        return 0.0, False
+        if not shared_entities or not (_is_context_report(left) or _is_context_report(right)):
+            return 0.0, False
     # Distinct figures in otherwise similar reports are retained as one event
     # with a contradiction marker, rather than silently replacing either fact.
-    contradictory = bool(nums_left and nums_right and not (nums_left & nums_right) and title >= 0.72 and entity_score >= 0.2)
+    contradictory = bool(
+        nums_left and nums_right and not (nums_left & nums_right)
+        and title >= 0.55 and entity_score >= 0.2
+    )
     if not shared_semantic and not _region_compatible(region_left, region_right) and title < 0.88:
         return 0.0, contradictory
     return min(1.0, score), contradictory
@@ -342,7 +557,38 @@ def cluster_events(
                 str(min(int(item.get("published_at", 0) or 0) for item in members) // 21600),
             ))
         else:
-            fingerprint = "|".join([_text(title), ",".join(topics), ",".join(regions), ",".join(entity_union)])
+            signal_sets = [
+                _tokens(f"{item.get('title', '')} {item.get('summary', '')}")
+                for item in members
+            ]
+            common_signals = (
+                set(signal_sets[0]).intersection(*signal_sets[1:])
+                if signal_sets
+                else set()
+            )
+            number_sets = [_numbers(item) for item in members]
+            common_numbers = (
+                set(number_sets[0]).intersection(*number_sets[1:])
+                if number_sets
+                else set()
+            )
+            canonical_sets = [
+                _canonical_terms(f"{item.get('title', '')} {item.get('summary', '')}")
+                for item in members
+            ]
+            common_canonical = (
+                set(canonical_sets[0]).intersection(*canonical_sets[1:])
+                if canonical_sets
+                else set()
+            )
+            stable_signals = sorted(
+                common_signals | common_canonical | common_numbers | set(entity_union)
+            )
+            if not stable_signals:
+                stable_signals = sorted(_tokens(title))[:24]
+            fingerprint = "|".join([
+                ",".join(stable_signals), ",".join(topics), ",".join(regions),
+            ])
             # Repeated headlines outside the time gate are separate events.
             # Persistent projection still reuses an already matched stable key.
             fingerprint += f"|{min(int(item.get('published_at', 0) or 0) for item in members) // 86400}"
@@ -444,6 +690,18 @@ def explain_event_match(left: Mapping[str, Any], right: Mapping[str, Any]) -> di
         "score": round(score, 4), "threshold": 0.57,
         "title_similarity": round(_title_similarity(left, right), 4),
         "shared_entities": sorted(_entities(left) & _entities(right))[:20],
+        "shared_canonical_signals": sorted(
+            _canonical_terms(f"{left.get('title', '')} {left.get('summary', '')}")
+            & _canonical_terms(f"{right.get('title', '')} {right.get('summary', '')}")
+        )[:20],
+        "left_canonical_actions": sorted(
+            term for term in _canonical_terms(f"{left.get('title', '')} {left.get('summary', '')}")
+            if term.startswith("action_rate_")
+        ),
+        "right_canonical_actions": sorted(
+            term for term in _canonical_terms(f"{right.get('title', '')} {right.get('summary', '')}")
+            if term.startswith("action_rate_")
+        ),
         "shared_numbers": sorted(_numbers(left) & _numbers(right))[:20],
         "time_distance_hours": round(abs(a - b) / 3600, 2),
         "semantic_identity": bool(first and second and first.compatible(second, a, b)),
