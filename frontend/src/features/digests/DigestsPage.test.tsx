@@ -29,7 +29,8 @@ describe('DigestsPage', () => {
         { report_id: 'r1', source_tier: 'primary', relation: 'primary', source_id: 'official', url: 'https://example.com/official', title: '官方公告' },
         { report_id: 'r2', source_tier: 'secondary', relation: 'corroborates', source_id: 'wire', url: 'https://example.com/wire', title: '媒体报道' },
         { report_id: 'r3', source_tier: 'social', relation: 'context', source_id: 'social', url: 'https://example.com/social', title: '社交讨论' },
-      ] }], coverage: [] } }),
+        { report_id: 'r4', source_tier: 'primary', relation: 'updates', source_id: 'official', is_representative: true, url: 'https://example.com/update', title: '官方更新' },
+      ] }], coverage: [{ source_id: 'official', status: 'covered', observation_count: 2 }, { source_id: 'wire', status: 'quiet', observation_count: 0 }] } }),
     } as unknown as AdminApi
     render(<DigestsPage api={api} onUnauthorized={vi.fn()} />)
     await waitFor(() => expect(screen.getByText('事件日报')).toBeInTheDocument())
@@ -40,5 +41,8 @@ describe('DigestsPage', () => {
     expect(screen.getByText('社交/热度')).toBeInTheDocument()
     expect(screen.getByText('交叉印证')).toBeInTheDocument()
     expect(screen.getAllByRole('link')).toHaveLength(3)
+    expect(screen.getByTitle('官方更新')).toHaveAttribute('href', 'https://example.com/update')
+    expect(screen.queryByTitle('官方公告')).not.toBeInTheDocument()
+    expect(screen.getByText(/来源覆盖：2\/2 正常/)).toBeInTheDocument()
   })
 })

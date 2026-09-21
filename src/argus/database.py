@@ -21,7 +21,9 @@ from .content import (
     ContentFetchWorkItem,
     ContentLevel,
 )
-from .digest import DigestCluster, DigestDocument, DigestRetryState, SourceCoverage
+from .digest import (
+    DIGEST_RETRY_INTERVAL_SECONDS, DigestCluster, DigestDocument, DigestRetryState, SourceCoverage,
+)
 from .event_clustering import cluster_events, event_aggregate_score, event_evidence_score
 from .event_identity import identify_semantic_event
 from .events import (
@@ -4609,29 +4611,23 @@ class Database:
             return self._insert_alert(candidate, None, now)
 
     def start_digest_retry(
-        self, digest_key: str, fallback_version: int, now: int, retry_deadline_at: int
+        self, digest_key: str, fallback_version: int, now: int, retry_deadline_at: int,
+        *, last_error: str | None = None,
     ) -> DigestRetryState:
         if not digest_key or fallback_version < 1 or now < 0 or retry_deadline_at < now:
             raise ValueError("digest retry start request is invalid")
-        next_attempt_at = min(retry_deadline_at, now + 4500)
+        next_attempt_at = min(retry_deadline_at, now + DIGEST_RETRY_INTERVAL_SECONDS)
         with self.unit_of_work():
             self.connection.execute(
                 """
                 INSERT INTO digest_retry_state(
                     digest_key, fallback_version, attempts, next_attempt_at,
                     retry_deadline_at, status, last_error, started_at, updated_at
-                ) VALUES (?, ?, 1, ?, ?, 'pending', NULL, ?, ?)
-                ON CONFLICT(digest_key) DO UPDATE SET
-                    fallback_version = excluded.fallback_version,
-                    attempts = 1,
-                    next_attempt_at = excluded.next_attempt_at,
-                    retry_deadline_at = excluded.retry_deadline_at,
-                    status = 'pending',
-                    last_error = NULL,
-                    started_at = excluded.started_at,
-                    updated_at = excluded.updated_at
+                ) VALUES (?, ?, 1, ?, ?, 'pending', ?, ?, ?)
+                ON CONFLICT(digest_key) DO NOTHING
                 """,
-                (digest_key, fallback_version, next_attempt_at, retry_deadline_at, now, now),
+                (digest_key, fallback_version, next_attempt_at, retry_deadline_at,
+                 sanitize_error(last_error)[:1000] if last_error else None, now, now),
             )
         state = self.get_digest_retry(digest_key)
         assert state is not None

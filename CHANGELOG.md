@@ -5,6 +5,30 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-09-21
+
+### Fixed
+
+- Recombine duplicate stable event identities at the digest event-pool boundary
+  before adaptive selection and database publication, preserving reports and
+  retaining same-source updates alongside their representative link.
+- Place all four AI retries inside the five-hour window, anchored at hourly
+  offsets so polling jitter does not lose the final retry. Expiry no longer
+  invents an inference attempt and retry reconstruction preserves the deadline.
+- Route invalid summarizer output through algorithmic fallback and durable
+  retries; validate local evidence before reserving inference budget.
+- Recover notifications and AI retry acknowledgement after a publication crash,
+  retain the initial failure reason, prevent retry-window resets, and emit the
+  consecutive-failure notification only at the third failed day.
+- Keep one representative link per source in the digest reader while retaining
+  all evidence updates, and count covered/quiet sources as healthy.
+
+### Documentation
+
+- Add an implementation roadmap with verified baseline, staged acceptance
+  criteria, current progress and explicit remaining work; correct the historical
+  duplicate-key incident timeline.
+
 ## [0.20.0] - 2026-09-17
 
 ### Fixed

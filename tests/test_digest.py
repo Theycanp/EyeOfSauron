@@ -20,6 +20,7 @@ from argus.digest import (
     DigestScheduler,
     adaptive_digest_item_count,
 )
+from argus.events import EventListItem, PersistedEvent, PersistedEventReport
 
 
 START = 1_788_307_200
@@ -128,6 +129,41 @@ class FakeDigestRepository:
 
 
 class DigestDomainTests(unittest.TestCase):
+
+    def test_event_pool_duplicate_identity_is_recombined_before_selection(self) -> None:
+        event = PersistedEvent(
+            event_key="event-duplicate", fingerprint="fingerprint",
+            title="同一事件", summary="同一事件摘要", score=4.0,
+            importance=4, urgency=3, relevance=4, confidence=0.9,
+            first_seen_at=100, last_seen_at=200,
+            regions=("EAST_ASIA",), topics=("policy",),
+            created_at=100, updated_at=200,
+        )
+
+        def report(observation_id: int, source_id: str, published_at: int) -> PersistedEventReport:
+            return PersistedEventReport(
+                event_key=event.event_key, observation_id=observation_id,
+                source_id=source_id, publisher=source_id, source_tier="primary",
+                relation="primary", match_score=0.95, is_representative=True,
+                published_at=published_at, title="同一事件", summary="摘要",
+                url=f"https://example.test/{observation_id}", created_at=published_at,
+            )
+
+        page_items = (
+            EventListItem(event=event, reports=(report(1, "source-a", 100),), report_count=1),
+            EventListItem(event=event, reports=(report(2, "source-b", 200), report(3, "source-a", 150)), report_count=2),
+        )
+        builder = DigestBuilder(FakeDigestRepository([]))
+        clusters = builder._clusters_from_event_pool(page_items)
+
+        self.assertEqual(1, len(clusters))
+        self.assertEqual(event.event_key, clusters[0].cluster_key)
+        self.assertEqual((1, 2, 3), clusters[0].observation_ids)
+        self.assertEqual(("source-a", "source-b"), clusters[0].source_ids)
+        self.assertEqual(3, len(clusters[0].reports))
+        self.assertEqual(("https://example.test/3", "https://example.test/2"), clusters[0].links)
+        self.assertEqual(clusters, builder._clusters_from_event_pool(tuple(reversed(page_items))))
+
     def _cluster(self, score: float, *, handling: str = "digest", key: str = "x") -> DigestCluster:
         return DigestCluster(
             cluster_key=f"{key}-{score}", title="主题", summary="摘要", score=score,

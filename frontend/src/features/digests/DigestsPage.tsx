@@ -15,8 +15,16 @@ function reportTier(report: DigestReport): ReportView['tier'] {
 
 function representativeReports(item: DigestItem): ReportView[] {
   if (item.reports?.length) {
-    return item.reports
-      .filter((report) => Boolean(report.url))
+    const bySource = new Map<string, DigestReport>()
+    for (const report of item.reports) {
+      if (!report.url) continue
+      const key = report.source_id || report.url
+      const previous = bySource.get(key)
+      if (!previous || Number(Boolean(report.is_representative)) > Number(Boolean(previous.is_representative)) ||
+        (Boolean(report.is_representative) === Boolean(previous.is_representative) &&
+         Number(report.published_at || 0) > Number(previous.published_at || 0))) bySource.set(key, report)
+    }
+    return [...bySource.values()]
       .map((report) => ({
         link: report.url as string,
         tier: reportTier(report),
@@ -88,7 +96,7 @@ export function DigestsPage({ api, onUnauthorized, initialKey }: DigestsPageProp
 
 function DigestReader({ digest, onBack }: { digest: DigestDetail; onBack: () => void }) {
   const coverage = digest.coverage || []
-  const healthySources = coverage.filter((item) => item.status === 'ok' || item.status === 'healthy').length
+  const healthySources = coverage.filter((item) => ['covered', 'quiet', 'ok', 'healthy'].includes(item.status)).length
   return <article className="digest-reader">
     <header className="digest-reader-header"><button className="button subtle" onClick={onBack}><ArrowLeft size={16} />返回日报</button><div><span className="eyebrow">{digest.digest_key} · v{digest.version}</span><h2>{digest.title}</h2><p style={{ whiteSpace: 'pre-wrap' }}>{digest.summary}</p><div className="digest-meta"><span>{formatDate(digest.period_end)}</span><span>{digest.item_count} 条重点</span><span>{digest.source_count} 个来源</span></div></div></header>
     <section className="digest-items">{(digest.items || []).map((item, itemIndex) => {
