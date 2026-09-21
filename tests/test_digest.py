@@ -164,6 +164,26 @@ class DigestDomainTests(unittest.TestCase):
         self.assertEqual(("https://example.test/3", "https://example.test/2"), clusters[0].links)
         self.assertEqual(clusters, builder._clusters_from_event_pool(tuple(reversed(page_items))))
 
+    def test_event_editorial_exclusion_is_applied_before_digest_selection(self) -> None:
+        event = PersistedEvent(
+            event_key="editorial-excluded", fingerprint="fingerprint",
+            title="被排除事件", summary="摘要", score=5.0,
+            importance=5, urgency=4, relevance=4, confidence=0.9,
+            first_seen_at=100, last_seen_at=200, regions=("EAST_ASIA",),
+            topics=("policy",), created_at=100, updated_at=200,
+        )
+        report = PersistedEventReport(
+            event_key=event.event_key, observation_id=1, source_id="source-a",
+            publisher="source-a", source_tier="primary", relation="primary",
+            match_score=0.95, is_representative=True, published_at=100,
+            title=event.title, summary=event.summary, url="https://example.test/1",
+            created_at=100,
+        )
+        repository = FakeDigestRepository([])
+        repository.get_event_digest_choices = lambda keys: {"editorial-excluded": "exclude"}  # type: ignore[attr-defined]
+        builder = DigestBuilder(repository)
+        self.assertEqual((), builder._clusters_from_event_pool((EventListItem(event=event, reports=(report,), report_count=1),)))
+
     def _cluster(self, score: float, *, handling: str = "digest", key: str = "x") -> DigestCluster:
         return DigestCluster(
             cluster_key=f"{key}-{score}", title="主题", summary="摘要", score=score,

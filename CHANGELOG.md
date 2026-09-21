@@ -5,6 +5,27 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-21
+
+### Added
+
+- Add bounded digest generation attempt history, provider trace metadata, durable
+  retry controls, sanitized errors, and an authenticated idempotent “retry now”
+  operation.
+- Add source health diagnostics that separate collector availability, retained
+  ingestion, full-text coverage, content failures, and long-term quality audits.
+- Add event lifecycle management, matching evidence, account preferences, global
+  digest include/exclude choices, audited merge/split review, and responsive daily
+  event workbench controls.
+- Add content enrichment outcomes, rights-aware fallback display, and persistent
+  host backoff for repeated blocked or transient document fetches.
+
+### Changed
+
+- Digest selection now consumes event editorial choices: global exclusions remove
+  candidates and inclusions receive priority while the existing time window,
+  adaptive count, source policy, and hard limit remain authoritative.
+
 ## [0.20.1] - 2026-09-21
 
 ### Fixed

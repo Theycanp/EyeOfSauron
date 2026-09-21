@@ -243,11 +243,17 @@ class SQLiteEventWorkspace:
                     (json.dumps(identifiers),),
                 ).fetchall()
                 for preference in preferences:
+                    target_preference = self.connection.execute(
+                        "SELECT is_read,ignored FROM event_preferences WHERE event_id=? AND actor=?",
+                        (target_id, preference["actor"]),
+                    ).fetchone()
                     self.connection.execute(
                         "INSERT INTO event_preferences(event_id,actor,is_read,followed,ignored,updated_at) VALUES(?,?,?,?,?,?) "
                         "ON CONFLICT(event_id,actor) DO UPDATE SET is_read=excluded.is_read,followed=excluded.followed,ignored=excluded.ignored,updated_at=excluded.updated_at",
-                        (target_id, preference["actor"], preference["is_read"] if preference["members"] == len(identifiers) else 0,
-                         preference["followed"], preference["ignored"] if preference["members"] == len(identifiers) else 0, now),
+                        (target_id, preference["actor"],
+                         preference["is_read"] if preference["members"] == len(identifiers) else (target_preference["is_read"] if target_preference is not None else 0),
+                         preference["followed"],
+                         preference["ignored"] if preference["members"] == len(identifiers) else (target_preference["ignored"] if target_preference is not None else 0), now),
                     )
                 choices = preview["digest_choices"]
                 if choices:

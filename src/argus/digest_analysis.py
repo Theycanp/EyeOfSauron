@@ -36,17 +36,20 @@ class ApiDigestSummarizer:
         self.last_attempts = []
         failures: list[str] = []
         for client in self.clients:
-            prompt = client.prompt or get_prompt(client.settings.prompt_id, client.settings.prompt_version)
             record: dict[str, object] = {
                 "provider": urlsplit(client.settings.base_url).hostname or "unknown",
                 "model": client.settings.model,
-                "prompt_id": prompt.prompt_id, "prompt_version": prompt.version,
-                "prompt_hash": hashlib.sha256(prompt.system_text.encode()).hexdigest(),
                 "status": "running",
             }
             started = time.monotonic()
             self.last_attempts.append(record)
             try:
+                prompt = client.prompt or get_prompt(client.settings.prompt_id, client.settings.prompt_version)
+                record.update(
+                    prompt_id=prompt.prompt_id,
+                    prompt_version=prompt.version,
+                    prompt_hash=hashlib.sha256(prompt.system_text.encode()).hexdigest(),
+                )
                 result = self._summarize_with(client, digest)
                 record["status"] = "succeeded"
                 return result

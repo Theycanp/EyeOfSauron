@@ -14,13 +14,14 @@ Start here:
 4. `DATA.md` — SQLite ownership, schema, migrations, retention, and backup.
 5. `SOURCES.md` — source catalog policy, activation, first-run behavior, and the
    current reviewed source set.
-6. `REPRODUCTION.md` — build a fresh instance from source and verify it.
-7. `OPERATIONS.md` — day-two commands, admin operation, deployment, and recovery.
-8. `EVENTS.md` — event-centric data model, clustering, report relationships, and
+6. `CONTENT.md` — 正文抓取、版权边界、失败降级、域名退避和任务诊断。
+7. `REPRODUCTION.md` — build a fresh instance from source and verify it.
+8. `OPERATIONS.md` — day-two commands, admin operation, deployment, and recovery.
+9. `EVENTS.md` — event-centric data model, clustering, report relationships, and
    the staged migration from legacy digest clusters.
-9. `WORKFLOW.md` — the required implementation, documentation, PR, deployment,
+10. `WORKFLOW.md` — the required implementation, documentation, PR, deployment,
    and production-acceptance checklist for every substantive update.
-10. `ROADMAP.md` — current production findings, staged improvements, ownership
+11. `ROADMAP.md` — current production findings, staged improvements, ownership
     boundaries, and acceptance criteria.
 
 Reference documents:
