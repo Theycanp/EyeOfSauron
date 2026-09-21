@@ -51,11 +51,12 @@ from .models import (
 from .rules import RuleSet
 from .reminders import ReminderError, ReminderSpec, next_daily_occurrence
 from .source_quality import SourceQualityPolicy, calculate_quality
+from .sqlite_event_workspace import SQLiteEventWorkspace, migrate_event_workspace
 from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 
 def read_active_config(path: Path) -> dict[str, Any] | None:
@@ -1330,6 +1331,9 @@ class Database:
                 self.connection.rollback()
                 raise
             version = 17
+
+        if version < 18:
+            migrate_event_workspace(self)
 
     def close(self) -> None:
         self.connection.close()
@@ -3965,10 +3969,49 @@ class Database:
             raise ValueError("event candidate limit is out of range")
         rows = self.connection.execute(
             "SELECT * FROM events WHERE last_seen_at >= ? AND first_seen_at < ? "
+            "AND id NOT IN (SELECT event_id FROM event_aliases) "
             "ORDER BY last_seen_at DESC, id DESC LIMIT ?",
             (since, until, limit),
         )
         return [self._event_from_row(row) for row in rows]
+
+    def maintain_event_lifecycle(self, *, now: int, limit: int = 500) -> int:
+        return SQLiteEventWorkspace(self).maintain_event_lifecycle(now=now, limit=limit)
+
+    def get_event_digest_choices(self, event_keys: Sequence[str]) -> dict[str, str]:
+        return SQLiteEventWorkspace(self).get_event_digest_choices(event_keys)
+
+    def event_workspace_state(self, event_keys: Sequence[str], actor: str) -> dict[str, Any]:
+        return SQLiteEventWorkspace(self).event_workspace_state(event_keys, actor)
+
+    def set_event_preference(self, event_key: str, actor: str, *, read: bool,
+                             followed: bool, ignored: bool, now: int) -> None:
+        SQLiteEventWorkspace(self).set_event_preference(event_key, actor, read=read, followed=followed, ignored=ignored, now=now)
+
+    def set_event_digest_choice(self, event_key: str, choice: str, *, actor: str,
+                                reason: str, now: int) -> None:
+        SQLiteEventWorkspace(self).set_event_digest_choice(event_key, choice, actor=actor, reason=reason, now=now)
+
+    def preview_event_repair(self, action: str, event_keys: Sequence[str], *,
+                             observation_ids: Sequence[int] = ()) -> dict[str, Any]:
+        with self.unit_of_work(immediate=False):
+            return SQLiteEventWorkspace(self).preview_event_repair(action, event_keys, observation_ids=observation_ids)
+
+    def apply_event_repair(self, action: str, event_keys: Sequence[str], *,
+                           observation_ids: Sequence[int], expected_revision: str,
+                           actor: str, reason: str, now: int) -> str:
+        return SQLiteEventWorkspace(self).apply_event_repair(action, event_keys, observation_ids=observation_ids,
+                                                            expected_revision=expected_revision, actor=actor, reason=reason, now=now)
+
+    def list_event_audit(self, event_key: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        return SQLiteEventWorkspace(self).list_event_audit(event_key, limit=limit)
+
+    def canonical_event_key(self, event_key: str) -> str:
+        row = self.connection.execute(
+            "SELECT target.event_key FROM event_aliases a JOIN events old ON old.id=a.event_id "
+            "JOIN events target ON target.id=a.target_id WHERE old.event_key=?", (event_key,),
+        ).fetchone()
+        return str(row[0]) if row is not None else event_key
 
     @staticmethod
     def _event_cursor(payload: Mapping[str, Any]) -> str:
@@ -3988,7 +4031,7 @@ class Database:
             raise ValueError("event cursor is invalid") from exc
         if not isinstance(value, dict) or value.get("sort") != sort:
             raise ValueError("event cursor does not match sort order")
-        expected = {"sort", "since", "until", "report_max", "alert_max", "last", "id"}
+        expected = {"sort", "since", "until", "report_max", "alert_max", "last", "id", "audit_max"}
         if sort == "importance":
             expected |= {"importance", "score"}
         integer_keys = expected - {"sort", "score"}
@@ -4118,6 +4161,9 @@ class Database:
             nullcontext() if self.connection.in_transaction else self.unit_of_work(immediate=False)
         )
         with transaction:
+            audit_max = int(self.connection.execute("SELECT COALESCE(MAX(id),0) FROM event_review_audit WHERE action IN ('merge','split')").fetchone()[0])
+            if anchor is not None and anchor["audit_max"] != audit_max:
+                raise ValueError("事件归属已人工调整，请刷新列表后继续翻页")
             if anchor is None:
                 high_water = self.connection.execute(
                     "SELECT (SELECT COALESCE(MAX(id), 0) FROM event_reports) AS report_max, "
@@ -4126,6 +4172,7 @@ class Database:
                 params.update(
                     report_max=int(high_water["report_max"]),
                     alert_max=int(high_water["alert_max"]),
+                    audit_max=audit_max,
                 )
             rows = list(self.connection.execute(
                 f"{window_sql} SELECT * FROM window_events{where} ORDER BY {order} LIMIT :limit",
@@ -4185,6 +4232,7 @@ class Database:
             values: dict[str, Any] = {
                 "sort": sort, "since": since, "until": until,
                 "report_max": params["report_max"], "alert_max": params["alert_max"],
+                "audit_max": params["audit_max"],
                 "last": int(last["last_seen_at"]), "id": int(last["id"])
             }
             if sort == "importance":
@@ -4320,6 +4368,8 @@ class Database:
             ).fetchone()
             if assigned is not None:
                 return self._event_report_from_row(assigned)
+            if self.canonical_event_key(event.event_key) != event.event_key:
+                raise ValueError("event was merged during projection; retry with current candidates")
             self._save_event(event)
             saved = self._save_event_report(report)
             self.connection.execute(
@@ -4937,7 +4987,11 @@ class Database:
                             "(SELECT value FROM json_each(?)) ORDER BY er.published_at DESC, er.id DESC",
                             (int(item["event_id"]), str(item["observation_ids_json"])),
                         )
-                        frozen_reports = [self._event_report_from_row(report) for report in report_rows]
+                        frozen_reports = (
+                            [PersistedEventReport(**report) for report in json.loads(item["event_reports_json"])]
+                            if item["event_reports_json"] is not None
+                            else [self._event_report_from_row(report) for report in report_rows]
+                        )
                         representative_sources: set[str] = set()
                         reconstructed = []
                         for report in frozen_reports:

@@ -24,6 +24,11 @@ import type {
   SourceHealth,
   SourceQualityAudit,
   SourceTestResult,
+  EventWorkspaceState,
+  EventReviewDetail,
+  EventRepairRequest,
+  EventRepairPreview,
+  EventQuality,
 } from './types'
 
 type ApiErrorPayload = {
@@ -184,6 +189,20 @@ export class AdminApi {
     return this.request(`/api/news-events?${query}`, { signal: options.signal })
   }
   prompts(): Promise<PromptResponse> { return this.request('/api/prompts') }
+  eventQuality(hours: number): Promise<EventQuality> { return this.request(`/api/news-events/quality?hours=${hours}`) }
+  eventReview(key: string): Promise<EventReviewDetail> { return this.request(`/api/news-events/${encodeURIComponent(key)}`) }
+  eventPreference(key: string, state: EventWorkspaceState): Promise<{ state: EventWorkspaceState }> {
+    return this.request(`/api/news-events/${encodeURIComponent(key)}/preference`, { method: 'POST', body: JSON.stringify(state) })
+  }
+  eventDigestChoice(key: string, choice: EventWorkspaceState['digest_choice'], reason: string): Promise<{ state: EventWorkspaceState }> {
+    return this.request(`/api/news-events/${encodeURIComponent(key)}/digest-choice`, { method: 'POST', body: JSON.stringify({ choice, reason }) })
+  }
+  previewEventRepair(body: EventRepairRequest): Promise<EventRepairPreview> {
+    return this.request('/api/news-events/repair/preview', { method: 'POST', body: JSON.stringify(body) })
+  }
+  applyEventRepair(body: EventRepairRequest & { expected_revision: string; reason: string }): Promise<{ event_key: string }> {
+    return this.request('/api/news-events/repair/apply', { method: 'POST', body: JSON.stringify(body) })
+  }
   sourceQuality(): Promise<SourceQualityResponse> { return this.request('/api/source-quality') }
   sourceHealth(sourceId: string, signal?: AbortSignal): Promise<{ health: SourceHealth }> {
     return this.request(`/api/source-health/${encodeURIComponent(sourceId)}`, { signal })

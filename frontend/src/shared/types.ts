@@ -563,6 +563,59 @@ export interface NewsEvent extends JsonRecord {
   handling?: 'digest' | 'immediate'
   created_at?: number
   updated_at?: number
+  workspace?: EventWorkspaceState
+}
+
+export interface EventWorkspaceState {
+  read: boolean
+  followed: boolean
+  ignored: boolean
+  digest_choice: 'auto' | 'include' | 'exclude'
+  digest_reason?: string
+}
+
+export interface EventMatchEvidence {
+  score: number
+  title_similarity: number
+  shared_entities: string[]
+  shared_numbers: string[]
+  time_distance_hours: number
+  semantic_identity: boolean
+  generic_title: boolean
+  possible_numeric_conflict: boolean
+}
+
+export interface EventReviewDetail {
+  event_key: string
+  requested_key: string
+  reports: Array<NewsEventReport & { evidence: EventMatchEvidence }>
+  reports_truncated: boolean
+  audit: Array<{ id: number; action: string; actor: string; reason: string; created_at: number }>
+  state: EventWorkspaceState
+}
+
+export interface EventRepairRequest {
+  action: 'merge' | 'split'
+  event_keys: string[]
+  observation_ids?: number[]
+}
+
+export interface EventRepairPreview extends EventRepairRequest {
+  revision: string
+  reports: NewsEventReport[]
+  warning: string
+  comparisons: Array<EventMatchEvidence & { observation_id: number }>
+}
+
+export interface EventQuality {
+  event_count: number
+  report_count: number
+  single_publisher_events: number
+  multi_publisher_events: number
+  generic_title_events: number
+  sample_truncated: boolean
+  interpretation: string
+  repeated_titles: Array<{ title: string; events: number }>
 }
 
 export interface NewsEventResponse {

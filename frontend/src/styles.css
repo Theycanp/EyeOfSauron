@@ -1065,6 +1065,17 @@ input:disabled { background: var(--surface-soft); color: var(--text-faint); }
 .daily-event-report a:hover { text-decoration: underline; }
 .daily-event-no-reports { margin: 0; padding: 16px; color: var(--text-faint); text-align: center; }
 .daily-events-more { display: flex; justify-content: center; margin-top: 15px; }
+.event-review-panel, .event-quality-summary { margin-bottom: 16px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface-raised); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.event-review-panel .page-actions { flex-wrap: wrap; gap: 8px; }
+.event-editorial { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.event-editorial label { display: grid; gap: 4px; min-width: 0; flex: 1 1 160px; }
+.event-editorial p { flex-basis: 100%; }
+.event-editorial input, .event-editorial select { width: 100%; min-width: 0; }
+.event-match-row { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.event-match-row input, .event-select input { flex: 0 0 auto; width: 16px; height: 16px; }
+.event-match-row > div { min-width: 0; }
+.event-select { display: flex; align-items: center; gap: 8px; padding: 8px; color: var(--text-soft); font-size: 12px; overflow-wrap: anywhere; }
+.event-repair-evidence { max-height: 40vh; overflow: auto; overflow-wrap: anywhere; }
 
 @media (max-width: 680px) {
   .daily-events-heading { align-items: flex-start; }

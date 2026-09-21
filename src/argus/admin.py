@@ -17,7 +17,8 @@ from . import __version__
 from .auth import AdminAuth, AuthContext, AuthError, LoginBlockedError
 from .config import AdminConfig, ConfigError, _parse_analysis, _parse_digest, _parse_rule, _parse_source
 from .digest import DigestDocument
-from .events import EventListItem
+from .events import EventListItem, EventWorkspaceConflict, event_lifecycle
+from .event_review import event_match_evidence, event_quality
 from .manual_events import ManualEventError, parse_manual_event
 from .news_catalog import NEWS_SOURCE_CATALOG
 from .persistence import ControlPlaneRepository, ManagedConfigRepository, RevisionConflictError
@@ -656,7 +657,7 @@ def _news_event_payload(item: EventListItem) -> dict[str, Any]:
         "last_seen_at": event.last_seen_at,
         "regions": list(event.regions),
         "topics": list(event.topics),
-        "status": event.status,
+        "status": event_lifecycle(event.last_seen_at, int(time.time())),
         "independent_source_count": event.independent_source_count,
         "report_count": item.report_count,
         "reports_truncated": item.reports_truncated,
@@ -758,6 +759,8 @@ def make_handler(
                 return "reminders:write"
             if path == "/api/events":
                 return "events:write"
+            if path.startswith("/api/news-events/"):
+                return "read" if not path.endswith(("/preference", "/digest-choice", "/repair/preview", "/repair/apply")) else "events:write"
             if path.startswith("/api/source-quality"):
                 return "quality:write"
             if path.startswith(("/api/outbox", "/api/jobs")):
@@ -951,6 +954,27 @@ def make_handler(
                 source_id = urllib.parse.unquote(path[len("/api/source-quality/") : -len("/audit")]).strip("/")
                 self._json(HTTPStatus.OK, {"source_id": source_id, "audit": database.list_source_quality_audit(source_id)})
                 return
+            if path == "/api/news-events/quality":
+                try:
+                    hours = int(query.get("hours", ["28"])[0])
+                    if not 1 <= hours <= 720:
+                        raise ValueError("event window must be between 1 and 720 hours")
+                    now = int(time.time())
+                    self._json(HTTPStatus.OK, event_quality(database, since=max(0, now-hours*3600), until=now+1))
+                except ValueError as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), "code": "invalid_query"})
+                return
+            if path.startswith("/api/news-events/"):
+                event_key = urllib.parse.unquote(path[len("/api/news-events/"):])
+                try:
+                    canonical = database.canonical_event_key(event_key)
+                    detail = event_match_evidence(database, canonical)
+                    self._json(HTTPStatus.OK, {**detail, "event_key": canonical, "requested_key": event_key,
+                                             "audit": database.list_event_audit(event_key),
+                                             "state": database.event_workspace_state([canonical], self._actor()).get(canonical, {})})
+                except ValueError as exc:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": str(exc), "code": "not_found"})
+                return
             if path == "/api/news-events":
                 try:
                     hours = int(query.get("hours", ["28"])[0])
@@ -980,7 +1004,9 @@ def make_handler(
                 self._json(
                     HTTPStatus.OK,
                     {
-                        "events": [_news_event_payload(item) for item in page.items],
+                        "events": [{**_news_event_payload(item), "workspace": state.get(item.event.event_key, {})}
+                                   for state in [database.event_workspace_state([item.event.event_key for item in page.items], self._actor())]
+                                   for item in page.items],
                         "window": {
                             "hours": hours,
                             "since": page.window_since,
@@ -1188,6 +1214,36 @@ def make_handler(
                     return
                 expected_revision = self._expected_revision()
                 actor = self._actor()
+                if path in {"/api/news-events/repair/preview", "/api/news-events/repair/apply"}:
+                    action = data.get("action")
+                    keys = data.get("event_keys")
+                    identifiers = data.get("observation_ids", [])
+                    if (not isinstance(action, str) or not isinstance(keys, list)
+                            or not all(isinstance(key, str) for key in keys)
+                            or not isinstance(identifiers, list) or not all(type(value) is int for value in identifiers)):
+                        raise ValueError("event repair selection is invalid")
+                    if path.endswith("/preview"):
+                        self._json(HTTPStatus.OK, database.preview_event_repair(action, keys, observation_ids=identifiers))
+                    else:
+                        revision, reason = data.get("expected_revision"), data.get("reason")
+                        if not isinstance(revision, str) or not isinstance(reason, str):
+                            raise ValueError("preview revision and reason are required")
+                        key = database.apply_event_repair(action, keys, observation_ids=identifiers,
+                                                          expected_revision=revision, actor=actor, reason=reason, now=int(time.time()))
+                        self._json(HTTPStatus.OK, {"event_key": key, "changed": True})
+                    return
+                if path.startswith("/api/news-events/") and path.endswith(("/preference", "/digest-choice")):
+                    key, command = urllib.parse.unquote(path[len("/api/news-events/"):]).rsplit("/", 1)
+                    if command == "preference":
+                        database.set_event_preference(key, actor, read=data.get("read"), followed=data.get("followed"),
+                                                      ignored=data.get("ignored"), now=int(time.time()))
+                    else:
+                        choice, reason = data.get("choice"), data.get("reason")
+                        if not isinstance(choice, str) or not isinstance(reason, str):
+                            raise ValueError("digest choice and reason are required")
+                        database.set_event_digest_choice(key, choice, actor=actor, reason=reason, now=int(time.time()))
+                    self._json(HTTPStatus.OK, {"state": database.event_workspace_state([key], actor)[key]})
+                    return
                 if path == "/api/auth/logout":
                     if self.auth_context.session_hash:
                         database.revoke_admin_session(self.auth_context.session_hash, int(time.time()))
@@ -1431,6 +1487,8 @@ def make_handler(
                     self._json(HTTPStatus.OK, {"changed": changed})
                     return
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found", "code": "not_found"})
+            except EventWorkspaceConflict as exc:
+                self._json(HTTPStatus.CONFLICT, {"error": str(exc), "code": "event_revision_conflict"})
             except RevisionConflictError as exc:
                 self._json(HTTPStatus.CONFLICT, {"error": str(exc), "code": "revision_conflict"})
             except LoginBlockedError as exc:

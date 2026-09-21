@@ -171,6 +171,21 @@ event_timeline
 旧版 `DigestCluster` 字段仍保留用于兼容历史日报。事件表的内部整数主键只存在
 于 SQLite 适配器，业务代码和 API 使用稳定 `event_key`。
 
+## 事件质量批次（schema 18）
+
+事件页现在提供边界清楚的质量抽样和人工工作台：
+
+- `GET /api/news-events/quality?hours=28` 只读取最多 1000 个窗口事件，报告单出版方比例、多个出版方覆盖、泛化栏目标题和重复标题线索。单一来源比例反映当前覆盖，不等于误聚类率；没有人工标注集时不输出伪精确的准确率。
+- 事件详情显示当前规则重放证据：标题相似度、共享实体/数字、时间距离、明确语义身份和原始 `match_score`。当前重放不是历史决策的替代，不能把分数当成概率。
+- `POST /api/news-events/<key>/preference` 是账户范围的已读、关注和忽略；它不会改变信源、即时通知或全局日报。
+- `POST /api/news-events/<key>/digest-choice` 是全局、审计化的 `auto` / `include` / `exclude`；日报 reader 通过 `get_event_digest_choices(keys)` 获取选择。`include` 仍服从时间窗、启用来源、权限、动态数量和硬上限；个人忽略不影响日报。
+- 合并/拆分必须先 `POST /api/news-events/repair/preview`，再携带证据 revision 和人工原因调用 `/repair/apply`。操作保留 Observation、通知和日报 ID，保存旧日报所引用的 `reports` JSON 快照，创建旧事件到目标事件的 alias，并写入审计。存在 Claim、报告关联 Timeline、冲突日报选择或证据超过安全上限时拒绝。
+- 分页游标包含人工调整高水位；事件归属变动后旧游标要求刷新，避免把旧页面误当作一致快照。
+
+事件自动生命周期每分钟有界维护：最后一篇报道距现在超过 28 小时进入 `quiet`，超过 7 天进入 `closed`；迟到且通过匹配的新报道会重新打开事件。状态基于报道发布时间，因此历史回填不会把旧事件显示为实时活跃。
+
+schema 18 的 SQLite 适配器只新增 `event_preferences`、`event_editorial`、`event_aliases`、`event_review_audit*` 及日报报道快照列；业务通过 `EventWorkspaceRepository` 和 `EventEditorialRepository`，不直接依赖 SQLite。
+
 ## 日常事件池
 
 “日常事件池”是管理端对统一事件仓储的只读视图，不是日报的复制品，也不

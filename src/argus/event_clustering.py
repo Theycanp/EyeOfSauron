@@ -27,6 +27,14 @@ _CJK_RUN_RE = re.compile(r"[\u3400-\u9fff]{2,}")
 _STOPWORDS = frozenset(
     "表示 发布 关于 相关 记者 消息 最新 今日 日前 将在 以及 进行 召开".split()
 )
+_GENERIC_TITLES = frozenset({
+    "politics", "business", "world", "news", "technology", "the weekly cartoon",
+    "latest news", "breaking news", "新闻", "国际新闻", "财经", "时政", "科技",
+})
+
+
+def generic_event_title(title: str) -> bool:
+    return _text(title) in _GENERIC_TITLES
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +171,11 @@ def _region_compatible(left: str, right: str) -> bool:
 
 
 def _pair_score(left: Mapping[str, Any], right: Mapping[str, Any], *, window: int) -> tuple[float, bool]:
+    if abs(int(left.get("published_at", 0) or 0) - int(right.get("published_at", 0) or 0)) > window:
+        return 0.0, False
+    # Section headings and recurring columns identify a format, not an event.
+    if generic_event_title(str(left.get("title", ""))) or generic_event_title(str(right.get("title", ""))):
+        return 0.0, False
     topic_left = _text(left.get("topic", "general"))
     topic_right = _text(right.get("topic", "general"))
     region_left = _text(left.get("region", "GLOBAL")).upper()
@@ -330,6 +343,11 @@ def cluster_events(
             ))
         else:
             fingerprint = "|".join([_text(title), ",".join(topics), ",".join(regions), ",".join(entity_union)])
+            # Repeated headlines outside the time gate are separate events.
+            # Persistent projection still reuses an already matched stable key.
+            fingerprint += f"|{min(int(item.get('published_at', 0) or 0) for item in members) // 86400}"
+            if generic_event_title(title):
+                fingerprint += f"|{_report_id(representative)}"
         event_id = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
         primary_present = any(_tier(item.get("source_tier")) == "primary" for item in members)
         # Classify updates chronologically, then present reports newest first.
@@ -414,6 +432,25 @@ def event_match_score(left: Mapping[str, Any], right: Mapping[str, Any]) -> floa
     """Score a new event projection against a persisted event candidate."""
     score, _ = _pair_score(left, right, window=72 * 3600)
     return score
+
+
+def explain_event_match(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
+    """Explain the current deterministic scorer; never present it as a probability."""
+    score, conflict = _pair_score(left, right, window=72 * 3600)
+    first = identify_semantic_event(str(left.get("title", "")), str(left.get("summary", "")))
+    second = identify_semantic_event(str(right.get("title", "")), str(right.get("summary", "")))
+    a, b = int(left.get("published_at", 0) or 0), int(right.get("published_at", 0) or 0)
+    return {
+        "score": round(score, 4), "threshold": 0.57,
+        "title_similarity": round(_title_similarity(left, right), 4),
+        "shared_entities": sorted(_entities(left) & _entities(right))[:20],
+        "shared_numbers": sorted(_numbers(left) & _numbers(right))[:20],
+        "time_distance_hours": round(abs(a - b) / 3600, 2),
+        "semantic_identity": bool(first and second and first.compatible(second, a, b)),
+        "generic_title": generic_event_title(str(left.get("title", ""))) or generic_event_title(str(right.get("title", ""))),
+        "possible_numeric_conflict": conflict,
+        "scope": "current_rule_replay_not_historical_decision",
+    }
 
 
 def _bounded_score(value: Any, default: int) -> int:
