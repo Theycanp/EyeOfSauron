@@ -7,6 +7,7 @@ import type {
   ConfigResponse,
   DigestDetailResponse,
   DigestListResponse,
+  DigestRun,
   IncidentResponse,
   JobResponse,
   ManualEventDraft,
@@ -20,7 +21,14 @@ import type {
   ReminderResponse,
   RevisionResponse,
   SourceQualityResponse,
+  SourceHealth,
+  SourceQualityAudit,
   SourceTestResult,
+  EventWorkspaceState,
+  EventReviewDetail,
+  EventRepairRequest,
+  EventRepairPreview,
+  EventQuality,
 } from './types'
 
 type ApiErrorPayload = {
@@ -181,7 +189,27 @@ export class AdminApi {
     return this.request(`/api/news-events?${query}`, { signal: options.signal })
   }
   prompts(): Promise<PromptResponse> { return this.request('/api/prompts') }
+  eventQuality(hours: number): Promise<EventQuality> { return this.request(`/api/news-events/quality?hours=${hours}`) }
+  eventReview(key: string): Promise<EventReviewDetail> { return this.request(`/api/news-events/${encodeURIComponent(key)}`) }
+  eventPreference(key: string, state: EventWorkspaceState): Promise<{ state: EventWorkspaceState }> {
+    return this.request(`/api/news-events/${encodeURIComponent(key)}/preference`, { method: 'POST', body: JSON.stringify(state) })
+  }
+  eventDigestChoice(key: string, choice: EventWorkspaceState['digest_choice'], reason: string): Promise<{ state: EventWorkspaceState }> {
+    return this.request(`/api/news-events/${encodeURIComponent(key)}/digest-choice`, { method: 'POST', body: JSON.stringify({ choice, reason }) })
+  }
+  previewEventRepair(body: EventRepairRequest): Promise<EventRepairPreview> {
+    return this.request('/api/news-events/repair/preview', { method: 'POST', body: JSON.stringify(body) })
+  }
+  applyEventRepair(body: EventRepairRequest & { expected_revision: string; reason: string }): Promise<{ event_key: string }> {
+    return this.request('/api/news-events/repair/apply', { method: 'POST', body: JSON.stringify(body) })
+  }
   sourceQuality(): Promise<SourceQualityResponse> { return this.request('/api/source-quality') }
+  sourceHealth(sourceId: string, signal?: AbortSignal): Promise<{ health: SourceHealth }> {
+    return this.request(`/api/source-health/${encodeURIComponent(sourceId)}`, { signal })
+  }
+  sourceQualityAudit(sourceId: string, signal?: AbortSignal): Promise<{ audit: SourceQualityAudit[] }> {
+    return this.request(`/api/source-quality/${encodeURIComponent(sourceId)}/audit`, { signal })
+  }
   sourceQualityFeedback(sourceId: string, body: { signal: -1 | 0 | 1; reason: string; observation_id?: number }): Promise<MutationResponse> {
     return this.request(`/api/source-quality/${encodeURIComponent(sourceId)}/feedback`, { method: 'POST', body: JSON.stringify(body) })
   }
@@ -197,6 +225,17 @@ export class AdminApi {
   digest(key: string, version?: number): Promise<DigestDetailResponse> {
     const query = version ? `?${new URLSearchParams({ version: String(version) })}` : ''
     return this.request(`/api/digests/${encodeURIComponent(key)}${query}`)
+  }
+  digestRuns(): Promise<{ runs: DigestRun[] }> {
+    return this.request('/api/digest-runs?limit=30')
+  }
+  digestRun(key: string): Promise<{ run: DigestRun }> {
+    return this.request(`/api/digest-runs/${encodeURIComponent(key)}`)
+  }
+  retryDigestNow(key: string, requestId: string): Promise<JobResponse> {
+    return this.request(`/api/digest-runs/${encodeURIComponent(key)}/retry`, {
+      method: 'POST', body: JSON.stringify({ request_id: requestId }),
+    })
   }
 
   outbox(status: Extract<OutboxStatus, 'dead' | 'pending'>, beforeId?: number): Promise<OutboxResponse> {

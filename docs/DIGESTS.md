@@ -38,6 +38,12 @@ selected_count = min(item_limit,
 This makes quiet days shorter and dense, high-value days longer. The calculation
 is deterministic, explainable, and covered by tests. Empty days remain empty.
 
+Before adaptive ranking, the builder reads global event editorial choices through
+the event repository port. `exclude` removes an event from this digest window;
+`include` moves it ahead of ordinary candidates. Inclusion still obeys the
+window, enabled-source policy, adaptive count and 50-item ceiling. Account-level
+read/ignore preferences never alter the global digest.
+
 ## AI synthesis
 
 AI receives only the already selected evidence. It does not decide notification
@@ -106,10 +112,20 @@ deadline are retained, and subsequent retries use the anchored schedule. No old
 digest or historical retry count is rewritten. Rollback to the previous code is
 schema-compatible, but restores its former retry behaviour.
 
-Persistent retry tables are `digest_retry_state`, `digest_api_usage`, and
-`digest_failure_state` (introduced in schema 15; the current database schema is
-17). Errors are sanitized before persistence and
-notification. The outbox remains responsible for actual delivery and retry.
+Persistent retry tables are `digest_retry_state`, `digest_api_usage`,
+`digest_failure_state`, and `digest_generation_attempts` (the latter is added in
+schema 19 after the event workspace migration in schema 18). Errors are sanitized
+before persistence and notification. The outbox remains responsible for actual
+delivery and retry.
+
+The authenticated admin endpoint `GET /api/digest-runs` exposes derived run state,
+publication version, retry window, and up to 50 logical generation attempts. Each
+attempt records only an allowlisted provider hostname, model, Prompt identifier,
+version and hash, elapsed time, status, and sanitized error. It never stores
+request text or credentials. `POST /api/digest-runs/<key>/retry` can advance an
+already scheduled retry only; it cannot reopen an exhausted window or increase
+the five-attempt allowance. The request ID is idempotent and the operation
+requires `operations:write` plus the existing CSRF/origin checks.
 
 ## Versioning and reading
 

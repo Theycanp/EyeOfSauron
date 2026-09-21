@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp, CircleAlert, Clock3, ExternalLink, Newspaper, RefreshCw, Signal } from 'lucide-react'
 import type { AdminApi } from '../../shared/api'
 import { ApiError } from '../../shared/api'
-import type { NewsEvent, NewsEventReport, NewsEventResponse, NewsEventSort } from '../../shared/types'
+import type { EventQuality, NewsEvent, NewsEventReport, NewsEventResponse, NewsEventSort } from '../../shared/types'
 import { formatDate } from '../../shared/utils'
+import { EventRepairDialog, EventReviewPanel } from './EventReviewPanel'
 
 const PAGE_SIZE = 50
 const DEFAULT_HOURS = 28
@@ -27,6 +28,7 @@ function saveFilters(hours: number, sort: NewsEventSort) {
 interface DailyEventsPageProps {
   api: AdminApi
   onUnauthorized: () => void
+  canWrite?: boolean
 }
 
 const tierLabels: Record<NewsEventReport['source_tier'], string> = {
@@ -57,7 +59,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '无法读取日常事件'
 }
 
-export function DailyEventsPage({ api, onUnauthorized }: DailyEventsPageProps) {
+export function DailyEventsPage({ api, onUnauthorized, canWrite = false }: DailyEventsPageProps) {
   const [hours, setHours] = useState(() => readFilters().hours)
   const [hoursDraft, setHoursDraft] = useState(() => String(readFilters().hours))
   const [sort, setSort] = useState<NewsEventSort>(() => readFilters().sort)
@@ -68,6 +70,10 @@ export function DailyEventsPage({ api, onUnauthorized }: DailyEventsPageProps) {
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
+  const [quality, setQuality] = useState<EventQuality | null>(null)
+  const [qualityLoading, setQualityLoading] = useState(false)
+  const [selected, setSelected] = useState<string[]>([])
+  const [merging, setMerging] = useState(false)
   const requestSequence = useRef(0)
   const activeRequest = useRef<AbortController | null>(null)
   const loadedFilters = useRef<string | null>(null)
@@ -75,6 +81,8 @@ export function DailyEventsPage({ api, onUnauthorized }: DailyEventsPageProps) {
   const invalidateRequests = useCallback(() => {
     requestSequence.current += 1
     activeRequest.current?.abort()
+    setSelected([])
+    setQuality(null)
   }, [])
 
   useEffect(() => {
@@ -170,6 +178,8 @@ export function DailyEventsPage({ api, onUnauthorized }: DailyEventsPageProps) {
   }
 
   const refresh = () => {
+    setSelected([])
+    setQuality(null)
     invalidateRequests()
     setRefreshKey((value) => value + 1)
   }
@@ -203,19 +213,38 @@ export function DailyEventsPage({ api, onUnauthorized }: DailyEventsPageProps) {
         <button type="button" className={sort === 'importance' ? 'active' : ''} aria-pressed={sort === 'importance'} onClick={() => changeSort('importance')}>重要</button>
       </div>
       <span className="result-count">过去 {hours} 小时 · 已显示 {events.length} 个事件</span>
+      <button className="button subtle" disabled={qualityLoading} onClick={() => {
+        setQualityLoading(true)
+        const sequence = requestSequence.current
+        void api.eventQuality(hours).then(result => { if (sequence === requestSequence.current) setQuality(result) }).catch((failure: unknown) => {
+          if (failure instanceof ApiError && failure.status === 401) onUnauthorized()
+          else setError(errorMessage(failure))
+        }).finally(() => setQualityLoading(false))
+      }}>查看聚合质量</button>
+      {canWrite && <button className="button subtle" disabled={selected.length < 2 || selected.length > 20} onClick={() => setMerging(true)}>合并所选（{selected.length}）</button>}
     </section>
+
+    {quality && <section className="event-quality-summary" aria-label="聚合质量">
+      <p>抽样 {quality.event_count} 个事件 / {quality.report_count} 篇报道 · 单一出版方 {quality.single_publisher_events} 个 · 多出版方 {quality.multi_publisher_events} 个 · 栏目标题 {quality.generic_title_events} 个{quality.sample_truncated ? '（最多 1000 个，结果已截断）' : ''}</p>
+      <p>{quality.interpretation}</p>
+      {quality.repeated_titles.length > 0 && <details><summary>重复标题抽查线索</summary><ul>{quality.repeated_titles.map(item => <li key={item.title}>{item.title}：{item.events} 个事件</li>)}</ul></details>}
+    </section>}
 
     {error && <div className="inline-error" role="alert"><CircleAlert size={17} /><span>{error}</span>{!events.length && <button className="text-button" onClick={refresh}>重试</button>}</div>}
 
     {loading && !events.length ? <div className="loading-state"><RefreshCw className="spin" size={24} />正在聚合日常事件…</div> : events.length ? <section className="daily-event-list" aria-live="polite">
-      {events.map((item) => <DailyEventCard key={item.event_key} event={item} open={expanded.has(item.event_key)} onToggle={() => toggleExpanded(item.event_key)} />)}
+      {events.map((item) => <div key={item.event_key}>
+        {canWrite && <label className="event-select"><input type="checkbox" checked={selected.includes(item.event_key)} onChange={e => setSelected(current => e.target.checked ? [...current, item.event_key] : current.filter(key => key !== item.event_key))} />选择合并：{item.title}</label>}
+        <DailyEventCard api={api} canWrite={canWrite} onChange={refresh} onUnauthorized={onUnauthorized} event={item} open={expanded.has(item.event_key)} onToggle={() => toggleExpanded(item.event_key)} />
+      </div>)}
     </section> : !error && <section className="empty-state"><div className="empty-icon"><Newspaper size={29} /></div><h3>这个时间窗内还没有事件</h3><p>可以扩大时间窗，或稍后等 Argus 收集到新的报道。</p></section>}
 
     {nextCursor && events.length > 0 && <div className="daily-events-more"><button className="button subtle" disabled={loadingMore} onClick={() => { void loadMore() }}>{loadingMore ? <RefreshCw className="spin" size={16} /> : <ChevronDown size={16} />}{loadingMore ? '正在加载…' : '加载更多'}</button></div>}
+    {merging && <EventRepairDialog api={api} request={{ action: 'merge', event_keys: selected }} onClose={() => setMerging(false)} onDone={() => { setMerging(false); refresh() }} onUnauthorized={onUnauthorized} />}
   </>
 }
 
-function DailyEventCard({ event, open, onToggle }: { event: NewsEvent; open: boolean; onToggle: () => void }) {
+function DailyEventCard({ event, open, onToggle, api, canWrite, onChange, onUnauthorized }: { event: NewsEvent; open: boolean; onToggle: () => void; api: AdminApi; canWrite: boolean; onChange: () => void; onUnauthorized: () => void }) {
   const reports = event.reports || []
   const tags = [...new Set([...(event.regions || []), ...(event.topics || [])])]
   return <article className={`daily-event-card ${open ? 'open' : ''}`}>
@@ -231,6 +260,7 @@ function DailyEventCard({ event, open, onToggle }: { event: NewsEvent; open: boo
     </button>
 
     {open && <div className="daily-event-reports">
+      <EventReviewPanel api={api} event={event} canWrite={canWrite} onChange={onChange} onUnauthorized={onUnauthorized} />
       <div className="daily-event-report-heading"><strong>原始报道</strong><span>{event.report_count || reports.length} 篇{event.reports_truncated ? `，当前展示 ${reports.length} 篇` : ''}</span></div>
       {reports.length ? reports.map((report) => <article className="daily-event-report" key={report.report_id || `${report.observation_id}-${report.source_id}`}>
         <div className="daily-event-report-meta"><span className="status-pill neutral">{tierLabels[report.source_tier] || report.source_tier}</span><strong>{report.publisher || report.source_id}</strong><span>{relationLabels[report.relation] || report.relation}</span><time>{formatDate(report.published_at)}</time></div>

@@ -968,6 +968,14 @@ input:disabled { background: var(--surface-soft); color: var(--text-faint); }
 
 /* Responsive daily intelligence reader */
 .digest-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.digest-run-list { margin-top: 16px; align-items: start; }
+.digest-run-card .panel-header h3 { overflow-wrap: anywhere; margin: 0 0 8px; }
+.digest-run-note { margin: 0 17px 17px; color: var(--text-faint); font-size: 12px; }
+.digest-run-attempts { border-top: 1px solid var(--border); margin-bottom: 16px; }
+.digest-run-attempts > summary { padding: 14px 17px; cursor: pointer; color: var(--text-soft); }
+.digest-run-attempt { border-top: 1px solid var(--border); }
+.digest-run-attempt h4, .digest-run-attempt > p { margin: 10px 17px; overflow-wrap: anywhere; }
+.digest-run-attempt > p { font-size: 12px; color: var(--text-faint); }
 .digest-card { min-width: 0; display: flex; flex-direction: column; padding: 19px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-sm); }
 .digest-date { display: flex; align-items: center; gap: 7px; color: var(--text-faint); font-size: 11px; }
 .digest-card h3 { margin: 15px 0 7px; font-size: 16px; }
@@ -1057,6 +1065,17 @@ input:disabled { background: var(--surface-soft); color: var(--text-faint); }
 .daily-event-report a:hover { text-decoration: underline; }
 .daily-event-no-reports { margin: 0; padding: 16px; color: var(--text-faint); text-align: center; }
 .daily-events-more { display: flex; justify-content: center; margin-top: 15px; }
+.event-review-panel, .event-quality-summary { margin-bottom: 16px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface-raised); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.event-review-panel .page-actions { flex-wrap: wrap; gap: 8px; }
+.event-editorial { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.event-editorial label { display: grid; gap: 4px; min-width: 0; flex: 1 1 160px; }
+.event-editorial p { flex-basis: 100%; }
+.event-editorial input, .event-editorial select { width: 100%; min-width: 0; }
+.event-match-row { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.event-match-row input, .event-select input { flex: 0 0 auto; width: 16px; height: 16px; }
+.event-match-row > div { min-width: 0; }
+.event-select { display: flex; align-items: center; gap: 8px; padding: 8px; color: var(--text-soft); font-size: 12px; overflow-wrap: anywhere; }
+.event-repair-evidence { max-height: 40vh; overflow: auto; overflow-wrap: anywhere; }
 
 @media (max-width: 680px) {
   .daily-events-heading { align-items: flex-start; }
@@ -1077,3 +1096,16 @@ input:disabled { background: var(--surface-soft); color: var(--text-faint); }
   .daily-event-summary { grid-template-columns: 1fr auto; }
   .daily-event-score { display: none; }
 }
+/* Source diagnostics keep reliability counters distinct from reputation. */
+.source-diagnostic-picker { padding: 20px; }
+.source-diagnostic-picker label { display: grid; gap: 8px; max-width: 640px; }
+.source-diagnostic-picker p, .source-diagnostics-body > p { color: var(--text-soft); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.source-diagnostics { margin-bottom: 22px; }
+.source-diagnostics-body { padding: 20px; }
+.source-diagnostic-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 20px; margin: 0 0 22px; }
+.source-diagnostic-grid dt { font-size: 12px; color: var(--text-soft); }
+.source-diagnostic-grid dd { margin: 6px 0 0; font-weight: 600; overflow-wrap: anywhere; }
+.source-diagnostic-grid small { display: block; margin-top: 6px; font-weight: 400; }
+.source-quality-audit { display: grid; gap: 16px; padding-left: 22px; }
+.source-quality-audit li { padding-left: 4px; overflow-wrap: anywhere; }
+.source-quality-audit li > span { display: block; margin-top: 4px; color: var(--text-soft); font-size: 12px; }

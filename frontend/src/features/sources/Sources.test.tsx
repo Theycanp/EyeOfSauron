@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { SourceDialog, SourcesPage } from './Sources'
 import { createSourceDraft, type SourceDraft } from './providers'
 import type { NewsCatalogEntry } from '../../shared/types'
+import { AdminApi } from '../../shared/api'
 
 function Harness({ initial }: { initial: SourceDraft }) {
   const [draft, setDraft] = useState(initial)
@@ -42,7 +43,7 @@ describe('source catalog', () => {
       requires_user_confirmation: true,
       content_policy: 'feed_metadata_and_original_link_only',
     }]
-    render(<SourcesPage sources={[]} sourceStates={[]} busy={false} query="" onQuery={() => undefined} onCreate={() => undefined} catalog={catalog} catalogError={null} onCatalogFeed={() => undefined} onEdit={() => undefined} onToggle={() => undefined} onDelete={() => undefined} />)
+    render(<SourcesPage api={new AdminApi()} sources={[]} sourceStates={[]} busy={false} query="" onQuery={() => undefined} onCreate={() => undefined} catalog={catalog} catalogError={null} onCatalogFeed={() => undefined} onEdit={() => undefined} onToggle={() => undefined} onDelete={() => undefined} />)
     expect(screen.getByText('Bank of Japan')).toBeVisible()
     expect(screen.getByText('生成草稿')).toBeVisible()
   })

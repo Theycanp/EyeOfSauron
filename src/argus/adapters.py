@@ -21,6 +21,7 @@ from .providers import (
     ProviderConfigError,
     ProviderRuntimeError,
     ProviderRegistry,
+    SourceCollector,
 )
 from .rss import RssCollector
 from .official_list import OfficialListCollector
@@ -420,7 +421,7 @@ def build_collector(
     *,
     provider_registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
     factories: Mapping[str, Any] | None = None,
-):
+) -> SourceCollector | None:
     runtime_factories: Mapping[str, Any] = _COLLECTOR_FACTORIES
     if factories:
         runtime_factories = {**_COLLECTOR_FACTORIES, **factories}

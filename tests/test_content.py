@@ -17,7 +17,9 @@ from argus.content import (
     ContentFetchRequest,
     ContentLevel,
     PublicDocumentFetcher,
+    content_availability,
     plain_text,
+    public_document_url,
 )
 from argus.database import Database, SCHEMA_VERSION
 from argus.models import FeedFetchResult
@@ -122,6 +124,45 @@ class ContentExtractionTests(unittest.TestCase):
         opener.open.return_value = response
         document = PublicDocumentFetcher(opener=opener, resolver=lambda *a, **k: PUBLIC_IP).fetch(self._item())
         self.assertIn("Official release", document.body)
+
+    def test_presscorner_uses_official_print_pdf_and_preserves_origin(self) -> None:
+        url = "https://ec.europa.eu/commission/presscorner/detail/en/ip_26_1900"
+        print_url = "https://ec.europa.eu/commission/presscorner/api/files/document/print/en/ip_26_1900/IP_26_1900_EN.pdf"
+        item = replace(self._item(), request=ContentFetchRequest(url, ("ec.europa.eu",)))
+        opener = Mock()
+        opener.open.return_value = _Response(b"%PDF-1.7 public print", "application/pdf", print_url)
+        document = PublicDocumentFetcher(
+            opener=opener, resolver=lambda *a, **k: PUBLIC_IP,
+            pdf_extractor=lambda payload, timeout: "Official Commission print document. " * 6,
+        ).fetch(item)
+        self.assertEqual(print_url, opener.open.call_args.args[0].full_url)
+        self.assertEqual(url, document.metadata["requested_url"])
+        self.assertEqual(ContentLevel.DOCUMENT, document.level)
+        for other in (
+            url + "?redirect=elsewhere", url.replace("ec.europa.eu", "ec.europa.eu.example"),
+            url.replace("/detail/", "/other/"), url.replace("/ip_26_1900", "/../secret"),
+            url.replace("https:", "http:"), url.replace("ec.europa.eu", "ec.europa.eu:8443"),
+        ):
+            self.assertEqual(other, public_document_url(other))
+
+    def test_blocked_document_is_not_retried_or_replaced_by_another_endpoint(self) -> None:
+        opener = Mock()
+        opener.open.side_effect = urllib.error.HTTPError(
+            "https://official.example/document", 403, "Forbidden", Message(), None
+        )
+        with self.assertRaises(ContentFetchError) as error:
+            PublicDocumentFetcher(opener=opener, resolver=lambda *a, **k: PUBLIC_IP).fetch(self._item())
+        self.assertEqual("http_403", error.exception.kind)
+        self.assertFalse(error.exception.retryable)
+        self.assertEqual(1, opener.open.call_count)
+
+    def test_content_level_is_independent_of_failed_enrichment_and_analysis(self) -> None:
+        for level, has_full in (("metadata", False), ("excerpt", False), ("full_text", True)):
+            state = content_availability(
+                [{"level": level, "body": "Saved evidence"}, {"level": "analysis", "body": "AI text"}],
+                {"status": "dead", "failure_kind": "http_403"},
+            )
+            self.assertEqual({"level": level, "fetch_outcome": "blocked", "has_full_text": has_full}, state)
 
     @staticmethod
     def _item(
@@ -257,6 +298,73 @@ class ContentPersistenceTests(unittest.TestCase):
                 failure_kind="unsupported_type",
             ),
         )
+        detail = self.database.get_alert_detail(int(self.database.list_alerts()[0]["id"]))
+        assert detail is not None
+        self.assertEqual("Feed excerpt", detail["documents"][0]["body"])
+        self.assertEqual(
+            {"level": "excerpt", "fetch_outcome": "unsupported", "has_full_text": False},
+            detail["content_availability"],
+        )
+
+    def _queue_host_items(self, *hosts: str) -> None:
+        self.database.record_source_success(
+            "bloomberg_markets", FeedFetchResult((), None, None), self.rules, NOW, "eos"
+        )
+        items = []
+        for index, host in enumerate(hosts):
+            item = self._public_observation(f"host-{index}")
+            url = f"https://{host}/release/{index}"
+            items.append(replace(item, url=url, content_fetch=ContentFetchRequest(url, (host,))))
+        self.database.record_source_success(
+            "bloomberg_markets", FeedFetchResult(tuple(items), None, None), self.rules, NOW + 1, "eos"
+        )
+
+    def test_host_pause_survives_restart_without_blocking_other_hosts_or_spending_attempts(self) -> None:
+        self._queue_host_items("blocked.example", "blocked.example", "other.example")
+        first = self.database.claim_content_fetch(NOW + 1)
+        assert first is not None
+        self.database.fail_content_fetch(
+            first, "forbidden", NOW + 2, NOW + 20, retryable=False, failure_kind="http_403"
+        )
+        other = self.database.claim_content_fetch(NOW + 3)
+        assert other is not None
+        self.assertEqual("https://other.example/release/2", other.request.url)
+        self.database.complete_content_fetch(other, ContentDocumentDraft(ContentLevel.DOCUMENT, "public_text", "body"), NOW + 4)
+        self.database.close()
+        self.database = Database(self.config.service.database_path)
+        self.assertIsNone(self.database.claim_content_fetch(NOW + 100))
+        pending = self.database.connection.execute("SELECT attempts, failure_kind, next_attempt_at FROM content_fetch_jobs WHERE status='pending'").fetchone()
+        self.assertEqual((0, "host_backoff", NOW + 3602), tuple(pending))
+        probe = self.database.claim_content_fetch(NOW + 3602)
+        assert probe is not None
+        self.assertEqual(1, probe.attempts)
+        self.assertEqual("https://blocked.example/release/1", probe.request.url)
+        self.assertEqual(0, self.database.get_source_state("bloomberg_markets").consecutive_failures)
+
+    def test_transient_host_pause_expires_without_self_extension(self) -> None:
+        self._queue_host_items("temporary.example", "temporary.example")
+        first = self.database.claim_content_fetch(NOW + 1)
+        assert first is not None
+        self.database.fail_content_fetch(
+            first, "unavailable", NOW + 2, NOW + 10, retryable=True, failure_kind="http_503"
+        )
+        self.assertIsNone(self.database.claim_content_fetch(NOW + 12))
+        self.assertIsNone(self.database.claim_content_fetch(NOW + 100))
+        retry = self.database.claim_content_fetch(NOW + 122)
+        assert retry is not None
+        self.assertEqual(first.id, retry.id)
+        self.assertEqual(2, retry.attempts)
+        self.database.complete_content_fetch(retry, ContentDocumentDraft(ContentLevel.DOCUMENT, "public_text", "body"), NOW + 123)
+        self.assertIsNotNone(self.database.claim_content_fetch(NOW + 123))
+
+    def test_short_page_does_not_pause_other_pages(self) -> None:
+        self._queue_host_items("official.example", "official.example")
+        first = self.database.claim_content_fetch(NOW + 1)
+        assert first is not None
+        self.database.fail_content_fetch(
+            first, "short", NOW + 2, NOW + 10, retryable=False, failure_kind="empty_content"
+        )
+        self.assertIsNotNone(self.database.claim_content_fetch(NOW + 3))
 
     def test_schema_thirteen_migrates_content_tables(self) -> None:
         copied = Path(self.temporary.name) / "schema13.db"

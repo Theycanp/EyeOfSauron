@@ -93,6 +93,41 @@ export interface SourceState extends JsonRecord {
   registered_at?: number | null
   heartbeat_at?: number | null
   runtime_updated_at?: number | null
+  runtime_error?: string | null
+}
+
+export interface SourceHealth {
+  source_id: string
+  as_of: number
+  current: SourceState
+  polling: {
+    basis: 'cumulative_persisted_counters'
+    attempts: number
+    successes: number
+    failures: number
+    success_rate: number | null
+    window_success_rate: null
+  }
+  evidence: {
+    basis: 'retained_observations_by_ingestion_time'
+    since: number
+    until: number
+    observations_24h: number
+    observations_7d: number
+    with_full_text: number
+    full_text_coverage: number | null
+    content_jobs: Record<string, number>
+    content_failure_kinds: Record<string, number>
+  }
+}
+
+export interface SourceQualityAudit {
+  id: number
+  source_id: string
+  action: string
+  actor: string
+  details: Record<string, unknown>
+  created_at: number
 }
 
 export interface Reminder extends JsonRecord {
@@ -191,12 +226,19 @@ export interface ContentFetchState extends JsonRecord {
   dead_at?: number | null
 }
 
+export interface ContentAvailability {
+  level: Exclude<ContentLevel, 'analysis'>
+  fetch_outcome: 'not_requested' | 'available' | 'fetching' | 'retrying' | 'queued' | 'deferred' | 'unavailable' | 'blocked' | 'parser_failed' | 'unsupported'
+  has_full_text: boolean
+}
+
 export interface AlertDetailResponse {
   alert: AlertDetailRecord
   observation?: ObservationDetail | null
   incident?: Incident | null
   documents?: ContentDocument[]
   content_fetch?: ContentFetchState | null
+  content_availability?: ContentAvailability
 }
 
 export interface ManualEventDraft {
@@ -399,6 +441,48 @@ export interface DigestSummary extends JsonRecord {
   web_path?: string
 }
 
+export interface DigestProviderAttempt {
+  provider?: string
+  model?: string
+  prompt_id?: string
+  prompt_version?: string | number
+  prompt_hash?: string
+  status?: string
+  error?: string
+  elapsed_ms?: string | number
+}
+
+export interface DigestGenerationAttempt {
+  id: number
+  digest_key: string
+  status: 'running' | 'succeeded' | 'failed' | 'interrupted'
+  started_at: number
+  finished_at?: number | null
+  error?: string | null
+  providers: DigestProviderAttempt[]
+}
+
+export interface DigestRun {
+  digest_key: string
+  state: 'ai_published' | 'generating' | 'retry_exhausted' | 'ai_retrying' | 'algorithm_published' | 'unpublished'
+  published_version: number | null
+  generation_kind: string | null
+  published_at: number | null
+  retry: {
+    status: 'pending' | 'succeeded' | 'failed'
+    attempts: number
+    next_attempt_at: number | null
+    retry_deadline_at: number
+    last_error?: string | null
+    started_at: number
+    updated_at: number
+  } | null
+  attempts: DigestGenerationAttempt[]
+  reserved_attempts: number
+  attempt_history_available: boolean
+  can_retry_now: boolean
+}
+
 export interface DigestItem extends JsonRecord {
   cluster_key: string
   /** Stable event identity when the event-centric digest projection is enabled. */
@@ -479,6 +563,59 @@ export interface NewsEvent extends JsonRecord {
   handling?: 'digest' | 'immediate'
   created_at?: number
   updated_at?: number
+  workspace?: EventWorkspaceState
+}
+
+export interface EventWorkspaceState {
+  read: boolean
+  followed: boolean
+  ignored: boolean
+  digest_choice: 'auto' | 'include' | 'exclude'
+  digest_reason?: string
+}
+
+export interface EventMatchEvidence {
+  score: number
+  title_similarity: number
+  shared_entities: string[]
+  shared_numbers: string[]
+  time_distance_hours: number
+  semantic_identity: boolean
+  generic_title: boolean
+  possible_numeric_conflict: boolean
+}
+
+export interface EventReviewDetail {
+  event_key: string
+  requested_key: string
+  reports: Array<NewsEventReport & { evidence: EventMatchEvidence }>
+  reports_truncated: boolean
+  audit: Array<{ id: number; action: string; actor: string; reason: string; created_at: number }>
+  state: EventWorkspaceState
+}
+
+export interface EventRepairRequest {
+  action: 'merge' | 'split'
+  event_keys: string[]
+  observation_ids?: number[]
+}
+
+export interface EventRepairPreview extends EventRepairRequest {
+  revision: string
+  reports: NewsEventReport[]
+  warning: string
+  comparisons: Array<EventMatchEvidence & { observation_id: number }>
+}
+
+export interface EventQuality {
+  event_count: number
+  report_count: number
+  single_publisher_events: number
+  multi_publisher_events: number
+  generic_title_events: number
+  sample_truncated: boolean
+  interpretation: string
+  repeated_titles: Array<{ title: string; events: number }>
 }
 
 export interface NewsEventResponse {

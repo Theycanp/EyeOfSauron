@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import json
 import unittest
+from tempfile import TemporaryDirectory
+from pathlib import Path
+from dataclasses import replace
 
-from argus.adapters import build_collector
+from argus.adapters import AdapterError, build_collector
+from argus.database import Database
+from argus.models import FeedFetchResult, SourceState
+from argus.rules import RuleSet
+from helpers import observation
 from argus.config import parse_source_config
 from argus.news_catalog import (
     IntegrationMode,
@@ -85,7 +92,15 @@ class ProviderRegistryTests(unittest.TestCase):
                 {**raw_source, "settings": {}},
                 provider_registry=registry,
             )
-        marker = object()
+        class ReplayCollector:
+            def fetch(self, state: SourceState) -> FeedFetchResult:
+                item = replace(
+                    observation("first", "Ordinary provider observation"),
+                    source_id=source.id, dedupe_scope=source.dedupe_scope,
+                )
+                return FeedFetchResult((item,), None, None, cursor="first")
+
+        marker = ReplayCollector()
         collector = build_collector(
             source,
             provider_registry=registry,
@@ -93,6 +108,27 @@ class ProviderRegistryTests(unittest.TestCase):
         )
         self.assertIs(marker, collector)
         self.assertNotIn("custom", DEFAULT_PROVIDER_REGISTRY.kinds)
+        with TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "state.db")
+            try:
+                rules = RuleSet.from_config((), "eos")
+                state = database.get_source_state(source.id)
+                result = collector.fetch(state)
+                self.assertIsNone(database.get_source_state(source.id).cursor)
+                first = database.record_source_success(source.id, result, rules, 100, "eos")
+                self.assertTrue(first.baseline_created)
+                self.assertEqual(1, first.inserted_observations)
+                self.assertEqual(0, first.queued_alerts)
+                restored = database.get_source_state(source.id)
+                self.assertEqual("first", restored.cursor)
+                second = database.record_source_success(
+                    source.id, collector.fetch(restored), rules, 200, "eos"
+                )
+                self.assertEqual(0, second.inserted_observations)
+            finally:
+                database.close()
+        with self.assertRaisesRegex(AdapterError, "implement fetch"):
+            build_collector(source, provider_registry=registry, factories={"custom": lambda _: object()})
 
 
 class NewsCatalogTests(unittest.TestCase):

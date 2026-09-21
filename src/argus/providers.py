@@ -4,7 +4,12 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, runtime_checkable
+
+from .models import FeedFetchResult, SourceState
+
+if TYPE_CHECKING:
+    from .config import SourceConfig
 
 
 _KIND_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -131,7 +136,19 @@ class ProviderSpec:
         }
 
 
-CollectorFactory = Callable[[Any], Any]
+@runtime_checkable
+class SourceCollector(Protocol):
+    """Transport adapters return observations; persistence owns cursor commits.
+
+    A collector must not persist a new cursor, send notifications, or modify its
+    SourceState. A failed/partial fetch must not skip unseen items on the next
+    call. The caller commits the returned batch and cursor atomically.
+    """
+
+    def fetch(self, state: SourceState) -> FeedFetchResult: ...
+
+
+CollectorFactory = Callable[["SourceConfig"], SourceCollector]
 
 
 class ProviderRegistry:
@@ -169,8 +186,8 @@ class ProviderRegistry:
                 raise ValueError(f"duplicate provider credential in {spec.kind}")
             fields_by_name = {field.name: field for field in spec.settings}
             for credential in spec.credentials:
-                field = fields_by_name.get(credential.setting_name)
-                if field is None or not field.secret_reference:
+                credential_field = fields_by_name.get(credential.setting_name)
+                if credential_field is None or not credential_field.secret_reference:
                     raise ValueError(
                         f"provider credential {spec.kind}.{credential.setting_name} "
                         "must reference a declared secret field"
@@ -204,9 +221,9 @@ class ProviderRegistry:
 
     def build_collector(
         self,
-        source: Any,
+        source: SourceConfig,
         factories: Mapping[str, CollectorFactory],
-    ) -> Any | None:
+    ) -> SourceCollector | None:
         if not source.enabled:
             return None
         spec = self.require(source.kind)
@@ -219,7 +236,12 @@ class ProviderRegistry:
             raise ProviderRuntimeError(
                 f"source kind {source.kind} has no registered collector factory"
             )
-        return factory(source)
+        collector = factory(source)
+        if not isinstance(collector, SourceCollector) or not callable(collector.fetch):
+            raise ProviderRuntimeError(
+                f"source kind {source.kind} collector must implement fetch(state)"
+            )
+        return collector
 
 
 _READ_ONLY_FETCH = ProviderTestStrategy(

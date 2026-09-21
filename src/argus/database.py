@@ -20,11 +20,15 @@ from .content import (
     ContentFetchRequest,
     ContentFetchWorkItem,
     ContentLevel,
+    content_availability,
+    content_fetch_host,
+    content_host_backoff_seconds,
 )
 from .digest import (
     DIGEST_RETRY_INTERVAL_SECONDS, DigestCluster, DigestDocument, DigestRetryState, SourceCoverage,
 )
 from .event_clustering import cluster_events, event_aggregate_score, event_evidence_score
+from .digest_operations import digest_run_state
 from .event_identity import identify_semantic_event
 from .events import (
     EventListItem,
@@ -48,11 +52,12 @@ from .models import (
 from .rules import RuleSet
 from .reminders import ReminderError, ReminderSpec, next_daily_occurrence
 from .source_quality import SourceQualityPolicy, calculate_quality
+from .sqlite_event_workspace import SQLiteEventWorkspace, migrate_event_workspace
 from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 19
 
 
 def read_active_config(path: Path) -> dict[str, Any] | None:
@@ -1328,6 +1333,143 @@ class Database:
                 raise
             version = 17
 
+        if version < 18:
+            migrate_event_workspace(self)
+            version = 18
+        if version < 19:
+            with self.unit_of_work():
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS digest_generation_attempts (
+                        id INTEGER PRIMARY KEY,
+                        digest_key TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed','interrupted')),
+                        started_at INTEGER NOT NULL,
+                        finished_at INTEGER,
+                        error TEXT,
+                        providers_json TEXT NOT NULL DEFAULT '[]'
+                    )
+                """)
+                self.connection.execute(
+                    "CREATE INDEX IF NOT EXISTS digest_generation_attempts_key_idx "
+                    "ON digest_generation_attempts(digest_key, id DESC)"
+                )
+                self.connection.execute("PRAGMA user_version=19")
+
+    def start_digest_attempt(self, digest_key: str, *, now: int) -> int:
+        if not digest_key or len(digest_key) > 128 or now < 0:
+            raise ValueError("invalid digest attempt")
+        with self.unit_of_work():
+            cursor = self.connection.execute(
+                "INSERT INTO digest_generation_attempts(digest_key,status,started_at) "
+                "VALUES (?, 'running', ?)", (digest_key, now),
+            )
+        return int(cursor.lastrowid)
+
+    def finish_digest_attempt(
+        self, attempt_id: int, *, status: str, now: int,
+        error: str | None = None, providers: Sequence[Mapping[str, Any]] = (),
+    ) -> None:
+        if status not in {"succeeded", "failed", "interrupted"} or now < 0:
+            raise ValueError("invalid digest attempt result")
+        # Only allow diagnostic fields. Neither request bodies nor credentials
+        # belong in attempt history, even from an alternative provider adapter.
+        allowed = {"provider", "model", "prompt_id", "prompt_version", "prompt_hash",
+                   "status", "error", "elapsed_ms"}
+        safe_providers = [{key: sanitize_error(str(value))[:500] for key, value in row.items()
+                           if key in allowed} for row in list(providers)[:12]]
+        with self.unit_of_work():
+            self.connection.execute(
+                "UPDATE digest_generation_attempts SET status=?, finished_at=?, error=?, providers_json=? "
+                "WHERE id=? AND status='running'",
+                (status, now, sanitize_error(error)[:1000] if error else None,
+                 json.dumps(safe_providers, ensure_ascii=False), attempt_id),
+            )
+
+    def get_digest_run(self, digest_key: str, *, now: int) -> dict[str, Any] | None:
+        if not digest_key or len(digest_key) > 128 or now < 0:
+            raise ValueError("invalid digest run")
+        with (nullcontext() if self.connection.in_transaction else self.unit_of_work(immediate=False)):
+            digest = self.connection.execute(
+                "SELECT version,generation_kind,published_at FROM digests "
+                "WHERE digest_key=? AND status='published'", (digest_key,),
+            ).fetchone()
+            retry_row = self.connection.execute(
+                "SELECT * FROM digest_retry_state WHERE digest_key=?", (digest_key,),
+            ).fetchone()
+            retry = dict(retry_row) if retry_row else None
+            attempts = [dict(row) for row in self.connection.execute(
+                "SELECT * FROM digest_generation_attempts WHERE digest_key=? ORDER BY id DESC LIMIT 50",
+                (digest_key,),
+            )]
+            usage = self.connection.execute(
+                "SELECT calls FROM digest_api_usage WHERE digest_key=?", (digest_key,),
+            ).fetchone()
+        if digest is None and retry is None and not attempts:
+            return None
+        for attempt in attempts:
+            attempt["providers"] = json.loads(attempt.pop("providers_json"))
+        generation_kind = str(digest["generation_kind"]) if digest else None
+        return {
+            "digest_key": digest_key,
+            "state": digest_run_state(generation_kind=generation_kind, retry=retry,
+                                      latest_attempt=attempts[0] if attempts else None, now=now),
+            "published_version": digest["version"] if digest else None,
+            "generation_kind": generation_kind,
+            "published_at": digest["published_at"] if digest else None,
+            "retry": retry, "attempts": attempts,
+            "reserved_attempts": int(usage["calls"]) if usage else 0,
+            "attempt_history_available": bool(attempts),
+            "can_retry_now": bool(retry and retry["status"] == "pending"
+                                  and (int(usage["calls"]) if usage else 0) < 5
+                                  and int(retry["attempts"]) < 5
+                                  and now < int(retry["retry_deadline_at"])
+                                  and retry["next_attempt_at"] > now
+                                  and generation_kind != "api"
+                                  and not (attempts and attempts[0]["status"] == "running")),
+        }
+
+    def list_digest_runs(self, *, now: int, limit: int = 30) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 100 or now < 0:
+            raise ValueError("invalid digest run limit")
+        rows = self.connection.execute(
+            "SELECT digest_key FROM (SELECT digest_key,created_at AS at FROM digests "
+            "UNION ALL SELECT digest_key,started_at FROM digest_generation_attempts "
+            "UNION ALL SELECT digest_key,started_at FROM digest_retry_state) "
+            "GROUP BY digest_key ORDER BY MAX(at) DESC, digest_key DESC LIMIT ?", (limit,),
+        ).fetchall()
+        return [run for row in rows if (run := self.get_digest_run(str(row[0]), now=now)) is not None]
+
+    def request_digest_retry_now(
+        self, digest_key: str, *, actor: str, request_id: str, now: int
+    ) -> dict[str, Any]:
+        if not request_id or len(request_id) > 64 or not actor or len(actor) > 128:
+            raise ValueError("invalid digest retry request")
+        with self.unit_of_work():
+            existing = self.get_admin_job(request_id)
+            if existing:
+                if (existing['kind'] != 'digest_retry_now' or existing['actor'] != actor
+                        or existing['request'] != {'digest_key': digest_key}):
+                    raise ValueError("retry request identity conflict")
+                return existing
+            run = self.get_digest_run(digest_key, now=now)
+            if run is None:
+                raise KeyError("digest run not found")
+            if not run["can_retry_now"]:
+                raise ValueError("digest has no scheduled retry that can be advanced")
+            self.connection.execute(
+                "UPDATE digest_retry_state SET next_attempt_at=?,updated_at=? WHERE digest_key=?",
+                (now, now, digest_key),
+            )
+            self.connection.execute(
+                "INSERT INTO admin_jobs(id,kind,status,request_json,result_json,actor,created_at,expires_at,completed_at) "
+                "VALUES (?, 'digest_retry_now','succeeded',?, ?, ?, ?, ?, ?)",
+                (request_id, json.dumps({'digest_key': digest_key}), json.dumps({'scheduled_at': now}),
+                 actor, now, now+900, now),
+            )
+        result = self.get_admin_job(request_id)
+        assert result is not None
+        return result
+
     def close(self) -> None:
         self.connection.close()
 
@@ -1425,14 +1567,45 @@ class Database:
                 """,
                 (now, now, now),
             )
-            row = self.connection.execute(
+            candidates = self.connection.execute(
                 """
-                SELECT id FROM content_fetch_jobs
+                SELECT id, url, status FROM content_fetch_jobs
                 WHERE status IN ('pending', 'retry') AND next_attempt_at <= ?
-                ORDER BY next_attempt_at, id LIMIT 1
+                ORDER BY next_attempt_at, id LIMIT 50
                 """,
                 (now,),
-            ).fetchone()
+            ).fetchall()
+            if not candidates:
+                return None
+            # Failure rows are the durable source of short host pauses. This uses
+            # existing task state, including after a restart, without a second queue.
+            host_pauses: dict[str, int] = {}
+            for failure in self.connection.execute(
+                "SELECT url, failure_kind, updated_at FROM content_fetch_jobs "
+                "WHERE updated_at > ? AND status IN ('dead', 'retry') "
+                "AND failure_kind IS NOT NULL",
+                (now - 3600,),
+            ):
+                seconds = content_host_backoff_seconds(str(failure["failure_kind"]))
+                until = int(failure["updated_at"]) + seconds
+                host = content_fetch_host(str(failure["url"]))
+                if seconds and until > now:
+                    host_pauses[host] = max(host_pauses.get(host, 0), until)
+            row = None
+            for candidate in candidates:
+                until = host_pauses.get(content_fetch_host(str(candidate["url"])), 0)
+                if until > now:
+                    # Do not alter retry.updated_at: that is the failure timestamp,
+                    # and changing it would keep extending the pause indefinitely.
+                    self.connection.execute(
+                        "UPDATE content_fetch_jobs SET next_attempt_at = MAX(next_attempt_at, ?), "
+                        "failure_kind = CASE WHEN status = 'pending' THEN 'host_backoff' ELSE failure_kind END "
+                        "WHERE id = ? AND status IN ('pending', 'retry')",
+                        (until, int(candidate["id"])),
+                    )
+                    continue
+                row = candidate
+                break
             if row is None:
                 return None
             job_id = int(row["id"])
@@ -1560,6 +1733,11 @@ class Database:
         active_sources: int,
     ) -> None:
         with self.connection:
+            self.connection.execute(
+                "UPDATE digest_generation_attempts SET status='interrupted',finished_at=?, "
+                "error='engine restarted before attempt acknowledgement' WHERE status='running'",
+                (started_at,),
+            )
             self.connection.execute(
                 """
                 UPDATE engine_runtime
@@ -2838,6 +3016,7 @@ class Database:
             "incident": incident,
             "documents": documents,
             "content_fetch": content_fetch,
+            "content_availability": content_availability(documents, content_fetch),
         }
 
     def create_manual_event(
@@ -3494,6 +3673,84 @@ class Database:
             )
         return result
 
+    def get_source_health(
+        self, source_id: str, *, now: int | None = None
+    ) -> dict[str, Any] | None:
+        """Read one consistent diagnostics snapshot without changing source state."""
+        source_id = self._validate_source_quality_source_id(source_id)
+        current = int(time.time()) if now is None else now
+        if current < 0:
+            raise ValueError("source diagnostics time is invalid")
+        since = max(0, current - 7 * 86400)
+        with self.unit_of_work(immediate=False):
+            row = self.connection.execute(
+                "SELECT c.source_id, c.last_attempt_at, c.last_success_at, "
+                "c.consecutive_failures, c.last_error, c.last_error_kind, "
+                "c.last_http_status, c.last_warning, c.poll_count, c.success_count, "
+                "c.failure_count, r.runtime_status, r.configured_enabled, r.last_error AS runtime_error "
+                "FROM collector_state c LEFT JOIN source_runtime r "
+                "ON r.source_id = c.source_id WHERE c.source_id = ?",
+                (source_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            state = dict(row)
+            polls = int(state.pop("poll_count"))
+            successes = int(state.pop("success_count"))
+            failures = int(state.pop("failure_count"))
+            evidence = self.connection.execute(
+                "SELECT COUNT(*) AS observations, "
+                "COALESCE(SUM(o.fetched_at >= ?), 0) AS observations_24h, "
+                "COALESCE(SUM(EXISTS (SELECT 1 FROM content_documents d "
+                "WHERE d.observation_id = o.id AND d.level IN ('full_text', 'document') "
+                "AND length(trim(d.body)) > 0)), 0) AS with_full_text "
+                "FROM observations o WHERE o.source_id = ? "
+                "AND o.fetched_at >= ? AND o.fetched_at <= ?",
+                (max(0, current - 86400), source_id, since, current),
+            ).fetchone()
+            jobs = list(self.connection.execute(
+                "SELECT j.status, j.failure_kind, COUNT(*) AS count "
+                "FROM content_fetch_jobs j JOIN observations o ON o.id = j.observation_id "
+                "WHERE o.source_id = ? AND o.fetched_at >= ? AND o.fetched_at <= ? "
+                "GROUP BY j.status, j.failure_kind ORDER BY j.status, j.failure_kind",
+                (source_id, since, current),
+            ))
+        states: dict[str, int] = {}
+        error_kinds: dict[str, int] = {}
+        for job in jobs:
+            status = str(job["status"])
+            count = int(job["count"])
+            states[status] = states.get(status, 0) + count
+            if status in {"dead", "retry"}:
+                kind = str(job["failure_kind"] or "unknown")
+                error_kinds[kind] = error_kinds.get(kind, 0) + count
+        observations = int(evidence["observations"])
+        full_text = int(evidence["with_full_text"])
+        return {
+            "source_id": source_id,
+            "as_of": current,
+            "current": state,
+            "polling": {
+                "basis": "cumulative_persisted_counters",
+                "attempts": polls,
+                "successes": successes,
+                "failures": failures,
+                "success_rate": successes / polls if polls else None,
+                "window_success_rate": None,
+            },
+            "evidence": {
+                "basis": "retained_observations_by_ingestion_time",
+                "since": since,
+                "until": current,
+                "observations_24h": int(evidence["observations_24h"]),
+                "observations_7d": observations,
+                "with_full_text": full_text,
+                "full_text_coverage": full_text / observations if observations else None,
+                "content_jobs": states,
+                "content_failure_kinds": error_kinds,
+            },
+        }
+
     @staticmethod
     def _validate_source_quality_source_id(source_id: str) -> str:
         normalized = source_id.strip()
@@ -3852,10 +4109,49 @@ class Database:
             raise ValueError("event candidate limit is out of range")
         rows = self.connection.execute(
             "SELECT * FROM events WHERE last_seen_at >= ? AND first_seen_at < ? "
+            "AND id NOT IN (SELECT event_id FROM event_aliases) "
             "ORDER BY last_seen_at DESC, id DESC LIMIT ?",
             (since, until, limit),
         )
         return [self._event_from_row(row) for row in rows]
+
+    def maintain_event_lifecycle(self, *, now: int, limit: int = 500) -> int:
+        return SQLiteEventWorkspace(self).maintain_event_lifecycle(now=now, limit=limit)
+
+    def get_event_digest_choices(self, event_keys: Sequence[str]) -> dict[str, str]:
+        return SQLiteEventWorkspace(self).get_event_digest_choices(event_keys)
+
+    def event_workspace_state(self, event_keys: Sequence[str], actor: str) -> dict[str, Any]:
+        return SQLiteEventWorkspace(self).event_workspace_state(event_keys, actor)
+
+    def set_event_preference(self, event_key: str, actor: str, *, read: bool,
+                             followed: bool, ignored: bool, now: int) -> None:
+        SQLiteEventWorkspace(self).set_event_preference(event_key, actor, read=read, followed=followed, ignored=ignored, now=now)
+
+    def set_event_digest_choice(self, event_key: str, choice: str, *, actor: str,
+                                reason: str, now: int) -> None:
+        SQLiteEventWorkspace(self).set_event_digest_choice(event_key, choice, actor=actor, reason=reason, now=now)
+
+    def preview_event_repair(self, action: str, event_keys: Sequence[str], *,
+                             observation_ids: Sequence[int] = ()) -> dict[str, Any]:
+        with self.unit_of_work(immediate=False):
+            return SQLiteEventWorkspace(self).preview_event_repair(action, event_keys, observation_ids=observation_ids)
+
+    def apply_event_repair(self, action: str, event_keys: Sequence[str], *,
+                           observation_ids: Sequence[int], expected_revision: str,
+                           actor: str, reason: str, now: int) -> str:
+        return SQLiteEventWorkspace(self).apply_event_repair(action, event_keys, observation_ids=observation_ids,
+                                                            expected_revision=expected_revision, actor=actor, reason=reason, now=now)
+
+    def list_event_audit(self, event_key: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        return SQLiteEventWorkspace(self).list_event_audit(event_key, limit=limit)
+
+    def canonical_event_key(self, event_key: str) -> str:
+        row = self.connection.execute(
+            "SELECT target.event_key FROM event_aliases a JOIN events old ON old.id=a.event_id "
+            "JOIN events target ON target.id=a.target_id WHERE old.event_key=?", (event_key,),
+        ).fetchone()
+        return str(row[0]) if row is not None else event_key
 
     @staticmethod
     def _event_cursor(payload: Mapping[str, Any]) -> str:
@@ -3875,7 +4171,7 @@ class Database:
             raise ValueError("event cursor is invalid") from exc
         if not isinstance(value, dict) or value.get("sort") != sort:
             raise ValueError("event cursor does not match sort order")
-        expected = {"sort", "since", "until", "report_max", "alert_max", "last", "id"}
+        expected = {"sort", "since", "until", "report_max", "alert_max", "last", "id", "audit_max"}
         if sort == "importance":
             expected |= {"importance", "score"}
         integer_keys = expected - {"sort", "score"}
@@ -4005,6 +4301,9 @@ class Database:
             nullcontext() if self.connection.in_transaction else self.unit_of_work(immediate=False)
         )
         with transaction:
+            audit_max = int(self.connection.execute("SELECT COALESCE(MAX(id),0) FROM event_review_audit WHERE action IN ('merge','split')").fetchone()[0])
+            if anchor is not None and anchor["audit_max"] != audit_max:
+                raise ValueError("事件归属已人工调整，请刷新列表后继续翻页")
             if anchor is None:
                 high_water = self.connection.execute(
                     "SELECT (SELECT COALESCE(MAX(id), 0) FROM event_reports) AS report_max, "
@@ -4013,6 +4312,7 @@ class Database:
                 params.update(
                     report_max=int(high_water["report_max"]),
                     alert_max=int(high_water["alert_max"]),
+                    audit_max=audit_max,
                 )
             rows = list(self.connection.execute(
                 f"{window_sql} SELECT * FROM window_events{where} ORDER BY {order} LIMIT :limit",
@@ -4072,6 +4372,7 @@ class Database:
             values: dict[str, Any] = {
                 "sort": sort, "since": since, "until": until,
                 "report_max": params["report_max"], "alert_max": params["alert_max"],
+                "audit_max": params["audit_max"],
                 "last": int(last["last_seen_at"]), "id": int(last["id"])
             }
             if sort == "importance":
@@ -4207,6 +4508,8 @@ class Database:
             ).fetchone()
             if assigned is not None:
                 return self._event_report_from_row(assigned)
+            if self.canonical_event_key(event.event_key) != event.event_key:
+                raise ValueError("event was merged during projection; retry with current candidates")
             self._save_event(event)
             saved = self._save_event_report(report)
             self.connection.execute(
@@ -4824,7 +5127,11 @@ class Database:
                             "(SELECT value FROM json_each(?)) ORDER BY er.published_at DESC, er.id DESC",
                             (int(item["event_id"]), str(item["observation_ids_json"])),
                         )
-                        frozen_reports = [self._event_report_from_row(report) for report in report_rows]
+                        frozen_reports = (
+                            [PersistedEventReport(**report) for report in json.loads(item["event_reports_json"])]
+                            if item["event_reports_json"] is not None
+                            else [self._event_report_from_row(report) for report in report_rows]
+                        )
                         representative_sources: set[str] = set()
                         reconstructed = []
                         for report in frozen_reports:
@@ -5032,6 +5339,10 @@ class Database:
                     (incident_cutoff,),
                 )
             if audit_cutoff is not None:
+                self.connection.execute(
+                    "DELETE FROM digest_generation_attempts WHERE status!='running' AND finished_at < ?",
+                    (audit_cutoff,),
+                )
                 self.connection.execute("DELETE FROM config_audit WHERE created_at < ?", (audit_cutoff,))
                 self.connection.execute("DELETE FROM reminder_audit WHERE created_at < ?", (audit_cutoff,))
                 self.connection.execute(

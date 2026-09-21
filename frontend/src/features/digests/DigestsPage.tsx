@@ -4,8 +4,9 @@ import type { AdminApi } from '../../shared/api'
 import { ApiError } from '../../shared/api'
 import type { DigestDetail, DigestItem, DigestReport, DigestSummary } from '../../shared/types'
 import { formatDate } from '../../shared/utils'
+import { DigestRunsPanel } from './DigestRunsPanel'
 
-interface DigestsPageProps { api: AdminApi; onUnauthorized: () => void; initialKey?: string }
+interface DigestsPageProps { api: AdminApi; onUnauthorized: () => void; initialKey?: string; canRetry?: boolean }
 
 type ReportView = { link: string; tier: 'primary' | 'secondary' | 'social'; relation?: string; sourceId?: string; title?: string; summary?: string }
 
@@ -49,7 +50,8 @@ const relationLabels: Record<string, string> = {
   context: '背景信息',
 }
 
-export function DigestsPage({ api, onUnauthorized, initialKey }: DigestsPageProps) {
+export function DigestsPage({ api, onUnauthorized, initialKey, canRetry = false }: DigestsPageProps) {
+  const [view, setView] = useState<'digests' | 'runs'>('digests')
   const [digests, setDigests] = useState<DigestSummary[]>([])
   const [selected, setSelected] = useState<DigestDetail | null>(null)
   const [loading, setLoading] = useState(true)
@@ -88,9 +90,12 @@ export function DigestsPage({ api, onUnauthorized, initialKey }: DigestsPageProp
 
   if (selected) return <DigestReader digest={selected} onBack={() => { setSelected(null); window.history.replaceState(null, '', '/#/digests'); void load() }} />
   return <>
-    <div className="page-actions"><div><h2>情报日报</h2><p>每天值得了解、但不需要立即打断你的信息。</p></div><button className="icon-button" aria-label="刷新日报" disabled={loading} onClick={() => { void load() }}><RefreshCw className={loading ? 'spin' : ''} size={18} /></button></div>
+    <div className="page-actions"><div><h2>情报日报</h2><p>每天值得了解、但不需要立即打断你的信息。</p></div>{view === 'digests' && <button className="icon-button" aria-label="刷新日报" disabled={loading} onClick={() => { void load() }}><RefreshCw className={loading ? 'spin' : ''} size={18} /></button>}</div>
+    <div className="filter-row"><div className="segmented" role="group" aria-label="日报视图"><button aria-pressed={view === 'digests'} className={view === 'digests' ? 'active' : ''} onClick={() => setView('digests')}>日报内容</button><button aria-pressed={view === 'runs'} className={view === 'runs' ? 'active' : ''} onClick={() => setView('runs')}>运行记录</button></div></div>
+    {view === 'runs' ? <DigestRunsPanel api={api} onUnauthorized={onUnauthorized} canRetry={canRetry} /> : <>
     {error && <div className="inline-error"><CircleAlert size={17} />{error}</div>}
     {loading && !digests.length ? <div className="loading-state"><RefreshCw className="spin" size={24} />正在读取日报…</div> : digests.length ? <section className="digest-cards">{digests.map((digest) => <article className="digest-card" key={`${digest.digest_key}@${digest.version}`}><div className="digest-date"><CalendarDays size={17} />{formatDate(digest.period_end)}</div><h3>{digest.title}</h3><p>{digest.summary || '这期日报暂无摘要。'}</p><div className="digest-meta"><span>{digest.item_count} 条重点</span><span>{digest.source_count} 个来源</span><span>{digest.generation_kind}</span></div><button className="button subtle" onClick={() => { void open(digest) }}><BookOpen size={16} />阅读日报</button></article>)}</section> : <section className="empty-state"><div className="empty-icon"><FileText size={29} /></div><h3>还没有已发布日报</h3><p>日报生成器发布第一期内容后会出现在这里。</p></section>}
+    </>}
   </>
 }
 

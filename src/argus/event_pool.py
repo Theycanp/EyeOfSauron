@@ -7,13 +7,15 @@ import logging
 from dataclasses import replace
 from typing import Any
 
-from .event_clustering import cluster_events, event_match_score
+from .event_clustering import cluster_events, event_match_score, generic_event_title
 from .event_identity import identify_semantic_event
 from .events import (
     EventPoolRepository,
     EventRepository,
     PersistedEvent,
     PersistedEventReport,
+    EventWorkspaceRepository,
+    event_lifecycle,
 )
 
 
@@ -48,6 +50,7 @@ class EventPoolProjector:
         self.match_window_seconds = match_window_seconds
         self.candidate_limit = candidate_limit
         self.match_threshold = match_threshold
+        self._last_maintenance = -60
 
     @staticmethod
     def _shape(event: PersistedEvent) -> dict[str, Any]:
@@ -78,10 +81,18 @@ class EventPoolProjector:
         for score, candidate in ranked:
             if score < self.match_threshold:
                 break
+            reports = self.repository.list_event_reports(candidate.event_key, limit=2000)
+            if len(reports) == 2000:
+                continue
+            # Guard the whole evidence set, not just a representative that can
+            # change when an official source arrives later.
+            if any(event_match_score(observation, {
+                "title": report.title, "summary": report.summary, "published_at": report.published_at,
+                "region": candidate.regions[0] if candidate.regions else "GLOBAL",
+                "topic": candidate.topics[0] if candidate.topics else "general",
+            }) < 0.5 for report in reports):
+                continue
             if semantic is not None:
-                reports = self.repository.list_event_reports(candidate.event_key, limit=2000)
-                if len(reports) == 2000:
-                    continue
                 if any(
                     prior is not None and not semantic.compatible(prior, published_at, report.published_at)
                     for report in reports
@@ -106,6 +117,9 @@ class EventPoolProjector:
         if since is not None and until is not None and until <= since:
             raise ValueError("event projection time range is invalid")
         projected = 0
+        if now - self._last_maintenance >= 60 and isinstance(self.repository, EventWorkspaceRepository):
+            self.repository.maintain_event_lifecycle(now=now)
+            self._last_maintenance = now
         for observation in self.repository.list_unassigned_event_observations(
             since=since, until=until, limit=limit
         ):
@@ -118,9 +132,10 @@ class EventPoolProjector:
                 existing, match_score = self._match(observation)
                 semantic = identify_semantic_event(report.title, report.summary)
                 bucket = incoming.published_at if semantic is not None else incoming.published_at // 86400
-                new_identity = hashlib.sha256(
-                    f"{incoming.event_id}:{bucket}".encode("ascii")
-                ).hexdigest()[:24]
+                identity_seed = f"{incoming.event_id}:{bucket}"
+                if generic_event_title(report.title):
+                    identity_seed += f":{report.observation_id}"
+                new_identity = hashlib.sha256(identity_seed.encode("ascii")).hexdigest()[:24]
                 event_key = existing.event_key if existing is not None else new_identity
                 prior_reports = (
                     self.repository.list_event_reports(event_key, limit=500)
@@ -155,6 +170,7 @@ class EventPoolProjector:
                         last_seen_at=incoming.published_at,
                         regions=incoming.regions,
                         topics=incoming.topics,
+                        status=event_lifecycle(incoming.published_at, now),
                         independent_source_count=1 if report.source_id else 0,
                         created_at=now,
                         updated_at=now,
@@ -174,7 +190,7 @@ class EventPoolProjector:
                         last_seen_at=max(existing.last_seen_at, incoming.published_at),
                         regions=tuple(sorted(set(existing.regions) | set(incoming.regions))),
                         topics=tuple(sorted(set(existing.topics) | set(incoming.topics))),
-                        status="active",
+                        status=event_lifecycle(max(existing.last_seen_at, incoming.published_at), now),
                         independent_source_count=len(prior_sources | {report.source_id}),
                         updated_at=now,
                     )

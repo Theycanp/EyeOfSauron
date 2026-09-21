@@ -16,6 +16,14 @@ REPORT_TIERS = frozenset({"primary", "secondary", "social"})
 REPORT_RELATIONS = frozenset(
     {"primary", "corroborates", "updates", "contradicts", "context", "social"}
 )
+EVENT_QUIET_SECONDS = 28 * 3600
+EVENT_CLOSED_SECONDS = 7 * 86400
+
+
+def event_lifecycle(last_seen_at: int, now: int) -> str:
+    """Publication time determines activity; historical backfills never look live."""
+    age = max(0, now - last_seen_at)
+    return "closed" if age >= EVENT_CLOSED_SECONDS else "quiet" if age >= EVENT_QUIET_SECONDS else "active"
 CLAIM_STATUSES = frozenset({"active", "superseded", "disputed"})
 
 
@@ -274,3 +282,38 @@ class EventRepairRepository(Protocol):
         self, event_keys: Sequence[str], *, expected_observation_ids: Sequence[int],
         actor: str, now: int, primary_source_ids: Sequence[str] = (),
     ) -> str: ...
+
+
+class EventWorkspaceConflict(ValueError):
+    """The evidence changed after the operator's preview."""
+
+
+@runtime_checkable
+class EventEditorialRepository(Protocol):
+    def get_event_digest_choices(self, event_keys: Sequence[str]) -> dict[str, str]: ...
+
+
+@runtime_checkable
+class EventWorkspaceRepository(EventEditorialRepository, Protocol):
+    """Review commands are separate from collection and immutable digest storage."""
+
+    def maintain_event_lifecycle(self, *, now: int, limit: int = 500) -> int: ...
+
+    def event_workspace_state(self, event_keys: Sequence[str], actor: str) -> dict[str, Any]: ...
+
+    def set_event_preference(self, event_key: str, actor: str, *, read: bool,
+                             followed: bool, ignored: bool, now: int) -> None: ...
+
+    def set_event_digest_choice(self, event_key: str, choice: str, *, actor: str,
+                                reason: str, now: int) -> None: ...
+
+    def preview_event_repair(self, action: str, event_keys: Sequence[str], *,
+                             observation_ids: Sequence[int] = ()) -> dict[str, Any]: ...
+
+    def apply_event_repair(self, action: str, event_keys: Sequence[str], *,
+                           observation_ids: Sequence[int], expected_revision: str,
+                           actor: str, reason: str, now: int) -> str: ...
+
+    def list_event_audit(self, event_key: str, *, limit: int = 50) -> list[dict[str, Any]]: ...
+
+    def canonical_event_key(self, event_key: str) -> str: ...

@@ -41,8 +41,10 @@ Startup applies forward-only, transactional, idempotent migrations in order and
 refuses a database newer than the running code. Schema 15 adds persistent digest
 AI attempt usage, retry state, and consecutive failure state; schema 16 adds
 source-tier evidence to digest items; schema 17 adds the event/report/claim/
-timeline projection and links digest items to stable events. Release metadata
-records the required schema.
+timeline projection and links digest items to stable events. Schema 18 adds the
+event workspace preferences/editorial choices, aliases, review audit and frozen
+historical report snapshots. Schema 19 adds bounded digest generation attempt
+history and provider diagnostics. Release metadata records the required schema.
 
 A code rollback that cannot read the current schema must restore the matching
 pre-release backup; changing only the `current` symlink is unsafe in that case.
