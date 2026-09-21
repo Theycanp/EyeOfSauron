@@ -191,12 +191,19 @@ export interface ContentFetchState extends JsonRecord {
   dead_at?: number | null
 }
 
+export interface ContentAvailability {
+  level: Exclude<ContentLevel, 'analysis'>
+  fetch_outcome: 'not_requested' | 'available' | 'fetching' | 'retrying' | 'queued' | 'deferred' | 'unavailable' | 'blocked' | 'parser_failed' | 'unsupported'
+  has_full_text: boolean
+}
+
 export interface AlertDetailResponse {
   alert: AlertDetailRecord
   observation?: ObservationDetail | null
   incident?: Incident | null
   documents?: ContentDocument[]
   content_fetch?: ContentFetchState | null
+  content_availability?: ContentAvailability
 }
 
 export interface ManualEventDraft {

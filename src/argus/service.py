@@ -278,7 +278,10 @@ class ArgusService:
                 failure_kind=exc.kind,
                 max_attempts=5,
             )
-            log = LOGGER.error if state == "dead" else LOGGER.warning
+            # Inaccessible/unsupported public text is an enrichment limitation;
+            # the independently saved Feed remains usable and source health is intact.
+            expected = exc.kind in {"http_403", "http_404", "empty_content", "unsupported_type", "unsupported_pdf"}
+            log = LOGGER.warning if expected or state != "dead" else LOGGER.error
             log(
                 "content_fetch_failed job_id=%d observation_id=%d attempts=%d state=%s "
                 "kind=%s error=%s",

@@ -134,6 +134,36 @@ describe('EventsPage detail reader', () => {
     expect(screen.queryByText(/Saved detailed RSS summary available/)).not.toBeInTheDocument()
   })
 
+  it('keeps the saved excerpt visible when the origin blocks full text', async () => {
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    const blocked: AlertDetailResponse = {
+      ...detail,
+      content_fetch: { status: 'dead', failure_kind: 'http_403', attempts: 1, updated_at: 1_788_363_001 },
+      content_availability: { level: 'excerpt', fetch_outcome: 'blocked', has_full_text: false },
+    }
+    const api = { alert: vi.fn().mockResolvedValue(blocked) } as unknown as AdminApi
+    render(<EventsPage api={api} onUnauthorized={vi.fn()} initialAlertId="17" incidents={[]} managedSources={[]} health={health} openCount={0} />)
+    expect(await screen.findByText(/原站拒绝访问/)).toBeVisible()
+    expect(screen.getByText(/Saved detailed RSS summary available/)).toBeVisible()
+    expect(screen.getByText('摘要')).toBeVisible()
+    expect(screen.getByText(/新闻采集与通知不受影响/)).toBeVisible()
+    expect(screen.queryByText(/最早下次尝试/)).not.toBeInTheDocument()
+  })
+
+  it('shows a domain cooldown as waiting without claiming a fetch attempt', async () => {
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    const deferred: AlertDetailResponse = {
+      ...detail,
+      content_fetch: { status: 'pending', failure_kind: 'host_backoff', attempts: 0, next_attempt_at: 1_788_366_600, updated_at: 1_788_363_001 },
+      content_availability: { level: 'excerpt', fetch_outcome: 'deferred', has_full_text: false },
+    }
+    const api = { alert: vi.fn().mockResolvedValue(deferred) } as unknown as AdminApi
+    render(<EventsPage api={api} onUnauthorized={vi.fn()} initialAlertId="17" incidents={[]} managedSources={[]} health={health} openCount={0} />)
+    expect(await screen.findByText(/同域正文请求已延后/)).toBeVisible()
+    expect(screen.getByText(/已尝试 0 次.*最早下次尝试/)).toBeVisible()
+    expect(screen.queryByText(/正在取得公开正文/)).not.toBeInTheDocument()
+  })
+
   it('creates a manual event through the real event API and opens its detail', async () => {
     vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
     const created = {

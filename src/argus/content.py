@@ -127,6 +127,68 @@ class ContentFetchWorkItem:
     attempts: int
 
 
+def content_host_backoff_seconds(failure_kind: str) -> int:
+    """Bound a host pause after access/rate/network failures, never parser failures."""
+    if failure_kind == "http_403":
+        return 3600
+    if failure_kind == "http_429":
+        return 900
+    if failure_kind in {"http_408", "http_425", "dns", "urlerror", "timeouterror", "oserror"}:
+        return 120
+    if re.fullmatch(r"http_5\d\d", failure_kind):
+        return 120
+    return 0
+
+
+def content_fetch_host(url: str) -> str:
+    """Invalid persisted requests must reach job validation, not stop the worker."""
+    try:
+        return urlsplit(url).hostname or ""
+    except ValueError:
+        return ""
+
+
+def content_availability(
+    documents: list[dict[str, Any]], fetch: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep the saved evidence level independent from the enrichment outcome."""
+    levels = {str(document["level"]) for document in documents if document.get("body", "").strip()}
+    level = next((value for value in ("document", "full_text", "excerpt", "metadata") if value in levels), "metadata")
+    outcome = "not_requested"
+    if fetch:
+        status = fetch["status"]
+        kind = str(fetch.get("failure_kind") or "")
+        outcome = {
+            "completed": "available", "leased": "fetching", "retry": "retrying",
+            "pending": "deferred" if kind == "host_backoff" else "queued",
+        }.get(str(status), "unavailable")
+        if status == "dead":
+            if kind in {"http_401", "http_403"}:
+                outcome = "blocked"
+            elif kind in {"empty_content", "invalid_pdf"}:
+                outcome = "parser_failed"
+            elif kind in {"unsupported_type", "unsupported_pdf"}:
+                outcome = "unsupported"
+    return {"level": level, "fetch_outcome": outcome, "has_full_text": bool(levels & {"full_text", "document"})}
+
+
+def public_document_url(url: str) -> str:
+    """Use only the Commission's documented public print route for its SPA pages."""
+    parsed = urlsplit(url)
+    if parsed.netloc.lower() != "ec.europa.eu" or parsed.query or parsed.fragment:
+        return url
+    match = re.fullmatch(
+        r"/commission/presscorner/detail/([a-z]{2})/([a-z]+_\d{2}_\d+)", parsed.path
+    )
+    if parsed.scheme != "https" or match is None:
+        return url
+    language, reference = match.groups()
+    return (
+        f"https://ec.europa.eu/commission/presscorner/api/files/document/print/"
+        f"{language}/{reference}/{reference.upper()}_{language.upper()}.pdf"
+    )
+
+
 def parse_content_policy(value: object) -> ContentPolicy:
     try:
         return ContentPolicy(str(value or ContentPolicy.FEED_METADATA_ONLY))
@@ -327,7 +389,7 @@ class PublicDocumentFetcher:
 
     def fetch(self, item: ContentFetchWorkItem) -> ContentDocumentDraft:
         request_spec = item.request
-        current_url = request_spec.url
+        current_url = public_document_url(request_spec.url)
         response = None
         headers = {
             "Accept": "text/html, text/plain, application/pdf, application/xml, text/xml;q=0.8",
@@ -423,5 +485,8 @@ class PublicDocumentFetcher:
             media_type="text/plain",
             canonical_url=final_url,
             rights_policy="public_official_document",
-            metadata={"original_media_type": media_type, "source_bytes": len(payload)},
+            metadata={
+                "original_media_type": media_type, "source_bytes": len(payload),
+                "requested_url": request_spec.url,
+            },
         )

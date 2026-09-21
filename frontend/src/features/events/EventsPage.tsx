@@ -151,12 +151,26 @@ function EventReader({ detail, onBack, sourceName }: { detail: AlertDetailRespon
     <section className="event-detail-grid">
       <div className="event-detail-main">
         <section className="panel event-detail-section"><div className="panel-header content-heading"><div><h2>{isManual ? '事件内容' : contentMeta?.heading || '已采集内容'}</h2><p>{isManual ? '这是后台提交并由 EyeOfSauron 保存的原始内容。' : contentMeta?.description || '该来源目前只提供了通知元数据。'}</p></div>{contentMeta && <span className={`content-level ${contentMeta.tone}`}><FileText size={14} />{contentMeta.label}</span>}</div><div className="event-detail-copy preserve-lines"><p>{content?.body || observation?.summary || alert.message || '该来源没有提供摘要。'}</p></div>{content && <footer className="content-provenance"><span>取得方式：{contentMeta?.method}</span><span>内容策略：{contentMeta?.rights}</span><span>保存时间：{formatDate(content.fetched_at)}</span></footer>}</section>
-        {contentFetch && !['completed'].includes(contentFetch.status) && <section className={`content-fetch-state ${contentFetch.status === 'dead' ? 'negative' : 'neutral'}`}><RefreshCw className={['pending', 'leased', 'retry'].includes(contentFetch.status) ? 'spin' : ''} size={16} /><span>{contentFetch.status === 'dead' ? '公开文档正文抓取失败，已保留 Feed 摘要。' : '公开文档正文正在独立抓取，当前先显示 Feed 摘要。'}</span></section>}
+        {contentFetch && contentFetch.status !== 'completed' && <section className="content-fetch-state neutral" role="status"><RefreshCw className={contentFetch.status === 'leased' ? 'spin' : ''} size={16} /><div><strong>正文取得情况</strong><p>{contentFetchExplanation(detail)} 已保存的{detail.content_availability?.level === 'metadata' ? '标题与链接' : '内容'}仍可阅读，新闻采集与通知不受影响。</p><small>已尝试 {contentFetch.attempts} 次{['pending', 'retry'].includes(contentFetch.status) && contentFetch.next_attempt_at ? ` · 最早下次尝试：${formatDate(contentFetch.next_attempt_at)}` : ''}</small></div></section>}
         {alert.message && alert.message !== observation?.summary && <section className="panel event-detail-section"><div className="panel-header"><div><h2>通知说明</h2><p>发送到 ntfy 的消息正文。</p></div></div><div className="event-detail-copy preserve-lines"><p>{alert.message}</p></div></section>}
       </div>
       <aside className="panel event-facts"><div className="panel-header"><div><h2>判断依据</h2><p>通知触发时保存的可审计事实。</p></div></div><dl><div><dt>来源</dt><dd>{sourceLabel}</dd></div><div><dt>主题</dt><dd>{observation?.topic || 'general'}</dd></div><div><dt>地区</dt><dd>{observation?.region || 'GLOBAL'}</dd></div><div><dt>通知状态</dt><dd>{alert.status}</dd></div><div><dt>{isManual ? '记录时间' : '抓取时间'}</dt><dd>{formatDate(observation?.fetched_at || alert.created_at)}</dd></div></dl>{(alert.evidence || []).length > 0 && <div className="event-evidence">{(alert.evidence || []).map((item) => <span key={item}>{item}</span>)}</div>}{alert.source_url && <a className="button subtle wide" href={alert.source_url} target="_blank" rel="noreferrer"><ExternalLink size={16} />查看原文</a>}</aside>
     </section>
   </article>
+}
+
+function contentFetchExplanation(detail: AlertDetailResponse): string {
+  const fetch = detail.content_fetch
+  if (!fetch) return ''
+  if (fetch.status === 'leased') return '正在取得公开正文。'
+  if (fetch.status === 'retry') return '上次请求暂时失败，已安排自动重试。'
+  if (fetch.status === 'pending') return fetch.failure_kind === 'host_backoff'
+    ? '来源网站暂时受限，同域正文请求已延后；冷却后自动尝试恢复。'
+    : '公开正文已进入待处理队列。'
+  if (['http_401', 'http_403'].includes(fetch.failure_kind || '')) return '原站拒绝访问，已停止自动抓取这篇正文。'
+  if (['empty_content', 'invalid_pdf'].includes(fetch.failure_kind || '')) return '页面未提取出足够正文，已停止自动抓取这篇正文。'
+  if (['unsupported_type', 'unsupported_pdf'].includes(fetch.failure_kind || '')) return '当前不支持该文档格式，已停止自动抓取这篇正文。'
+  return '公开正文未能取得，已停止自动重试。'
 }
 
 function contentLabels(level: string, method: string, rights: string): { heading: string; label: string; method: string; rights: string; description: string; tone: string } {

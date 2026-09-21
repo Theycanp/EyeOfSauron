@@ -20,6 +20,9 @@ from .content import (
     ContentFetchRequest,
     ContentFetchWorkItem,
     ContentLevel,
+    content_availability,
+    content_fetch_host,
+    content_host_backoff_seconds,
 )
 from .digest import (
     DIGEST_RETRY_INTERVAL_SECONDS, DigestCluster, DigestDocument, DigestRetryState, SourceCoverage,
@@ -1425,14 +1428,45 @@ class Database:
                 """,
                 (now, now, now),
             )
-            row = self.connection.execute(
+            candidates = self.connection.execute(
                 """
-                SELECT id FROM content_fetch_jobs
+                SELECT id, url, status FROM content_fetch_jobs
                 WHERE status IN ('pending', 'retry') AND next_attempt_at <= ?
-                ORDER BY next_attempt_at, id LIMIT 1
+                ORDER BY next_attempt_at, id LIMIT 50
                 """,
                 (now,),
-            ).fetchone()
+            ).fetchall()
+            if not candidates:
+                return None
+            # Failure rows are the durable source of short host pauses. This uses
+            # existing task state, including after a restart, without a second queue.
+            host_pauses: dict[str, int] = {}
+            for failure in self.connection.execute(
+                "SELECT url, failure_kind, updated_at FROM content_fetch_jobs "
+                "WHERE updated_at > ? AND status IN ('dead', 'retry') "
+                "AND failure_kind IS NOT NULL",
+                (now - 3600,),
+            ):
+                seconds = content_host_backoff_seconds(str(failure["failure_kind"]))
+                until = int(failure["updated_at"]) + seconds
+                host = content_fetch_host(str(failure["url"]))
+                if seconds and until > now:
+                    host_pauses[host] = max(host_pauses.get(host, 0), until)
+            row = None
+            for candidate in candidates:
+                until = host_pauses.get(content_fetch_host(str(candidate["url"])), 0)
+                if until > now:
+                    # Do not alter retry.updated_at: that is the failure timestamp,
+                    # and changing it would keep extending the pause indefinitely.
+                    self.connection.execute(
+                        "UPDATE content_fetch_jobs SET next_attempt_at = MAX(next_attempt_at, ?), "
+                        "failure_kind = CASE WHEN status = 'pending' THEN 'host_backoff' ELSE failure_kind END "
+                        "WHERE id = ? AND status IN ('pending', 'retry')",
+                        (until, int(candidate["id"])),
+                    )
+                    continue
+                row = candidate
+                break
             if row is None:
                 return None
             job_id = int(row["id"])
@@ -2838,6 +2872,7 @@ class Database:
             "incident": incident,
             "documents": documents,
             "content_fetch": content_fetch,
+            "content_availability": content_availability(documents, content_fetch),
         }
 
     def create_manual_event(
