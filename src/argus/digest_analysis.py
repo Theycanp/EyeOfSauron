@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
+import time
 from typing import Protocol, Sequence
 
 from .digest import DigestDocument
 from .model_analyzers import AnalyzerError, OpenAICompatibleAnalyzer
+from .prompts import get_prompt
+from .util import sanitize_error
+from urllib.parse import urlsplit
 
 
 class DigestContentRepository(Protocol):
@@ -25,16 +30,33 @@ class ApiDigestSummarizer:
             self.clients = tuple(clients)
         if not self.clients:
             raise ValueError("at least one digest analyzer is required")
+        self.last_attempts: list[dict[str, object]] = []
 
     def summarize(self, digest: DigestDocument) -> str:
-        if len(self.clients) == 1:
-            return self._summarize_with(self.clients[0], digest)
+        self.last_attempts = []
         failures: list[str] = []
         for client in self.clients:
+            prompt = client.prompt or get_prompt(client.settings.prompt_id, client.settings.prompt_version)
+            record: dict[str, object] = {
+                "provider": urlsplit(client.settings.base_url).hostname or "unknown",
+                "model": client.settings.model,
+                "prompt_id": prompt.prompt_id, "prompt_version": prompt.version,
+                "prompt_hash": hashlib.sha256(prompt.system_text.encode()).hexdigest(),
+                "status": "running",
+            }
+            started = time.monotonic()
+            self.last_attempts.append(record)
             try:
-                return self._summarize_with(client, digest)
+                result = self._summarize_with(client, digest)
+                record["status"] = "succeeded"
+                return result
             except Exception as exc:
+                record.update(status="failed", error=sanitize_error(exc))
+                if len(self.clients) == 1:
+                    raise
                 failures.append(f"{client.settings.model}:{type(exc).__name__}")
+            finally:
+                record["elapsed_ms"] = round((time.monotonic() - started) * 1000)
         raise AnalyzerError("all configured digest analyzers failed: " + ", ".join(failures))
 
     @staticmethod

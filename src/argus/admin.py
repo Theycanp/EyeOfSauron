@@ -760,10 +760,10 @@ def make_handler(
             if path == "/api/events":
                 return "events:write"
             if path.startswith("/api/news-events/"):
-                return "read" if not path.endswith(("/preference", "/digest-choice", "/repair/preview", "/repair/apply")) else "events:write"
+                return "read" if path.endswith("/preference") or not path.endswith(("/digest-choice", "/repair/preview", "/repair/apply")) else "events:write"
             if path.startswith("/api/source-quality"):
                 return "quality:write"
-            if path.startswith(("/api/outbox", "/api/jobs")):
+            if path.startswith(("/api/outbox", "/api/jobs", "/api/digest-runs")):
                 return "operations:write"
             if path.startswith(("/api/sources", "/api/source-bundles", "/api/rules", "/api/test-source")):
                 return "sources:write"
@@ -1020,6 +1020,21 @@ def make_handler(
                     },
                 )
                 return
+            if path == "/api/digest-runs" or path.startswith("/api/digest-runs/"):
+                try:
+                    if path == "/api/digest-runs":
+                        runs = database.list_digest_runs(now=int(time.time()), limit=int(query.get("limit", ["30"])[0]))
+                        self._json(HTTPStatus.OK, {"runs": runs})
+                    else:
+                        key = urllib.parse.unquote(path[len("/api/digest-runs/"):])
+                        if not key or "/" in key or len(key) > 128:
+                            raise ValueError("invalid digest run key")
+                        run = database.get_digest_run(key, now=int(time.time()))
+                        self._json(HTTPStatus.OK if run else HTTPStatus.NOT_FOUND,
+                                   {"run": run} if run else {"error": "digest run not found", "code": "not_found"})
+                except ValueError as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), "code": "invalid_query"})
+                return
             if path == "/api/digests":
                 status_filter = query.get("status", ["published"])[0]
                 try:
@@ -1243,6 +1258,20 @@ def make_handler(
                             raise ValueError("digest choice and reason are required")
                         database.set_event_digest_choice(key, choice, actor=actor, reason=reason, now=int(time.time()))
                     self._json(HTTPStatus.OK, {"state": database.event_workspace_state([key], actor)[key]})
+                    return
+                if path.startswith("/api/digest-runs/") and path.endswith("/retry"):
+                    key = urllib.parse.unquote(path[len("/api/digest-runs/"):-len("/retry")])
+                    request_id = data.get("request_id")
+                    if not key or "/" in key or not isinstance(request_id, str):
+                        raise AdminError("invalid digest retry request")
+                    try:
+                        job = database.request_digest_retry_now(key, actor=actor, request_id=request_id, now=int(time.time()))
+                    except KeyError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "digest run not found", "code": "not_found"})
+                    except ValueError as exc:
+                        self._json(HTTPStatus.CONFLICT, {"error": str(exc), "code": "invalid_state"})
+                    else:
+                        self._json(HTTPStatus.OK, {"job": job})
                     return
                 if path == "/api/auth/logout":
                     if self.auth_context.session_hash:

@@ -20,6 +20,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from .config import DigestConfig
+from .digest_operations import DigestRunRepository
 from .event_clustering import cluster_events, event_match_score
 from .event_pool import EventPoolProjector
 from .events import EventPoolRepository, EventRepository, PersistedEvent, PersistedEventReport
@@ -774,6 +775,21 @@ class DigestBuilder:
                 if existing is not None else candidate
             )
         candidates = list(candidates_by_key.values())
+        editorial_reader = getattr(self.repository, "get_event_digest_choices", None)
+        editorial: Mapping[str, str] = {}
+        if callable(editorial_reader) and candidates:
+            raw_editorial = editorial_reader(tuple(candidate.cluster_key for candidate in candidates))
+            if isinstance(raw_editorial, Mapping):
+                editorial = {
+                    str(key): str(value)
+                    for key, value in raw_editorial.items()
+                    if value in {"include", "exclude"}
+                }
+                candidates = [
+                    candidate for candidate in candidates
+                    if editorial.get(candidate.cluster_key) != "exclude"
+                ]
+        included = {key for key, value in editorial.items() if value == "include"}
         selection_limit = adaptive_digest_item_count(
             candidates, max_items=self.item_limit
         )
@@ -781,6 +797,7 @@ class DigestBuilder:
         counts: dict[str, int] = {}
         while candidates and len(selected) < selection_limit:
             candidates.sort(key=lambda candidate: (
+                candidate.cluster_key not in included,
                 candidate.handling != "immediate",
                 -(
                     candidate.score
@@ -1045,6 +1062,8 @@ class DigestScheduler:
             if document.generation_kind == "api":
                 self._finish_retry(document.digest_key, retry, now)
                 return document
+            if self.summarizer is None:
+                return document
             if now > retry.retry_deadline_at:
                 streak, notify = self._finish_retry_failure(
                     document.digest_key, now, retry.last_error or "digest AI retry window expired",
@@ -1113,7 +1132,29 @@ class DigestScheduler:
             raise RuntimeError("digest API attempt budget exhausted")
         # Only inference crosses threads. Repository operations remain on the
         # connection owner's event-loop thread.
-        return await asyncio.to_thread(self.summarizer.summarize, evidence)  # type: ignore[union-attr]
+        journal = repository if isinstance(repository, DigestRunRepository) else None
+        attempt_id = journal.start_digest_attempt(document.digest_key, now=now) if journal else None
+        try:
+            summary = await asyncio.to_thread(self.summarizer.summarize, evidence)  # type: ignore[union-attr]
+            with_api_summary(document, summary, created_at=now)
+        except BaseException as exc:
+            if journal is not None and attempt_id is not None:
+                journal.finish_digest_attempt(
+                    attempt_id, status="interrupted" if isinstance(exc, asyncio.CancelledError) else "failed",
+                    now=max(now, int(datetime.now(UTC).timestamp())), error=sanitize_error(exc),
+                    providers=self._provider_trace(),
+                )
+            raise
+        if journal is not None and attempt_id is not None:
+            journal.finish_digest_attempt(
+                attempt_id, status="succeeded", now=max(now, int(datetime.now(UTC).timestamp())),
+                providers=self._provider_trace(),
+            )
+        return summary
+
+    def _provider_trace(self) -> tuple[Mapping[str, Any], ...]:
+        trace = getattr(self.summarizer, "last_attempts", ())
+        return tuple(row for row in trace if isinstance(row, Mapping)) if isinstance(trace, (list, tuple)) else ()
 
     async def _retry_api(
         self, document: DigestDocument, retry: DigestRetryState, now: int

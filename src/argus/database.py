@@ -28,6 +28,7 @@ from .digest import (
     DIGEST_RETRY_INTERVAL_SECONDS, DigestCluster, DigestDocument, DigestRetryState, SourceCoverage,
 )
 from .event_clustering import cluster_events, event_aggregate_score, event_evidence_score
+from .digest_operations import digest_run_state
 from .event_identity import identify_semantic_event
 from .events import (
     EventListItem,
@@ -56,7 +57,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 
 def read_active_config(path: Path) -> dict[str, Any] | None:
@@ -1334,6 +1335,140 @@ class Database:
 
         if version < 18:
             migrate_event_workspace(self)
+            version = 18
+        if version < 19:
+            with self.unit_of_work():
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS digest_generation_attempts (
+                        id INTEGER PRIMARY KEY,
+                        digest_key TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed','interrupted')),
+                        started_at INTEGER NOT NULL,
+                        finished_at INTEGER,
+                        error TEXT,
+                        providers_json TEXT NOT NULL DEFAULT '[]'
+                    )
+                """)
+                self.connection.execute(
+                    "CREATE INDEX IF NOT EXISTS digest_generation_attempts_key_idx "
+                    "ON digest_generation_attempts(digest_key, id DESC)"
+                )
+                self.connection.execute("PRAGMA user_version=19")
+
+    def start_digest_attempt(self, digest_key: str, *, now: int) -> int:
+        if not digest_key or len(digest_key) > 128 or now < 0:
+            raise ValueError("invalid digest attempt")
+        with self.unit_of_work():
+            cursor = self.connection.execute(
+                "INSERT INTO digest_generation_attempts(digest_key,status,started_at) "
+                "VALUES (?, 'running', ?)", (digest_key, now),
+            )
+        return int(cursor.lastrowid)
+
+    def finish_digest_attempt(
+        self, attempt_id: int, *, status: str, now: int,
+        error: str | None = None, providers: Sequence[Mapping[str, Any]] = (),
+    ) -> None:
+        if status not in {"succeeded", "failed", "interrupted"} or now < 0:
+            raise ValueError("invalid digest attempt result")
+        # Only allow diagnostic fields. Neither request bodies nor credentials
+        # belong in attempt history, even from an alternative provider adapter.
+        allowed = {"provider", "model", "prompt_id", "prompt_version", "prompt_hash",
+                   "status", "error", "elapsed_ms"}
+        safe_providers = [{key: sanitize_error(str(value))[:500] for key, value in row.items()
+                           if key in allowed} for row in list(providers)[:12]]
+        with self.unit_of_work():
+            self.connection.execute(
+                "UPDATE digest_generation_attempts SET status=?, finished_at=?, error=?, providers_json=? "
+                "WHERE id=? AND status='running'",
+                (status, now, sanitize_error(error)[:1000] if error else None,
+                 json.dumps(safe_providers, ensure_ascii=False), attempt_id),
+            )
+
+    def get_digest_run(self, digest_key: str, *, now: int) -> dict[str, Any] | None:
+        if not digest_key or len(digest_key) > 128 or now < 0:
+            raise ValueError("invalid digest run")
+        with (nullcontext() if self.connection.in_transaction else self.unit_of_work(immediate=False)):
+            digest = self.connection.execute(
+                "SELECT version,generation_kind,published_at FROM digests "
+                "WHERE digest_key=? AND status='published'", (digest_key,),
+            ).fetchone()
+            retry_row = self.connection.execute(
+                "SELECT * FROM digest_retry_state WHERE digest_key=?", (digest_key,),
+            ).fetchone()
+            retry = dict(retry_row) if retry_row else None
+            attempts = [dict(row) for row in self.connection.execute(
+                "SELECT * FROM digest_generation_attempts WHERE digest_key=? ORDER BY id DESC LIMIT 50",
+                (digest_key,),
+            )]
+            usage = self.connection.execute(
+                "SELECT calls FROM digest_api_usage WHERE digest_key=?", (digest_key,),
+            ).fetchone()
+        if digest is None and retry is None and not attempts:
+            return None
+        for attempt in attempts:
+            attempt["providers"] = json.loads(attempt.pop("providers_json"))
+        generation_kind = str(digest["generation_kind"]) if digest else None
+        return {
+            "digest_key": digest_key,
+            "state": digest_run_state(generation_kind=generation_kind, retry=retry,
+                                      latest_attempt=attempts[0] if attempts else None, now=now),
+            "published_version": digest["version"] if digest else None,
+            "generation_kind": generation_kind,
+            "published_at": digest["published_at"] if digest else None,
+            "retry": retry, "attempts": attempts,
+            "reserved_attempts": int(usage["calls"]) if usage else 0,
+            "attempt_history_available": bool(attempts),
+            "can_retry_now": bool(retry and retry["status"] == "pending"
+                                  and (int(usage["calls"]) if usage else 0) < 5
+                                  and int(retry["attempts"]) < 5
+                                  and now < int(retry["retry_deadline_at"])
+                                  and retry["next_attempt_at"] > now
+                                  and generation_kind != "api"
+                                  and not (attempts and attempts[0]["status"] == "running")),
+        }
+
+    def list_digest_runs(self, *, now: int, limit: int = 30) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 100 or now < 0:
+            raise ValueError("invalid digest run limit")
+        rows = self.connection.execute(
+            "SELECT digest_key FROM (SELECT digest_key,created_at AS at FROM digests "
+            "UNION ALL SELECT digest_key,started_at FROM digest_generation_attempts "
+            "UNION ALL SELECT digest_key,started_at FROM digest_retry_state) "
+            "GROUP BY digest_key ORDER BY MAX(at) DESC, digest_key DESC LIMIT ?", (limit,),
+        ).fetchall()
+        return [run for row in rows if (run := self.get_digest_run(str(row[0]), now=now)) is not None]
+
+    def request_digest_retry_now(
+        self, digest_key: str, *, actor: str, request_id: str, now: int
+    ) -> dict[str, Any]:
+        if not request_id or len(request_id) > 64 or not actor or len(actor) > 128:
+            raise ValueError("invalid digest retry request")
+        with self.unit_of_work():
+            existing = self.get_admin_job(request_id)
+            if existing:
+                if (existing['kind'] != 'digest_retry_now' or existing['actor'] != actor
+                        or existing['request'] != {'digest_key': digest_key}):
+                    raise ValueError("retry request identity conflict")
+                return existing
+            run = self.get_digest_run(digest_key, now=now)
+            if run is None:
+                raise KeyError("digest run not found")
+            if not run["can_retry_now"]:
+                raise ValueError("digest has no scheduled retry that can be advanced")
+            self.connection.execute(
+                "UPDATE digest_retry_state SET next_attempt_at=?,updated_at=? WHERE digest_key=?",
+                (now, now, digest_key),
+            )
+            self.connection.execute(
+                "INSERT INTO admin_jobs(id,kind,status,request_json,result_json,actor,created_at,expires_at,completed_at) "
+                "VALUES (?, 'digest_retry_now','succeeded',?, ?, ?, ?, ?, ?)",
+                (request_id, json.dumps({'digest_key': digest_key}), json.dumps({'scheduled_at': now}),
+                 actor, now, now+900, now),
+            )
+        result = self.get_admin_job(request_id)
+        assert result is not None
+        return result
 
     def close(self) -> None:
         self.connection.close()
@@ -1598,6 +1733,11 @@ class Database:
         active_sources: int,
     ) -> None:
         with self.connection:
+            self.connection.execute(
+                "UPDATE digest_generation_attempts SET status='interrupted',finished_at=?, "
+                "error='engine restarted before attempt acknowledgement' WHERE status='running'",
+                (started_at,),
+            )
             self.connection.execute(
                 """
                 UPDATE engine_runtime
@@ -5199,6 +5339,10 @@ class Database:
                     (incident_cutoff,),
                 )
             if audit_cutoff is not None:
+                self.connection.execute(
+                    "DELETE FROM digest_generation_attempts WHERE status!='running' AND finished_at < ?",
+                    (audit_cutoff,),
+                )
                 self.connection.execute("DELETE FROM config_audit WHERE created_at < ?", (audit_cutoff,))
                 self.connection.execute("DELETE FROM reminder_audit WHERE created_at < ?", (audit_cutoff,))
                 self.connection.execute(
