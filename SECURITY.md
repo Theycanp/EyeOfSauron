@@ -19,9 +19,11 @@ information required to establish a secure follow-up path.
 
 ## Runtime security model
 
-- The collector has no inbound listener. The optional management process binds
-  only to `127.0.0.1`, requires a separate bearer token, and opens no firewall
-  port; remote access is through an SSH tunnel.
+- The collector has no inbound listener. The management process binds only to
+  `127.0.0.1` behind the configured HTTPS reverse proxy. Normal access uses
+  Argon2id passwords, revocable server-side sessions, Secure/HttpOnly/SameSite
+  cookies, CSRF checks and role-based permissions; an SSH tunnel is optional.
+  A separately stored emergency bearer credential remains for recovery tools.
 - The operating-system account is unprivileged and has no interactive shell.
 - The ntfy account is separate from the administrator and has write-only access
   to the `eos` topic.

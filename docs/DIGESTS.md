@@ -71,8 +71,12 @@ this is separate from the per-observation remote-analysis daily budget.
 
 1. If the first attempt fails, Argus immediately saves, publishes, and notifies
    the deterministic algorithmic version.
-2. It stores retry state in SQLite and retries four more times, every 75 minutes,
-   within the following five hours. A restart does not lose the schedule.
+2. It stores retry state in SQLite and schedules four more attempts at +1, +2,
+   +3 and +4 hours within a five-hour window. Times are anchored to the original
+   fallback publication, so polling delays do not accumulate. The spare hour
+   accommodates normal latency. A restart retains the deadline; downtime beyond
+   it expires the task without pretending another inference ran. Missed slots
+   can be attempted on subsequent worker polls while the window remains open.
 3. The first successful retry creates and publishes a new immutable AI version,
    supersedes the prior published version, and sends a second digest notification.
 4. If all five attempts fail, the state is marked failed and the day counts toward
@@ -80,6 +84,27 @@ this is separate from the per-observation remote-analysis daily budget.
 5. Three consecutive local digest days with fully exhausted attempts enqueue one
    high-priority operator notification. Reprocessing the same day is idempotent.
    The next successful AI digest resets the streak.
+
+Retries also cover invalid model output (blank, oversized or non-text), including
+validation after the adapter returns. Local evidence preparation and duplicate
+identity/coverage checks occur before inference budget reservation. A structural
+failure still requires fixing the evidence; it cannot be made publishable merely
+by asking the model again. Model response validation is different: a subsequent
+provider attempt can produce a valid answer, so it remains retryable.
+
+Publication and notification enqueue are separate durable operations. Every
+visit to an already published version idempotently ensures its notification is
+queued, including recovery from a crash before retry acknowledgement. A published
+AI version wins over a stale pending retry row, even after the retry deadline.
+The initial sanitized failure reason is retained and retry initialization cannot
+reset an existing window. The persisted `attempts` counts logical synthesis
+attempts (one may try multiple providers or make index and synthesis requests),
+not individual HTTP requests; deadline expiry alone does not increment it.
+
+Existing schema-17 retry rows are compatible: their saved next-attempt and
+deadline are retained, and subsequent retries use the anchored schedule. No old
+digest or historical retry count is rewritten. Rollback to the previous code is
+schema-compatible, but restores its former retry behaviour.
 
 Persistent retry tables are `digest_retry_state`, `digest_api_usage`, and
 `digest_failure_state` (introduced in schema 15; the current database schema is
@@ -96,7 +121,7 @@ version is `published` at a time; earlier versions become `superseded` but remai
 available for audit. The ntfy body links to `/digests/<digest-key>`, where the
 authenticated reader shows the current version and evidence items.
 
-## Missing-digest incident: 2026-09-16
+## Historical missing-digest incident: 2026-09-16
 
 Production v0.18.1 failed to publish `daily:2026-09-16`. Multiple batch clusters
 resolved to the same historical event key but were returned as separate digest
@@ -106,3 +131,11 @@ or retry row. This was not just a model outage. v0.19.0 recombines these identit
 and has an actual SQLite save/publication regression test. Check publication and
 outbox status independently of the API-attempt counter when diagnosing missing
 reports; an exhausted allowance does not prove an algorithmic digest was sent.
+
+The errors observed on September 17 at 00:50–01:19 UTC preceded the v0.19.0
+deployment around 01:23 UTC. They are historical evidence, not evidence of a
+regression in v0.20.0. The September 17 report was published as an API version.
+The new event-page uniqueness guard is additional defensive coverage; it is not
+presented as a reproduced production race. All bounded reports are retained in
+the selected evidence, including multiple updates from one source; representative
+links remain one per source. Further work is tracked in `ROADMAP.md`.

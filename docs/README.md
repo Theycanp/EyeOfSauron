@@ -20,6 +20,8 @@ Start here:
    the staged migration from legacy digest clusters.
 9. `WORKFLOW.md` — the required implementation, documentation, PR, deployment,
    and production-acceptance checklist for every substantive update.
+10. `ROADMAP.md` — current production findings, staged improvements, ownership
+    boundaries, and acceptance criteria.
 
 Reference documents:
 

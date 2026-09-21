@@ -33,6 +33,8 @@ _SPACE_RE = re.compile(r"\s+")
 _COVERAGE_STATUSES = frozenset(
     {"covered", "quiet", "degraded", "stale", "disabled", "unknown"}
 )
+DIGEST_RETRY_INTERVAL_SECONDS = 3600
+DIGEST_RETRY_WINDOW_SECONDS = 5 * 3600
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +228,8 @@ class DigestRetryState:
 
 class DigestRetryRepository(Protocol):
     def start_digest_retry(
-        self, digest_key: str, fallback_version: int, now: int, retry_deadline_at: int
+        self, digest_key: str, fallback_version: int, now: int, retry_deadline_at: int,
+        *, last_error: str | None = None,
     ) -> DigestRetryState: ...
 
     def get_digest_retry(self, digest_key: str) -> DigestRetryState | None: ...
@@ -700,13 +703,17 @@ class DigestBuilder:
     ) -> tuple[DigestCluster, ...]:
         weights = effective_region_weights(self.region_weights)
         allowed_sources = set(source_ids) if source_ids is not None else None
-        candidates: list[DigestCluster] = []
+        # Recombine by stable identity before ranking; a repeated page item
+        # must not occupy two selection slots or discard its extra evidence.
+        candidates_by_key: dict[str, DigestCluster] = {}
         for item in items:
             event = item.event
+            scoped_reports = tuple(
+                report for report in item.reports
+                if allowed_sources is None or report.source_id in allowed_sources
+            )
             reports_by_source: dict[str, PersistedEventReport] = {}
-            for report in item.reports:
-                if allowed_sources is not None and report.source_id not in allowed_sources:
-                    continue
+            for report in scoped_reports:
                 current = reports_by_source.get(report.source_id)
                 if current is None or (
                     report.is_representative,
@@ -736,8 +743,7 @@ class DigestBuilder:
             primary_bonus = 0.35 if any(
                 report.source_tier == "primary" for report in reports
             ) else 0.0
-            scoped_reports = tuple(reports)
-            candidates.append(DigestCluster(
+            candidate = DigestCluster(
                 cluster_key=event.event_key,
                 title=event.title,
                 summary=event.summary,
@@ -761,7 +767,13 @@ class DigestBuilder:
                 handling=item.handling,
                 event_id=event.event_key,
                 reports=scoped_reports,
-            ))
+            )
+            existing = candidates_by_key.get(candidate.cluster_key)
+            candidates_by_key[candidate.cluster_key] = (
+                self._merge_event_clusters(existing, candidate)
+                if existing is not None else candidate
+            )
+        candidates = list(candidates_by_key.values())
         selection_limit = adaptive_digest_item_count(
             candidates, max_items=self.item_limit
         )
@@ -885,22 +897,27 @@ class DigestBuilder:
         return tuple(persisted.values())
 
     @staticmethod
+    def _report_rank(report: Any) -> tuple[float, int, str]:
+        # Persisted reports have a representative flag; legacy in-memory
+        # clustering reports have a score instead. IDs differ in type too.
+        rank = float(report.is_representative) if isinstance(report, PersistedEventReport) else report.score
+        return rank, report.published_at, str(report.report_id or "")
+
+    @staticmethod
     def _merge_event_clusters(left: DigestCluster, right: DigestCluster) -> DigestCluster:
         representative = max((left, right), key=lambda item: (item.score, item.published_at, item.title))
         reports_by_identity = {
-            (report.source_id, report.observation_id, report.report_id): report
+            (report.source_id, report.observation_id or report.report_id): report
             for item in (left, right) for report in item.reports
         }
         reports = tuple(sorted(
             reports_by_identity.values(),
-            key=lambda report: (report.source_id, report.published_at, report.report_id),
+            key=lambda report: (report.source_id, *DigestBuilder._report_rank(report)),
         ))
         by_source: dict[str, Any] = {}
         for report in reports:
             current = by_source.get(report.source_id)
-            if current is None or (report.score, report.published_at, report.report_id) > (
-                current.score, current.published_at, current.report_id
-            ):
+            if current is None or DigestBuilder._report_rank(report) > DigestBuilder._report_rank(current):
                 by_source[report.source_id] = report
         source_ids = tuple(sorted(by_source))
         return replace(
@@ -937,6 +954,8 @@ def _digest_summary(
 
 def with_api_summary(digest: DigestDocument, summary: str, *, created_at: int) -> DigestDocument:
     """Create a new draft payload from an API-polished summary without mutating history."""
+    if not isinstance(summary, str):
+        raise ValueError("digest API summary must be text")
     cleaned = summary.strip()
     if not cleaned or len(cleaned) > 20000:
         raise ValueError("digest API summary is invalid")
@@ -1002,6 +1021,10 @@ class DigestScheduler:
         document = self._prepare(now, project_events=False)
         if document is None:
             return None
+        if document.status == "published":
+            # Publication and outbox enqueue are separate transactions. Repair
+            # a crash between them before taking any retry-state shortcut.
+            self._publish(document, now)
 
         # A previously published algorithm digest may have a durable retry
         # state.  Handle that state before the normal publication path so a
@@ -1016,11 +1039,19 @@ class DigestScheduler:
             and self.summarizer is not None
             and "AI 总结暂时失败" in document.summary
         ):
-            self._start_retry(document, now, "retry state reconstructed after publication")
+            self._start_retry(document, document.published_at or now, "retry state reconstructed after publication")
             retry = self._get_retry(document.digest_key)
         if retry is not None and retry.status == "pending":
             if document.generation_kind == "api":
                 self._finish_retry(document.digest_key, retry, now)
+                return document
+            if now > retry.retry_deadline_at:
+                streak, notify = self._finish_retry_failure(
+                    document.digest_key, now, retry.last_error or "digest AI retry window expired",
+                    attempts=retry.attempts,
+                )
+                if notify:
+                    self._notify_failure(document.digest_key, streak, retry.last_error or "digest AI retry window expired", now)
                 return document
             if retry.next_attempt_at is not None and now < retry.next_attempt_at and now < retry.retry_deadline_at:
                 return document
@@ -1029,7 +1060,7 @@ class DigestScheduler:
             state_reader = getattr(self.repository, "get_digest_failure_state", None)
             if state_reader is not None:
                 streak, failed_key = state_reader()
-                if failed_key == document.digest_key and streak >= 3:
+                if failed_key == document.digest_key and streak == 3:
                     self._notify_failure(document.digest_key, streak, retry.last_error or "AI retries exhausted", now)
             return document
 
@@ -1038,6 +1069,7 @@ class DigestScheduler:
 
         try:
             summary = await self._summarize(document, now)
+            polished = with_api_summary(document, summary, created_at=now)
         except Exception as exc:
             # Publish a useful deterministic report immediately.  AI retries
             # are deliberately decoupled from this first notification.
@@ -1049,7 +1081,6 @@ class DigestScheduler:
             published = self._publish(fallback, now)
             self._start_retry(published, now, error)
             return published
-        polished = with_api_summary(document, summary, created_at=now)
         published = self._publish(polished, now)
         success = getattr(self.repository, "record_digest_success", None)
         if success is not None:
@@ -1060,14 +1091,6 @@ class DigestScheduler:
         repository = self.repository
         if not isinstance(repository, DigestAnalysisRepository):
             raise TypeError("digest API requires budget and content repository ports")
-        digest_reserver = getattr(repository, "reserve_digest_api_call", None)
-        if digest_reserver is not None:
-            allowed = digest_reserver(document.digest_key, limit=5, now=now)
-        else:
-            day = datetime.fromtimestamp(now, UTC).date().isoformat()
-            allowed = repository.reserve_analysis_api_call(day, limit=self.daily_api_budget, now=now)
-        if not allowed:
-            raise RuntimeError("digest API attempt budget exhausted")
         evidence = document
         if self.send_full_text:
             evidence = replace(document, items=tuple(
@@ -1076,6 +1099,18 @@ class DigestScheduler:
                 ) or item.summary)) if item.observation_ids else item
                 for item in document.items
             ))
+        if len({item.cluster_key for item in evidence.items}) != len(evidence.items):
+            raise ValueError("digest contains duplicate cluster keys before inference")
+        if len({item.source_id for item in evidence.coverage}) != len(evidence.coverage):
+            raise ValueError("digest contains duplicate source coverage before inference")
+        digest_reserver = getattr(repository, "reserve_digest_api_call", None)
+        if digest_reserver is not None:
+            allowed = digest_reserver(document.digest_key, limit=5, now=now)
+        else:
+            day = datetime.fromtimestamp(now, UTC).date().isoformat()
+            allowed = repository.reserve_analysis_api_call(day, limit=self.daily_api_budget, now=now)
+        if not allowed:
+            raise RuntimeError("digest API attempt budget exhausted")
         # Only inference crosses threads. Repository operations remain on the
         # connection owner's event-loop thread.
         return await asyncio.to_thread(self.summarizer.summarize, evidence)  # type: ignore[union-attr]
@@ -1085,12 +1120,13 @@ class DigestScheduler:
     ) -> DigestDocument:
         try:
             summary = await self._summarize(document, now)
+            polished = with_api_summary(document, summary, created_at=now)
         except Exception as exc:
             error = sanitize_error(exc)
             attempts = retry.attempts + 1
             exhausted = attempts >= 5 or now >= retry.retry_deadline_at
             if exhausted:
-                streak, notify = self._finish_retry_failure(document.digest_key, now, error)
+                streak, notify = self._finish_retry_failure(document.digest_key, now, error, attempts=attempts)
                 if notify:
                     self._notify_failure(document.digest_key, streak, error, now)
                 logging.getLogger("argus.digest").error(
@@ -1104,7 +1140,6 @@ class DigestScheduler:
                     document.digest_key, attempts, error,
                 )
             return document
-        polished = with_api_summary(document, summary, created_at=now)
         published = self._publish(polished, now)
         self._finish_retry(document.digest_key, retry, now)
         return published
@@ -1114,19 +1149,23 @@ class DigestScheduler:
         return getter(digest_key) if getter is not None else self._retry_memory.get(digest_key)
 
     def _start_retry(self, document: DigestDocument, now: int, error: str) -> None:
-        deadline = now + 5 * 60 * 60
+        deadline = now + DIGEST_RETRY_WINDOW_SECONDS
         starter = getattr(self.repository, "start_digest_retry", None)
         if starter is not None:
-            starter(document.digest_key, document.version, now, deadline)
+            starter(document.digest_key, document.version, now, deadline, last_error=error)
         else:
             self._retry_memory[document.digest_key] = DigestRetryState(
-                document.digest_key, document.version, 1, now + 4500, deadline, "pending", error
+                document.digest_key, document.version, 1, now + DIGEST_RETRY_INTERVAL_SECONDS, deadline, "pending", error
             )
 
     def _record_retry_failure(
         self, digest_key: str, retry: DigestRetryState, attempts: int, now: int, error: str
     ) -> None:
-        next_at = min(retry.retry_deadline_at, now + 4500)
+        # Anchor to the original window, not the previous poll, so normal
+        # scheduler jitter cannot push the last retry beyond the deadline.
+        scheduled_at = (retry.retry_deadline_at - DIGEST_RETRY_WINDOW_SECONDS
+                        + attempts * DIGEST_RETRY_INTERVAL_SECONDS)
+        next_at = min(retry.retry_deadline_at, max(now, scheduled_at))
         recorder = getattr(self.repository, "record_digest_retry", None)
         if recorder is not None:
             recorder(digest_key, attempts=attempts, status="pending", next_attempt_at=next_at,
@@ -1147,14 +1186,18 @@ class DigestScheduler:
         if success is not None:
             success(now=now)
 
-    def _finish_retry_failure(self, digest_key: str, now: int, error: str) -> tuple[int, bool]:
+    def _finish_retry_failure(
+        self, digest_key: str, now: int, error: str, *, attempts: int
+    ) -> tuple[int, bool]:
         recorder = getattr(self.repository, "record_digest_retry", None)
         retry = self._get_retry(digest_key)
         if recorder is not None and retry is not None:
-            recorder(digest_key, attempts=retry.attempts + 1, status="failed",
+            recorder(digest_key, attempts=attempts, status="failed",
                      next_attempt_at=None, last_error=error, now=now)
-        else:
-            self._retry_memory.pop(digest_key, None)
+        elif retry is not None:
+            self._retry_memory[digest_key] = replace(
+                retry, attempts=attempts, status="failed", next_attempt_at=None, last_error=error
+            )
         failure = getattr(self.repository, "record_digest_failure", None)
         if failure is not None:
             streak, notify = failure(digest_key, now=now)
@@ -1167,8 +1210,13 @@ class DigestScheduler:
         if expired_reader is None:
             return
         for retry in expired_reader(now):
+            published = self.repository.get_digest(retry.digest_key, published_only=True)
+            if published is not None and published.generation_kind == "api":
+                self._publish(published, now)
+                self._finish_retry(retry.digest_key, retry, now)
+                continue
             error = retry.last_error or "digest AI retry window expired before all attempts"
-            streak, notify = self._finish_retry_failure(retry.digest_key, now, error)
+            streak, notify = self._finish_retry_failure(retry.digest_key, now, error, attempts=retry.attempts)
             if notify:
                 self._notify_failure(retry.digest_key, streak, error, now)
             logging.getLogger("argus.digest").error(

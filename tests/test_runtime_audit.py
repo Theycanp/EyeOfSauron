@@ -14,7 +14,7 @@ from argus.analysis import analyze_observation
 from argus.config import DigestConfig, _parse_rule, parse_source_config
 from argus.content import ContentDocumentDraft, ContentLevel
 from argus.database import Database
-from argus.digest import DigestBuilder, DigestScheduler, cluster_observations
+from argus.digest import DigestBuilder, DigestScheduler, cluster_observations, with_api_summary
 from argus.digest_analysis import ApiDigestSummarizer
 from argus.host import HostHealthCollector, _matches
 from argus.model_analyzers import AnalyzerError, AnalyzerSettings, OpenAICompatibleAnalyzer
@@ -114,11 +114,11 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
 
         # The worker polls frequently, but must not retry before its durable
         # next-attempt timestamp.
-        same = await scheduler.process_once_async(self.now + 4499)
+        same = await scheduler.process_once_async(self.now + 3599)
         self.assertEqual(fallback.version, same.version)
         self.assertEqual(1, summarizer.calls)
 
-        polished = await scheduler.process_once_async(self.now + 4500)
+        polished = await scheduler.process_once_async(self.now + 3600)
         self.assertEqual('api', polished.generation_kind)
         self.assertGreater(polished.version, fallback.version)
         self.assertEqual(2, summarizer.calls)
@@ -140,7 +140,8 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
             summarizer=summarizer,
         )
         fallback = await scheduler.process_once_async(self.now)
-        for offset in (4500, 9000, 13500, 18000):
+        # Normal polling jitter must not lose the fourth retry at the deadline.
+        for offset in (3607, 7214, 10821, 14428):
             await scheduler.process_once_async(self.now + offset)
         state = self.db.get_digest_retry(fallback.digest_key)
         self.assertEqual(5, summarizer.calls)
@@ -153,6 +154,113 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
                 (fallback.digest_key,),
             ).fetchone()[0],
         )
+
+    async def test_invalid_model_output_falls_back_and_retries_after_restart(self):
+        self.ingest(observation('invalid-output', 'policy announcement', timestamp=self.now-10))
+        summarizer = Mock()
+        summarizer.summarize.side_effect = [None, ' ' * 50, '有效的综合摘要。[1]']
+        config = DigestConfig(enabled=True, notify=True, public_base_url='https://eos.example.test')
+        scheduler = DigestScheduler(config, self.db, topic='eos', summarizer=summarizer)
+        fallback = await scheduler.process_once_async(self.now)
+        self.assertEqual('algorithm', fallback.generation_kind)
+        self.assertIn('summary must be text', self.db.get_digest_retry(fallback.digest_key).last_error)
+        self.assertEqual(1, len(self.db.list_alerts()))
+
+        self.db.close()
+        self.db = Database(Path(self.temp.name) / 'audit.db')
+        scheduler = DigestScheduler(config, self.db, topic='eos', summarizer=summarizer)
+        self.assertEqual(fallback.version, (await scheduler.process_once_async(self.now + 3608)).version)
+        self.assertEqual(2, self.db.get_digest_retry(fallback.digest_key).attempts)
+        result = await scheduler.process_once_async(self.now + 7208)
+        self.assertEqual('api', result.generation_kind)
+        self.assertEqual(2, result.version)
+        self.assertEqual('succeeded', self.db.get_digest_retry(fallback.digest_key).status)
+        await scheduler.process_once_async(self.now + 7268)
+        self.assertEqual(3, summarizer.summarize.call_count)
+        self.assertEqual(2, len(self.db.list_alerts()))
+
+    async def test_expiry_does_not_invent_an_attempt(self):
+        self.ingest(observation('expiry', 'policy announcement', timestamp=self.now-10))
+        summarizer = Mock()
+        summarizer.summarize.side_effect = AnalyzerError('temporary outage')
+        scheduler = DigestScheduler(DigestConfig(enabled=True, notify=False), self.db,
+                                    topic='eos', summarizer=summarizer)
+        fallback = await scheduler.process_once_async(self.now)
+        await scheduler.process_once_async(self.now + 18001)
+        state = self.db.get_digest_retry(fallback.digest_key)
+        self.assertEqual(('failed', 1), (state.status, state.attempts))
+        await scheduler.process_once_async(self.now + 18061)
+        self.assertEqual(1, summarizer.summarize.call_count)
+        self.assertEqual(1, self.db.get_digest_failure_state()[0])
+
+    async def test_missing_retry_row_is_recovered_without_extending_window(self):
+        self.ingest(observation('reconstruct', 'policy announcement', timestamp=self.now-10))
+        config = DigestConfig(enabled=True, notify=True, public_base_url='https://eos.example.test')
+        summarizer = Mock()
+        summarizer.summarize.side_effect = AnalyzerError('temporary outage')
+        scheduler = DigestScheduler(config, self.db, topic='eos', summarizer=summarizer)
+        draft = scheduler._prepare(self.now)
+        fallback = replace(draft, summary=draft.summary + ' AI 总结暂时失败，已先发送算法版日报。')
+        saved = self.db.save_digest(fallback)
+        self.db.publish_digest(saved.digest_key, saved.version, self.now)
+        # Crash after publication, before both notification and retry-state save.
+        await scheduler.process_once_async(self.now + 18100)
+        state = self.db.get_digest_retry(saved.digest_key)
+        self.assertEqual(self.now + 18000, state.retry_deadline_at)
+        self.assertEqual(('failed', 1), (state.status, state.attempts))
+        summarizer.summarize.assert_not_called()
+        self.assertEqual(1, len(self.db.list_alerts()))
+
+    async def test_published_ai_after_crash_is_success_even_after_deadline(self):
+        self.ingest(observation('already-published', 'policy announcement', timestamp=self.now-10))
+        config = DigestConfig(enabled=True, notify=True, public_base_url='https://eos.example.test')
+        summarizer = Mock()
+        summarizer.summarize.side_effect = AnalyzerError('temporary outage')
+        scheduler = DigestScheduler(config, self.db, topic='eos', summarizer=summarizer)
+        fallback = await scheduler.process_once_async(self.now)
+        self.db.reserve_digest_api_call(fallback.digest_key, limit=5, now=self.now+3600)
+        polished = self.db.save_digest(with_api_summary(fallback, '成功的摘要。[1]', created_at=self.now+3600))
+        self.db.publish_digest(polished.digest_key, polished.version, self.now+3600)
+        # Crash after AI publication, before outbox/retry acknowledgement.
+        await scheduler.process_once_async(self.now + 18001)
+        state = self.db.get_digest_retry(fallback.digest_key)
+        self.assertEqual(('succeeded', 2), (state.status, state.attempts))
+        self.assertEqual(0, self.db.get_digest_failure_state()[0])
+        self.assertEqual(2, len(self.db.list_alerts()))
+        self.assertEqual(1, summarizer.summarize.call_count)
+
+    async def test_local_duplicate_evidence_does_not_spend_ai_budget(self):
+        self.ingest(observation('preflight', 'policy announcement', timestamp=self.now-10))
+        summarizer = Mock()
+        scheduler = DigestScheduler(DigestConfig(enabled=True, notify=False), self.db,
+                                    topic='eos', summarizer=summarizer)
+        draft = scheduler._prepare(self.now)
+        invalid = replace(draft, items=(draft.items[0], draft.items[0]))
+        with self.assertRaisesRegex(ValueError, 'duplicate cluster keys before inference'):
+            await scheduler._summarize(invalid, self.now)
+        summarizer.summarize.assert_not_called()
+        self.assertEqual(0, self.db.connection.execute('SELECT COUNT(*) FROM digest_api_usage').fetchone()[0])
+
+    def test_starting_retry_again_preserves_existing_window_and_attempts(self):
+        key = 'daily:2026-09-12'
+        self.db.start_digest_retry(key, 1, self.now, self.now+18000, last_error='first error')
+        state = self.db.record_digest_retry(key, attempts=3, status='pending',
+                                           next_attempt_at=self.now+10800, last_error='third error', now=self.now+7200)
+        self.assertEqual(state, self.db.start_digest_retry(key, 1, self.now+7500, self.now+25500))
+
+    async def test_four_failed_days_raise_one_operator_notification(self):
+        config = DigestConfig(enabled=True, notify=True, public_base_url='https://eos.example.test')
+        summarizer = Mock()
+        summarizer.summarize.side_effect = AnalyzerError('temporary outage')
+        scheduler = DigestScheduler(config, self.db, topic='eos', summarizer=summarizer)
+        for day in range(4):
+            instant = self.now + day * 86400
+            self.ingest(observation(f'day-{day}', f'policy announcement {day}', timestamp=instant-10))
+            for offset in (0, 3607, 7214, 10821, 14428, 14488):
+                await scheduler.process_once_async(instant+offset)
+        alerts = self.db.list_alerts(limit=100)
+        self.assertEqual(1, sum(row['rule_id'] == 'digest.ai_failure' for row in alerts))
+        self.assertEqual(4, self.db.get_digest_failure_state()[0])
 
     def test_digest_invalid_first_model_falls_back_to_second(self):
         self.ingest(observation('item', 'policy announcement', timestamp=self.now-10))
