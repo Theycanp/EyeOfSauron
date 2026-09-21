@@ -952,7 +952,12 @@ def make_handler(
                 return
             if path.startswith("/api/source-quality/") and path.endswith("/audit"):
                 source_id = urllib.parse.unquote(path[len("/api/source-quality/") : -len("/audit")]).strip("/")
-                self._json(HTTPStatus.OK, {"source_id": source_id, "audit": database.list_source_quality_audit(source_id)})
+                try:
+                    audit = database.list_source_quality_audit(source_id)
+                except ValueError:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid source ID", "code": "invalid_source_id"})
+                    return
+                self._json(HTTPStatus.OK, {"source_id": source_id, "audit": audit})
                 return
             if path == "/api/news-events/quality":
                 try:
