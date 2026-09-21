@@ -2084,6 +2084,7 @@ class Database:
         if candidate.incident_key:
             incident_id = self._upsert_incident(candidate, observation_id, now)
             semantic_news = candidate.incident_kind == "event" and candidate.incident_key.startswith("news-event:")
+            persistent_weather = candidate.incident_kind == "event" and candidate.incident_key.startswith("weather-event:")
             if semantic_news:
                 existing = self.connection.execute(
                     """
@@ -2092,6 +2093,22 @@ class Database:
                       AND a.status IN ('pending', 'sending', 'delivered')
                     """,
                     (incident_id, candidate.topic, now - 21600),
+                ).fetchone()
+                if existing is not None and existing["max_priority"] is not None and int(existing["max_priority"]) >= candidate.priority:
+                    return False
+            elif persistent_weather:
+                # JMA republishes the same warning through several bulletin
+                # types and at regular intervals.  A stable weather identity
+                # already includes hazard, severity and normalized area, so
+                # the same sequence is suppressed indefinitely.  A changed
+                # severity/area/hazard gets a new identity and is notified.
+                existing = self.connection.execute(
+                    """
+                    SELECT MAX(a.priority) AS max_priority FROM alerts a
+                    WHERE a.incident_id = ? AND a.topic = ?
+                      AND a.status IN ('pending', 'sending', 'delivered')
+                    """,
+                    (incident_id, candidate.topic),
                 ).fetchone()
                 if existing is not None and existing["max_priority"] is not None and int(existing["max_priority"]) >= candidate.priority:
                     return False

@@ -5,6 +5,13 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+### Fixed
+
+- Coalesce repeated Japan Meteorological Agency warning bulletins into a
+  persistent weather incident. Re-publications no longer send another alert;
+  a changed hazard, severity, or normalized area receives a new notification,
+  while every raw observation remains available to the event page and digest.
+
 ## [0.22.0] - 2026-09-21
 
 ### Added

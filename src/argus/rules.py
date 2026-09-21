@@ -6,7 +6,7 @@ import unicodedata
 from datetime import datetime
 
 from .config import WeightedTextRuleConfig
-from .event_identity import identify_semantic_event
+from .event_identity import WeatherEventIdentity, identify_semantic_event, identify_weather_event
 from .models import AlertCandidate, Observation
 from .safe_regex import compile_safe_regex
 from .util import to_epoch, truncate
@@ -66,10 +66,14 @@ class WeightedTextRule:
         if not normalized:
             normalized = hashlib.sha256(folded.encode("utf-8")).hexdigest()
         stateful = bool(attributes.get("stateful") or attributes.get("recovery"))
-        semantic = (identify_semantic_event(observation.title, observation.summary)
+        semantic = (identify_weather_event(
+                        observation.title, observation.summary, observation.source_id
+                    ) or identify_semantic_event(observation.title, observation.summary)
                     if not explicit_identity and not stateful else None)
         if semantic is not None:
-            incident_key = semantic.notification_key(published)
+            incident_key = (semantic.notification_key()
+                            if isinstance(semantic, WeatherEventIdentity)
+                            else semantic.notification_key(published))
         else:
             normalized = explicit_identity or normalized
             incident_key = hashlib.sha256(

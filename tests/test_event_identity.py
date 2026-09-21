@@ -2,10 +2,49 @@ from __future__ import annotations
 
 import unittest
 
-from argus.event_identity import identify_semantic_event
+from argus.event_identity import identify_semantic_event, identify_weather_event
 
 
 class EventIdentityTests(unittest.TestCase):
+    def test_jma_bulletin_variants_share_warning_identity(self) -> None:
+        first = identify_weather_event(
+            "【東京都土砂災害警報・注意報】【特別警報（土砂災害）】大島に特別警報を発表しています。",
+            source_id="japan_meteorological_agency_high_frequency",
+        )
+        second = identify_weather_event(
+            "【東京都気象特別警報報知】【特別警報（土砂災害）】東京都に特別警報を発表しました。",
+            source_id="japan_meteorological_agency_high_frequency",
+        )
+        assert first is not None and second is not None
+        self.assertEqual(first.notification_key(), second.notification_key())
+
+    def test_jma_escalation_or_area_expansion_gets_new_identity(self) -> None:
+        warning = identify_weather_event(
+            "【東京都土砂災害警報・注意報】大島に土砂災害警報を発表しています。",
+            source_id="japan_meteorological_agency_high_frequency",
+        )
+        special = identify_weather_event(
+            "【東京都気象特別警報報知】【特別警報（土砂災害）】東京都に特別警報を発表しました。",
+            source_id="japan_meteorological_agency_high_frequency",
+        )
+        assert warning is not None and special is not None
+        self.assertNotEqual(warning.notification_key(), special.notification_key())
+
+    def test_weather_identity_is_limited_to_jma_source(self) -> None:
+        self.assertIsNone(identify_weather_event("大島に特別警報", source_id="other"))
+
+    def test_jma_clearance_is_a_new_notification_state(self) -> None:
+        active = identify_weather_event(
+            "【東京都土砂災害警報・注意報】【特別警報（土砂災害）】大島に特別警報を発表しています。",
+            source_id="japan_meteorological_agency_high_frequency",
+        )
+        cleared = identify_weather_event(
+            "【東京都土砂災害警報・注意報】大島の土砂災害特別警報を解除しました。",
+            source_id="japan_meteorological_agency_high_frequency",
+        )
+        assert active is not None and cleared is not None
+        self.assertNotEqual(active.notification_key(), cleared.notification_key())
+
     def test_predictions_comparisons_and_generic_policy_are_not_decisions(self) -> None:
         for title in (
             "Fed could cut rates later this year", "Fed expected to raise rates at FOMC meeting",
