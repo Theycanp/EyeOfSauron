@@ -5,6 +5,8 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-09-21
+
 ### Fixed
 
 - Coalesce repeated Japan Meteorological Agency warning bulletins into a
