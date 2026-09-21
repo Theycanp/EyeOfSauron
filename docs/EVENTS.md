@@ -376,6 +376,28 @@ GET /api/news-events?hours=28&sort=newest&limit=50&cursor=<opaque>
 - 用本次官方声明、经济预测、FT/Bloomberg 决议、美元/国债反应作回归集；
   同机构不同会议、预测与已确认决议、冲突利率方向必须避免误并。
 
+### 多语聚合审计批次
+
+当前确定性聚类补充了一组小而可审计的跨语言实体与动作词典，例如
+`日本銀行/日銀/BOJ/Bank of Japan`、`美联储/Fed/Federal Reserve`、
+`财政部/Finance Ministry` 和 `工商银行/ICBC`。它们只生成内部 canonical
+entity key，不生成翻译文本；未知实体仍按原有标题、显式实体和时空约束处理。
+利率动作（加息、降息、维持）和注资动作也有有限的中英日同义词归一化，
+相反的明确动作直接拒绝匹配。金额和利率数字按单位归一（例如 `1000亿元`
+与 `CNY 100 billion`），相同事件的不同数字保留在一个事件中并标记
+`has_contradictions`，供详情页展示双方证据。
+
+报道的 `primary`、`secondary`、`social` 仍是平级 EventReport；市场反应只有
+在共享已知实体且被识别为 context 时才能跨主题附着，社交热度不能单独制造
+事件。完整链接检查和顺序无关回放见 `tests/test_event_clustering_multilingual.py`
+与 `tests/test_event_pool_multilingual.py`。
+
+这不是通用机器翻译或 Claim 识别：词典外的跨语事件、同一机构在 72 小时内的
+两个未识别会议、隐含事实更正、讽刺/转述和数字单位未覆盖的语言仍可能拆开或
+需要人工审计。不能通过降低全局阈值来“修复”这些难例；后续应把 embedding
+限定为难例召回，并继续由确定性证据和人工审计决定归并。Claim/Timeline 自动
+抽取与即时通知抑制不在本批扩大范围内。
+
 ## 验收要求
 
 实现或修改聚类时，必须覆盖：一手/二手并列、同源重复更新、相似标题但不
