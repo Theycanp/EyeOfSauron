@@ -441,6 +441,48 @@ export interface DigestSummary extends JsonRecord {
   web_path?: string
 }
 
+export interface DigestProviderAttempt {
+  provider?: string
+  model?: string
+  prompt_id?: string
+  prompt_version?: string | number
+  prompt_hash?: string
+  status?: string
+  error?: string
+  elapsed_ms?: string | number
+}
+
+export interface DigestGenerationAttempt {
+  id: number
+  digest_key: string
+  status: 'running' | 'succeeded' | 'failed' | 'interrupted'
+  started_at: number
+  finished_at?: number | null
+  error?: string | null
+  providers: DigestProviderAttempt[]
+}
+
+export interface DigestRun {
+  digest_key: string
+  state: 'ai_published' | 'generating' | 'retry_exhausted' | 'ai_retrying' | 'algorithm_published' | 'unpublished'
+  published_version: number | null
+  generation_kind: string | null
+  published_at: number | null
+  retry: {
+    status: 'pending' | 'succeeded' | 'failed'
+    attempts: number
+    next_attempt_at: number | null
+    retry_deadline_at: number
+    last_error?: string | null
+    started_at: number
+    updated_at: number
+  } | null
+  attempts: DigestGenerationAttempt[]
+  reserved_attempts: number
+  attempt_history_available: boolean
+  can_retry_now: boolean
+}
+
 export interface DigestItem extends JsonRecord {
   cluster_key: string
   /** Stable event identity when the event-centric digest projection is enabled. */

@@ -184,6 +184,54 @@ test('source diagnostics keep recovered polling and blocked content distinct', a
   await page.screenshot({ path: testInfo.outputPath('source-diagnostics.png'), fullPage: true })
 })
 
+test('digest run history exposes model evidence and advances a bounded retry', async ({ page }, testInfo) => {
+  await mockAdminApi(page)
+  const now = Math.floor(Date.now() / 1000)
+  let advanced = false
+  let postCount = 0
+  const run = {
+    digest_key: 'daily:2026-09-21', state: 'ai_retrying', published_version: 1,
+    generation_kind: 'algorithm', published_at: now - 60, reserved_attempts: 1,
+    retry: { status: 'pending', attempts: 1, next_attempt_at: now + 4500,
+      retry_deadline_at: now + 18000, last_error: 'Provider unavailable (redacted)',
+      started_at: now - 60, updated_at: now - 60 },
+    attempts: [{ id: 1, digest_key: 'daily:2026-09-21', status: 'failed',
+      started_at: now - 72, finished_at: now - 60, error: 'Provider unavailable (redacted)',
+      providers: [{ provider: 'models.example', model: 'primary-model', prompt_id: 'digest',
+        prompt_version: '4', prompt_hash: 'a'.repeat(64), status: 'failed', elapsed_ms: '12000' }] }],
+    attempt_history_available: true, can_retry_now: true,
+  }
+  await page.route('**/api/digest-runs**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (route.request().method() === 'POST') {
+      const body = route.request().postDataJSON() as { request_id: string }
+      expect(body.request_id).toMatch(/^[0-9a-f-]{36}$/)
+      postCount++
+      advanced = true
+      await route.fulfill({ json: { job: { id: body.request_id, status: 'succeeded' } } })
+      return
+    }
+    const current = { ...run, can_retry_now: !advanced }
+    await route.fulfill({ json: path === '/api/digest-runs' ? { runs: [current] } : { run: current } })
+  })
+  await login(page)
+  const menu = page.getByRole('button', { name: '打开导航' })
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('button', { name: '日报', exact: true }).click()
+  await page.getByRole('button', { name: '运行记录', exact: true }).click()
+  await expect(page.getByText('等待 AI 重试')).toBeVisible()
+  await page.getByText('展开尝试记录（1）').click()
+  await expect(page.getByText('models.example')).toBeVisible()
+  await expect(page.getByText('digest@4')).toBeVisible()
+  await expect(page.getByText('1 / 5 次逻辑生成')).toBeVisible()
+  await page.getByRole('button', { name: '提前重试', exact: true }).click()
+  await expect(page.getByRole('status')).toContainText('已安排提前重试')
+  await expect(page.getByRole('button', { name: '提前重试', exact: true })).toBeDisabled()
+  expect(postCount).toBe(1)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('digest-runs.png'), fullPage: true })
+})
+
 test('login screen exposes the EyeOfSauron identity and accessible account fields', async ({ page }) => {
   await mockAdminApi(page)
   await page.goto('/')

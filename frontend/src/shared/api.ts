@@ -7,6 +7,7 @@ import type {
   ConfigResponse,
   DigestDetailResponse,
   DigestListResponse,
+  DigestRun,
   IncidentResponse,
   JobResponse,
   ManualEventDraft,
@@ -205,6 +206,17 @@ export class AdminApi {
   digest(key: string, version?: number): Promise<DigestDetailResponse> {
     const query = version ? `?${new URLSearchParams({ version: String(version) })}` : ''
     return this.request(`/api/digests/${encodeURIComponent(key)}${query}`)
+  }
+  digestRuns(): Promise<{ runs: DigestRun[] }> {
+    return this.request('/api/digest-runs?limit=30')
+  }
+  digestRun(key: string): Promise<{ run: DigestRun }> {
+    return this.request(`/api/digest-runs/${encodeURIComponent(key)}`)
+  }
+  retryDigestNow(key: string, requestId: string): Promise<JobResponse> {
+    return this.request(`/api/digest-runs/${encodeURIComponent(key)}/retry`, {
+      method: 'POST', body: JSON.stringify({ request_id: requestId }),
+    })
   }
 
   outbox(status: Extract<OutboxStatus, 'dead' | 'pending'>, beforeId?: number): Promise<OutboxResponse> {
