@@ -448,21 +448,24 @@ class ArgusService:
         """Backfill and retry projections independently of source schedules."""
         while not self.stop_event.is_set():
             try:
-                projected = self.process_event_pool_once()
+                # One projection can compare against up to 1,000 candidates.
+                # Yield after every observation so large source bursts cannot
+                # starve source polling, delivery, shutdown or the watchdog.
+                projected = self.process_event_pool_once(limit=1)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 projected = 0
                 LOGGER.error("event_pool_projection_failed error=%s", sanitize_error(exc))
-            delay = 0.25 if projected == 50 else 10.0
+            delay = 0.0 if projected else 10.0
             try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=delay)
             except TimeoutError:
                 pass
 
-    def process_event_pool_once(self) -> int:
+    def process_event_pool_once(self, *, limit: int = 50) -> int:
         """Project one deliberately small batch to protect daemon heartbeats."""
-        return self.event_pool.project_pending(now=now_epoch(), limit=50)
+        return self.event_pool.project_pending(now=now_epoch(), limit=limit)
 
     async def _heartbeat_loop(self) -> None:
         interval = self.config.service.heartbeat_interval_seconds

@@ -146,12 +146,17 @@ JMA's feed title is a bulletin category, so that source explicitly promotes the
 entry content to the headline before rule evaluation; the category label alone
 must never trigger a severe-weather alert.
 
-JMA is intentionally a local evidence source, not an interrupt source. It polls
-every 15 minutes with default importance 2 and does not belong to an immediate
-notification rule. Its observations remain available to the event pool and
-daily digest. Internationally significant disasters are alerted through the
-USGS significant-earthquake feed and reviewed global breaking-news sources,
-which retain their higher importance and faster cadence.
+JMA is intentionally a bounded evidence source, not an interrupt source. It
+polls hourly with default importance 1. A reviewed retention profile drops
+routine municipal advisories before persistence and keeps only exceptional
+hazard categories such as major tsunami warnings, emergency weather warnings,
+residential-area volcanic warnings, warning-level earthquake early warnings,
+and Nankai Trough advisories. Every retained item is explicitly ineligible for
+direct notification even if an operator later adds the source to a text rule.
+Feed freshness is checked before filtering, so a healthy hour with no retained
+item is not reported as a source outage. Internationally significant disasters
+are alerted through the five-minute USGS significant-earthquake feed and reviewed
+global breaking-news sources.
 
 Catalog entries are templates, not live configuration. The requested September
 2026 regional rollout is selected in `argus.news_rollout`; use

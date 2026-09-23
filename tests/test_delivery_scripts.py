@@ -297,6 +297,12 @@ class HealthGateTests(unittest.TestCase):
         self.status["sources"] = []
         self.assertFalse(self.evaluate()["ok"])
 
+    def test_dead_letter_is_visible_without_failing_the_health_gate(self):
+        self.status["outbox"] = {"dead": 1}
+        result = self.evaluate()
+        self.assertTrue(result["ok"])
+        self.assertIn("1 dead-letter message", " ".join(result["warnings"]))
+
     def test_worker_stall_fails_even_when_engine_heartbeat_is_fresh(self):
         self.status["sources"][0]["last_attempt_at"] = 1
         self.assertFalse(self.evaluate()["ok"])

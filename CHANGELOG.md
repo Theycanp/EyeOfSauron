@@ -5,6 +5,28 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.22.3] - 2026-09-23
+
+### Changed
+
+- Reduce the JMA nationwide bulletin feed to hourly collection at importance 1.
+  Retain only reviewed exceptional-hazard categories as supporting evidence and
+  mark every retained JMA observation ineligible for direct notifications.
+  USGS significant earthquakes and global news remain the authorities for
+  internationally significant disaster alerts.
+
+### Fixed
+
+- Keep the daemon watchdog responsive by yielding between expensive event-pool
+  projections instead of processing a burst of 50 on the asyncio thread.
+- Bound ntfy title and message fields by UTF-8 bytes, preserving the authenticated
+  detail link for long Chinese daily summaries.
+- Recover XML feeds containing isolated invalid UTF-8 bytes without accepting
+  structurally malformed XML, restoring the affected ASEAN feed.
+- Stop the war-declaration rule from matching unrelated words such as
+  `declaration software`.
+- Surface dead-letter notifications in the operations health report.
+
 ## [0.22.2] - 2026-09-21
 
 ### Changed

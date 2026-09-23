@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import ipaddress
+import re
 import socket
 import urllib.error
 import urllib.request
@@ -29,6 +30,42 @@ from .util import decode_http_content, truncate
 
 class FeedError(RuntimeError):
     pass
+
+
+_XML_ENCODING_RE = re.compile(
+    br"^\s*<\?xml[^>]*\bencoding\s*=\s*['\"](?P<encoding>[^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+
+# JMA's extra feed emits a nationwide stream of municipal advisories. It is
+# useful here only as supporting evidence for exceptional disasters; global
+# notification decisions come from USGS and international news sources.
+_JMA_EXCEPTIONAL_HAZARDS = re.compile(
+    r"(?:大津波警報|津波警報|大雨特別警報|大雪特別警報|暴風特別警報|"
+    r"暴風雪特別警報|高潮特別警報|波浪特別警報|噴火警報（居住地域）|"
+    r"噴火速報|緊急地震速報（警報）|南海トラフ地震臨時情報)"
+)
+
+
+def _parse_xml(payload: bytes) -> tuple[ET.Element, bool]:
+    """Recover only malformed UTF-8 bytes; structural XML errors stay fatal."""
+    parser = lambda: ET.XMLParser(target=_NoDoctypeTreeBuilder())
+    try:
+        return ET.fromstring(payload, parser=parser()), False
+    except ET.ParseError as original:
+        declaration = _XML_ENCODING_RE.match(payload[:256])
+        encoding = declaration.group("encoding").decode("ascii", "ignore").lower() if declaration else "utf-8"
+        if encoding.replace("_", "-") not in {"utf-8", "utf8"}:
+            raise FeedError(f"invalid XML: {original}") from original
+        try:
+            payload.decode("utf-8")
+        except UnicodeDecodeError:
+            repaired = payload.decode("utf-8", errors="replace")
+            try:
+                return ET.fromstring(repaired, parser=parser()), True
+            except ET.ParseError:
+                pass
+        raise FeedError(f"invalid XML: {original}") from original
 
 
 def _decode_transport(payload: bytes, encoding: str, limit: int) -> bytes:
@@ -110,13 +147,32 @@ def _external_id(guid: str, link: str, title: str, published_at: datetime) -> st
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ...]:
+def _apply_entry_policy(
+    observations: list[Observation], source: RssSourceConfig
+) -> list[Observation]:
+    profile = source.settings.get("entry_filter_profile", "")
+    if profile == "jma_exceptional_hazards":
+        observations = [
+            item for item in observations
+            if _JMA_EXCEPTIONAL_HAZARDS.search(f"{item.title}\n{item.summary}")
+        ]
+    if source.settings.get("notification_eligible", True) is False:
+        observations = [
+            replace(item, attributes={**item.attributes, "notification_eligible": False})
+            for item in observations
+        ]
+    return observations
+
+
+def parse_feed(
+    payload: bytes,
+    source: RssSourceConfig,
+    *,
+    apply_entry_policy: bool = True,
+) -> tuple[Observation, ...]:
     if len(payload) > source.max_response_bytes:
         raise FeedError("feed exceeds the configured response limit")
-    try:
-        root = ET.fromstring(payload, parser=ET.XMLParser(target=_NoDoctypeTreeBuilder()))
-    except ET.ParseError as exc:
-        raise FeedError(f"invalid XML: {exc}") from exc
+    root, recovered_invalid_utf8 = _parse_xml(payload)
 
     observations: list[Observation] = []
     policy = parse_content_policy(source.settings.get("content_policy"))
@@ -279,6 +335,16 @@ def parse_feed(payload: bytes, source: RssSourceConfig) -> tuple[Observation, ..
         observations = [replace(item, title=item.summary[:1000], attributes={
             **item.attributes, "feed_title": item.title,
         }) for item in observations]
+    if recovered_invalid_utf8:
+        observations = [
+            replace(
+                item,
+                attributes={**item.attributes, "feed_recovered_invalid_utf8": True},
+            )
+            for item in observations
+        ]
+    if apply_entry_policy:
+        observations = _apply_entry_policy(observations, source)
     observations.sort(key=lambda item: (item.published_at, item.external_id))
     return tuple(observations)
 
@@ -398,7 +464,14 @@ class RssCollector:
                 payload, response.headers.get("Content-Encoding", ""),
                 self.config.max_response_bytes,
             )
-            observations = self.parse_payload(payload)
+            defer_entry_policy = bool(
+                self.config.settings.get("entry_filter_profile", "")
+            )
+            observations = (
+                parse_feed(payload, self.config, apply_entry_policy=False)
+                if defer_entry_policy
+                else self.parse_payload(payload)
+            )
             if max_content_age:
                 published_dates = [
                     item.published_at for item in observations
@@ -412,6 +485,10 @@ class RssCollector:
                         f"feed content is stale: newest entry is {age} seconds old "
                         f"(limit {max_content_age} seconds)"
                     )
+            if defer_entry_policy:
+                observations = tuple(
+                    _apply_entry_policy(list(observations), self.config)
+                )
             return FeedFetchResult(
                 observations=observations,
                 etag=response.headers.get("ETag"),

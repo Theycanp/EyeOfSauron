@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import threading
 import time
@@ -258,6 +259,28 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         service.digest_scheduler = scheduler  # type: ignore[assignment]
         await service._digest_loop()
         self.assertEqual(owner_thread, scheduler.thread_id)
+
+    async def test_event_pool_yields_after_every_observation(self) -> None:
+        service = self._service(_Collector(FeedFetchResult((), None, None)), _Notifier())
+        calls: list[int] = []
+        peer_ran = asyncio.Event()
+
+        def project_once(*, limit: int = 50) -> int:
+            calls.append(limit)
+            if len(calls) == 2:
+                self.assertTrue(peer_ran.is_set())
+                service.request_stop()
+            return 1
+
+        async def peer() -> None:
+            await asyncio.sleep(0)
+            peer_ran.set()
+
+        service.process_event_pool_once = project_once  # type: ignore[method-assign]
+        peer_task = asyncio.create_task(peer())
+        await asyncio.wait_for(service._event_pool_loop(), 2)
+        await peer_task
+        self.assertEqual([1, 1], calls)
 
 
 if __name__ == "__main__":

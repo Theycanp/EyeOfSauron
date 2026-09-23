@@ -300,6 +300,14 @@ def validate_provider_configuration(
         normalized["content_timeout_seconds"] = _setting_int(
             settings, "content_timeout_seconds", 20, location, 1, 120
         )
+        profile = settings.get("entry_filter_profile", "")
+        if profile not in {"", "jma_exceptional_hazards"}:
+            raise ProviderConfigError(f"{location}.entry_filter_profile is unsupported")
+        normalized["entry_filter_profile"] = profile
+        notification_eligible = settings.get("notification_eligible", True)
+        if not isinstance(notification_eligible, bool):
+            raise ProviderConfigError(f"{location}.notification_eligible must be bool")
+        normalized["notification_eligible"] = notification_eligible
     if enabled:
         _validate_declared_settings(spec, settings, location)
         if kind == "official_list":

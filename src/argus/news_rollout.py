@@ -67,19 +67,26 @@ def plan_event_metadata(current: Mapping[str, Any]) -> tuple[dict[str, Any], lis
 def plan_disaster_signal_policy(
     current: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Demote local JMA bulletins without weakening global disaster coverage."""
+    """Retain only exceptional JMA evidence without weakening global alerts."""
     result = deepcopy(dict(current))
     source_id = "japan_meteorological_agency_high_frequency"
+    probes: list[dict[str, Any]] = []
     for source in result.get("sources", []):
         if source.get("id") != source_id:
             continue
-        source["poll_interval_seconds"] = 900
-        source["default_importance"] = 2
+        before = deepcopy(source)
+        source["poll_interval_seconds"] = 3600
+        source["default_importance"] = 1
+        settings = source.setdefault("settings", {})
+        settings["entry_filter_profile"] = "jma_exceptional_hazards"
+        settings["notification_eligible"] = False
+        if source != before and source.get("enabled", True):
+            probes.append(source)
     for rule in result.get("rules", []):
         source_ids = rule.get("source_ids")
         if isinstance(source_ids, list):
             rule["source_ids"] = [item for item in source_ids if item != source_id]
-    return result, []
+    return result, probes
 
 
 def plan_official_news(
@@ -100,7 +107,11 @@ def plan_official_news(
         source_id = f"{entry_id}_{feed_id}"
         source = NEWS_SOURCE_CATALOG.source_template(
             entry_id, feed_id, source_id, enabled=True, user_confirmed=True,
-            poll_interval_seconds=300 if entry_id == "usgs_earthquakes" else 900,
+            poll_interval_seconds=(
+                300 if entry_id == "usgs_earthquakes"
+                else 3600 if entry_id == "japan_meteorological_agency"
+                else 900
+            ),
         )
         if source_id in ids or source["url"] in urls:
             continue
@@ -125,7 +136,7 @@ def plan_official_news(
                  "regex": r"(?i)大津波警報|特別警報|特别重大|一级应急响应|一級應急|state of emergency|public health emergency|M [7-9]\.[0-9]",
                  "title_weight": 8.0, "summary_weight": 4.0},
                 {"label": "重大安全事态",
-                 "regex": r"(?i)宣战|宣戦|宣布断交|declar.{0,20}war|nuclear emergency|核事故|全面停火|ceasefire agreement",
+                 "regex": r"(?i)宣战|宣戦|宣布断交|\b(?:declare[ds]?|declaring|declaration\s+of)\b.{0,20}\bwar\b|nuclear emergency|核事故|全面停火|ceasefire agreement",
                  "title_weight": 8.0, "summary_weight": 4.0},
                 {"label": "货币政策重大调整",
                  "regex": r"(?i)降息|加息|降准|利上げ|利下げ|policy rate.{0,35}(?:increase|decrease|lower|raise)|(?:cuts|raises).{0,25}interest rate",
