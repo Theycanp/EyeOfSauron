@@ -197,7 +197,9 @@ class NewsSourceCatalog:
                 "content_policy": entry.content_policy,
                 "max_content_age_seconds": feed.max_content_age_seconds,
                 "topic": entry.topic,
-                **({"headline_from_summary": True}
+                **({"headline_from_summary": True,
+                    "entry_filter_profile": "jma_exceptional_hazards",
+                    "notification_eligible": False}
                    if entry.id == "japan_meteorological_agency" else {}),
                 **({"article_url_prefixes": list(feed.article_url_prefixes),
                     "index_format": feed.index_format,
@@ -510,7 +512,7 @@ NEWS_SOURCE_CATALOG = NewsSourceCatalog((
         (_feed("high_frequency", "High-frequency alerts", "Disaster and Weather", "https://www.data.jma.go.jp/developer/xml/feed/extra.xml", "www.data.jma.go.jp"),),
         "https://www.data.jma.go.jp/developer/xml/feed/",
         "Official JMAXML Atom feed for high-frequency weather and disaster information.",
-        region="JP", source_tier="primary", default_importance=2, topic="disaster",
+        region="JP", source_tier="primary", default_importance=1, topic="disaster",
     ),
     NewsSourceEntry(
         "world_health_organization",

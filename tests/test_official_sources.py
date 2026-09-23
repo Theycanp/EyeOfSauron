@@ -105,8 +105,13 @@ class OfficialSourcesTests(unittest.TestCase):
             if source.region == "JP" and source.id != "japan_meteorological_agency_high_frequency":
                 self.assertEqual(4, source.default_importance)
             if source.id == "japan_meteorological_agency_high_frequency":
-                self.assertEqual(2, source.default_importance)
-                self.assertEqual(900, source.poll_interval_seconds)
+                self.assertEqual(1, source.default_importance)
+                self.assertEqual(3600, source.poll_interval_seconds)
+                self.assertEqual(
+                    "jma_exceptional_hazards",
+                    source.settings["entry_filter_profile"],
+                )
+                self.assertFalse(source.settings["notification_eligible"])
         primary_additions = {
             row["id"] for row in additions
             if row.get("source_tier") == "primary"
@@ -134,3 +139,18 @@ class OfficialSourcesTests(unittest.TestCase):
         for title in ("启动一级应急响应", "大津波警報を発表", "M 7.8 - Major earthquake"):
             self.assertTrue(rules.evaluate(replace(observation, title=title), int(now.timestamp())), title)
         self.assertFalse(rules.evaluate(replace(observation, title="一级应急响应演练"), int(now.timestamp())))
+
+    def test_software_declaration_is_not_mistaken_for_a_declaration_of_war(self) -> None:
+        planned, _ = plan_official_news({})
+        rules = RuleSet.from_config((_parse_rule(planned["rules"][0], 0),), "test")
+        now = datetime.now(UTC)
+        base = Observation(
+            "uk_government_government", "UK Government", "uk", "id", now,
+            "Software developers providing customs declaration software", "",
+            "https://www.gov.uk/",
+        )
+        self.assertEqual((), rules.evaluate(base, int(now.timestamp())))
+        self.assertTrue(rules.evaluate(
+            replace(base, title="Government formally declared war after attack"),
+            int(now.timestamp()),
+        ))

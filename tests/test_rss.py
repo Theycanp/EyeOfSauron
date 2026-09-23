@@ -100,6 +100,38 @@ class RssTests(unittest.TestCase):
         with self.assertRaisesRegex(FeedError, "invalid XML"):
             parse_feed(b"<rss>", self.source)
 
+    def test_recovers_invalid_utf8_without_repairing_xml_structure(self) -> None:
+        payload = (
+            b'<?xml version="1.0" encoding="UTF-8"?><rss><channel><item>'
+            b'<title>ASEAN update</title><description><![CDATA[Trade 2026\xe2\x80]]></description>'
+            b'<link>https://www.bloomberg.com/news/articles/asean</link>'
+            b'<guid>asean-bad-byte</guid></item></channel></rss>'
+        )
+        item = parse_feed(payload, self.source)[0]
+        self.assertIn("Trade 2026", item.summary)
+        self.assertTrue(item.attributes["feed_recovered_invalid_utf8"])
+        with self.assertRaisesRegex(FeedError, "invalid XML"):
+            parse_feed(payload.replace(b"</item>", b""), self.source)
+
+    def test_jma_profile_retains_only_exceptional_hazards_and_blocks_notifications(self) -> None:
+        payload = b'''<feed xmlns="http://www.w3.org/2005/Atom">
+        <entry><id>routine</id><title>Weather bulletin</title>
+        <summary><![CDATA[\xe3\x80\x90\xe7\xa5\x9e\xe5\xa5\x88\xe5\xb7\x9d\xe7\x9c\x8c\xe6\xb0\x97\xe8\xb1\xa1\xe8\xad\xa6\xe5\xa0\xb1\xe3\x83\xbb\xe6\xb3\xa8\xe6\x84\x8f\xe5\xa0\xb1\xe3\x80\x91\xe9\xab\x98\xe6\xb3\xa2\xe3\x81\xab\xe6\xb3\xa8\xe6\x84\x8f\xe3\x81\x97\xe3\x81\xa6\xe3\x81\x8f\xe3\x81\xa0\xe3\x81\x95\xe3\x81\x84\xe3\x80\x82]]></summary>
+        <updated>2026-09-05T14:30:00Z</updated></entry>
+        <entry><id>exceptional</id><title>Emergency bulletin</title>
+        <summary><![CDATA[\xe3\x80\x90\xe5\xa4\xa7\xe6\xb4\xa5\xe6\xb3\xa2\xe8\xad\xa6\xe5\xa0\xb1\xe3\x80\x91\xe7\x9b\xb4\xe3\x81\xa1\xe3\x81\xab\xe9\x81\xbf\xe9\x9b\xa3\xe3\x81\x97\xe3\x81\xa6\xe3\x81\x8f\xe3\x81\xa0\xe3\x81\x95\xe3\x81\x84\xe3\x80\x82]]></summary>
+        <updated>2026-09-05T14:31:00Z</updated></entry></feed>'''
+        source = replace(self.source, settings={
+            **self.source.settings,
+            "headline_from_summary": True,
+            "entry_filter_profile": "jma_exceptional_hazards",
+            "notification_eligible": False,
+        })
+        observations = parse_feed(payload, source)
+        self.assertEqual(["exceptional"], [item.external_id for item in observations])
+        self.assertIn("大津波警報", observations[0].title)
+        self.assertFalse(observations[0].attributes["notification_eligible"])
+
     def test_rejects_doctype_and_entities_in_all_encodings(self) -> None:
         document = '<!DOCTYPE rss [<!ENTITY x "expanded">]><rss><channel><item><title>&x;</title></item></channel></rss>'
         for encoding in ("utf-8", "utf-16"):
@@ -289,6 +321,37 @@ class RssTests(unittest.TestCase):
         request = opener.open.call_args.args[0]
         self.assertIsNone(request.get_header("If-none-match"))
         self.assertIsNone(request.get_header("If-modified-since"))
+
+    def test_filtered_feed_uses_unfiltered_entries_for_freshness(self) -> None:
+        payload = b'''<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+        <id>routine</id><title>Routine advisory</title><summary>Routine advisory</summary>
+        <updated>2026-09-05T14:30:00Z</updated></entry></feed>'''
+        headers = Message()
+        headers["Content-Type"] = "application/atom+xml"
+        source = replace(self.source, settings={
+            **self.source.settings,
+            "max_content_age_seconds": 3600,
+            "entry_filter_profile": "jma_exceptional_hazards",
+            "notification_eligible": False,
+        })
+
+        class Response(io.BytesIO):
+            def __init__(self) -> None:
+                super().__init__(payload)
+                self.headers = headers
+
+            def geturl(self) -> str:
+                return str(source.url)
+
+        opener = Mock()
+        opener.open.return_value = Response()
+        resolver = lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))]
+        with patch("argus.rss.datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 9, 5, 15, tzinfo=UTC)
+            result = RssCollector(source, opener=opener, resolver=resolver).fetch(
+                self._state()
+            )
+        self.assertEqual((), result.observations)
 
     def test_content_age_policy_cannot_accept_unsolicited_304(self) -> None:
         opener = Mock()

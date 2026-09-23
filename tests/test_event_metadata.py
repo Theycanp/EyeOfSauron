@@ -21,10 +21,20 @@ class EventMetadataTests(unittest.TestCase):
             ],
         }
         planned, probes = plan_disaster_signal_policy(original)
-        self.assertEqual([], probes)
+        self.assertEqual(
+            ["japan_meteorological_agency_high_frequency"],
+            [source["id"] for source in probes],
+        )
         self.assertEqual(300, original["sources"][0]["poll_interval_seconds"])
-        self.assertEqual(900, planned["sources"][0]["poll_interval_seconds"])
-        self.assertEqual(2, planned["sources"][0]["default_importance"])
+        self.assertEqual(3600, planned["sources"][0]["poll_interval_seconds"])
+        self.assertEqual(1, planned["sources"][0]["default_importance"])
+        self.assertEqual(
+            "jma_exceptional_hazards",
+            planned["sources"][0]["settings"]["entry_filter_profile"],
+        )
+        self.assertFalse(
+            planned["sources"][0]["settings"]["notification_eligible"]
+        )
         self.assertTrue(planned["sources"][0]["enabled"])
         self.assertEqual(original["sources"][1], planned["sources"][1])
         self.assertEqual(

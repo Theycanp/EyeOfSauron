@@ -44,6 +44,13 @@ class RuleTests(unittest.TestCase):
         item = observation("old", "Breaking: Prime Minister Resigns", timestamp=NOW - 86400)
         self.assertEqual((), self.rules.evaluate(item, NOW))
 
+    def test_source_policy_can_make_matching_observation_notification_ineligible(self) -> None:
+        item = replace(
+            observation("blocked", "Breaking: Prime Minister Resigns"),
+            attributes={"notification_eligible": False},
+        )
+        self.assertEqual((), self.rules.evaluate(item, NOW))
+
     def test_dedupe_key_is_stable_across_sections(self) -> None:
         first = observation("same-guid", "Breaking: Prime Minister Resigns")
         second = observation(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 import urllib.error
+from dataclasses import replace
 
 from argus.models import OutboxMessage
 from argus.notifier import NtfyNotifier, NotifyError
@@ -65,6 +66,18 @@ class NotifierTests(unittest.TestCase):
         with self.assertRaises(NotifyError) as raised:
             notifier.publish(_alert())
         self.assertNotIn("do-not-leak", str(raised.exception))
+
+    def test_bounds_long_multibyte_message_and_preserves_detail_link(self) -> None:
+        notifier = NtfyNotifier("https://ntfy.example", "private-token", 10)
+        opener = _Opener()
+        notifier._opener = opener
+        alert = replace(_alert(), message="重要情报" * 1000)
+        notifier.publish(alert)
+        assert opener.request is not None
+        payload = json.loads(opener.request.data)
+        self.assertLessEqual(len(payload["message"].encode("utf-8")), 4096)
+        self.assertTrue(payload["message"].endswith("[内容较长，完整内容请点击通知查看]"))
+        self.assertEqual(alert.click_url, payload["click"])
 
     def test_rejects_plain_http_endpoint(self) -> None:
         with self.assertRaisesRegex(NotifyError, "must be HTTPS"):

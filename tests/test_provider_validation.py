@@ -118,3 +118,18 @@ class ProviderValidationTests(unittest.TestCase):
             for enabled in (False, True):
                 with self.subTest(value=value, enabled=enabled), self.assertRaises(ProviderConfigError):
                     self.validate("rss", {"max_content_age_seconds": value}, enabled=enabled, **options)
+
+    def test_rss_retention_profile_and_notification_policy_are_closed_enums(self) -> None:
+        options = dict(url="https://example.com/feed", allowed_hosts=("example.com",))
+        result = self.validate("rss", {
+            "entry_filter_profile": "jma_exceptional_hazards",
+            "notification_eligible": False,
+        }, **options)
+        self.assertEqual("jma_exceptional_hazards", result.settings["entry_filter_profile"])
+        self.assertFalse(result.settings["notification_eligible"])
+        for settings in (
+            {"entry_filter_profile": "arbitrary-regex"},
+            {"notification_eligible": "false"},
+        ):
+            with self.subTest(settings=settings), self.assertRaises(ProviderConfigError):
+                self.validate("rss", settings, **options)

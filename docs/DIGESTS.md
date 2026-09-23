@@ -118,6 +118,11 @@ schema 19 after the event workspace migration in schema 18). Errors are sanitize
 before persistence and notification. The outbox remains responsible for actual
 delivery and retry.
 
+The ntfy adapter enforces the provider's 4,096-byte message and 256-byte title
+limits using UTF-8-safe truncation. The notification keeps the authenticated EOS
+detail URL, so truncation affects only the push preview; the immutable full digest
+remains available in the web reader.
+
 The authenticated admin endpoint `GET /api/digest-runs` exposes derived run state,
 publication version, retry window, and up to 50 logical generation attempts. Each
 attempt records only an allowlisted provider hostname, model, Prompt identifier,

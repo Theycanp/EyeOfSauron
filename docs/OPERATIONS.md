@@ -163,6 +163,18 @@ The runtime-audit rollout is previewed with `activate_news_sources.py` plus
 also installs the local host check, repairs legacy `general` topics from source
 metadata, and keeps the local-model, heartbeat and hardware adapters disabled.
 
+The reviewed JMA retention policy is previewed with
+`activate_news_sources.py --disaster-signal-policy --expect-revision N`. The
+preview fetches and parses the live feed without writing configuration; `--apply`
+creates the next managed revision. Verify the applied revision, one successful
+JMA poll, zero direct JMA alerts, and continued USGS coverage after restart.
+An empty retained JMA batch is healthy when the unfiltered Feed is current.
+
+`scripts/operations/check_status.py` reports dead-letter outbox rows as warnings.
+A warning is not cleared by restarting the daemon; inspect the sanitized delivery
+error, correct the provider or payload issue, and retry through the repository or
+authenticated operations API.
+
 The browser UI is compiled from `frontend/` with Node/Vite. Node and npm are
 not required on the production host: the running service serves the compiled
 files from `src/argus/admin_web/`. Keep the admin listener loopback-only.

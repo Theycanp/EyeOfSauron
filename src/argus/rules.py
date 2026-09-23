@@ -25,6 +25,8 @@ class WeightedTextRule:
     def evaluate(self, observation: Observation, now: int) -> AlertCandidate | None:
         if observation.source_id not in self.config.source_ids:
             return None
+        if observation.attributes.get("notification_eligible") is False:
+            return None
         published = to_epoch(observation.published_at)
         if published < now - self.config.max_item_age_seconds or published > now + 3600:
             return None

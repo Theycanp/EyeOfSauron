@@ -136,8 +136,11 @@ def evaluate_status(
         pending = 0
     else:
         pending = int(outbox.get("pending", 0)) + int(outbox.get("sending", 0))
+        dead = int(outbox.get("dead", 0))
         if pending > max_pending:
             errors.append(f"outbox has {pending} in-flight messages; limit is {max_pending}")
+        if dead:
+            warnings.append(f"outbox has {dead} dead-letter message(s) requiring review")
 
     return {
         "ok": not errors,

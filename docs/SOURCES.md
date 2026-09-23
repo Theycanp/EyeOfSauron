@@ -32,6 +32,12 @@ such as major emergencies, material monetary-policy changes, severe disasters,
 or embassy security alerts. A source being primary does not mean every item is
 urgent.
 
+The JMA nationwide feed is a deliberately stricter exception. It is sampled
+hourly at importance 1, routine local advisories are discarded before storage,
+and retained exceptional-hazard evidence is never directly notification-eligible.
+USGS significant earthquakes and independently reviewed global reporting decide
+whether a disaster has enough international impact to interrupt the user.
+
 ## Source diagnostics and long-term quality
 
 In the administration **监测来源** page, use **查看来源诊断** to inspect an

@@ -29,7 +29,7 @@ def main() -> None:
     mode.add_argument("--event-metadata", action="store_true", help="fill missing legacy Fed source metadata")
     mode.add_argument(
         "--disaster-signal-policy", action="store_true",
-        help="demote local JMA bulletins while preserving global disaster alerts",
+        help="retain only exceptional JMA evidence while preserving global disaster alerts",
     )
     args = parser.parse_args()
     base = load_config(args.config, include_managed=False)
@@ -73,7 +73,7 @@ def main() -> None:
             {source.id for source in base.sources}, {rule.id for rule in base.rules}, database,
         )
         revision = store.write(planned, actor="operations:news-rollout",
-                               reason=("demote local JMA bulletins to digest-only evidence"
+                               reason=("reduce JMA to low-frequency exceptional-disaster evidence"
                                        if args.disaster_signal_policy else
                                        "fill legacy Fed source metadata" if args.event_metadata else
                                        "runtime audit: host monitoring, API digest, official sources and JMA correction"

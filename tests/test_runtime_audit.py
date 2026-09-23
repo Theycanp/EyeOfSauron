@@ -408,16 +408,19 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
         item = OfficialListCollector(parse_source_config(raw)).parse_payload(b'<a name="a20260911"></a><a class="information-item-inner" href="/english/policy/budget/release.html">Budget announcement</a>')[0]
         self.assertEqual(2026,item.published_at.year)
 
-    def test_jma_category_does_not_alert_but_actual_emergency_does(self):
+    def test_jma_retains_only_exceptional_evidence_without_direct_alerting(self):
         raw = NEWS_SOURCE_CATALOG.source_template('japan_meteorological_agency','high_frequency','jma',enabled=True,user_confirmed=True)
         source = parse_source_config(raw)
         planned,_ = plan_official_news({})
         rule = planned['rules'][0];rule['source_ids']=['jma']
         rules = RuleSet.from_config((_parse_rule(rule,0),),'eos')
-        for summary, expected in [('濃霧による視程障害に注意してください。',False),('大津波警報を発表。直ちに避難してください。',True)]:
+        for summary, retained in [('濃霧による視程障害に注意してください。',False),('大津波警報を発表。直ちに避難してください。',True)]:
             payload = f'<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>1</id><title>気象特別警報・警報・注意報</title><content>{summary}</content><updated>2026-09-12T11:59:00Z</updated></entry></feed>'.encode()
-            item = parse_feed(payload,source)[0]
-            self.assertEqual(expected,bool(rules.evaluate(item,self.now)))
+            items = parse_feed(payload,source)
+            self.assertEqual(retained, bool(items))
+            if items:
+                self.assertFalse(items[0].attributes['notification_eligible'])
+                self.assertEqual((), rules.evaluate(items[0], self.now))
 
     def test_runtime_rollout_is_idempotent_and_preserves_operator_choices(self):
         current, _ = plan_official_news({})

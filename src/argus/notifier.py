@@ -14,6 +14,26 @@ from .models import OutboxMessage
 
 
 _TOPIC_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_NTFY_MESSAGE_BYTES = 4096
+_NTFY_TITLE_BYTES = 256
+_TRUNCATED_NOTICE = "\n\n[内容较长，完整内容请点击通知查看]"
+
+
+def _truncate_utf8(value: str, limit: int, suffix: str = "") -> str:
+    """Bound provider payloads without splitting a UTF-8 code point."""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    suffix_bytes = suffix.encode("utf-8")
+    if len(suffix_bytes) >= limit:
+        suffix_bytes = b""
+    prefix = encoded[: limit - len(suffix_bytes)]
+    while prefix:
+        try:
+            return prefix.decode("utf-8") + suffix_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            prefix = prefix[:exc.start]
+    return suffix_bytes.decode("utf-8")
 
 
 class NotifyError(RuntimeError):
@@ -139,8 +159,10 @@ class NtfyNotifier:
             )
         payload: dict[str, object] = {
             "topic": alert.topic,
-            "title": alert.title,
-            "message": alert.message,
+            "title": _truncate_utf8(alert.title, _NTFY_TITLE_BYTES),
+            "message": _truncate_utf8(
+                alert.message, _NTFY_MESSAGE_BYTES, _TRUNCATED_NOTICE
+            ),
             "priority": alert.priority,
             "tags": list(alert.tags),
         }
