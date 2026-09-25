@@ -81,6 +81,36 @@ class CiGateTests(unittest.TestCase):
             self.assertFalse(marker.exists())
 
 
+class ReleaseDrillSafetyTests(unittest.TestCase):
+    def test_drill_rejects_paths_outside_its_marked_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".eos-release-drill").touch()
+            for name in ("systemctl", "health-gate.sh"):
+                command = root / name
+                command.write_text("#!/bin/sh\nexit 0\n")
+                command.chmod(0o755)
+            environment = {
+                **os.environ,
+                "EOS_RELEASE_DRILL_ROOT": str(root),
+                "EOS_INSTALL_ROOT": "/opt/eyeofsauron",
+                "EOS_BACKUP_ROOT": str(root / "backups"),
+                "ARGUS_CONFIG": str(root / "config.toml"),
+                "ARGUS_DATABASE": str(root / "state.db"),
+                "ARGUS_MANAGED_CONFIG": str(root / "managed.json"),
+            }
+            result = subprocess.run(
+                ["bash", "-c", 'source "$1"; install_root=$EOS_INSTALL_ROOT; '
+                 'backup_root=$EOS_BACKUP_ROOT; config_path=$ARGUS_CONFIG; '
+                 'state_database=$ARGUS_DATABASE; managed_config=$ARGUS_MANAGED_CONFIG; '
+                 'configure_release_environment', "bash", str(ROOT / "scripts/release/common.sh")],
+                capture_output=True, text=True, env=environment, timeout=10,
+            )
+            self.assertEqual(2, result.returncode)
+            self.assertIn("escapes its temporary root", result.stderr)
+            self.assertFalse((root / "systemd").exists())
+
+
 class DailyBackupTests(unittest.TestCase):
     def test_watchdog_start_limit_allows_its_normal_timer_cadence(self):
         import configparser

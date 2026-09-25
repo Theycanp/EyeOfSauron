@@ -122,7 +122,12 @@ schema-compatible, but restores its former retry behaviour.
 
 Persistent retry tables are `digest_retry_state`, `digest_api_usage`,
 `digest_failure_state`, and `digest_generation_attempts` (the latter is added in
-schema 19 after the event workspace migration in schema 18). Errors are sanitized
+schema 19 after the event workspace migration in schema 18). Schema 20 adds
+`digest_preparation_failures` for projection/build errors before AI budget
+reservation. These failures expose stage, first/last failure time and count in
+the run history; successful preparation clears the record. They do not consume
+the five synthesis attempts or silently turn a local data failure into an AI
+provider outage. Errors are sanitized
 before persistence and notification. The outbox remains responsible for actual
 delivery and retry.
 

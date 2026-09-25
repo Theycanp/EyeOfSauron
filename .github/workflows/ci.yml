@@ -60,6 +60,15 @@ jobs:
             --checksum "$release_archive.sha256" \
             --prepare-only
           cp "$release_archive" "$release_archive.sha256" artifacts/
+      - name: Isolated release activation and rollback drill
+        env:
+          RELEASE_ID: ci-${{ github.sha }}
+        run: |
+          release_archive="$RUNNER_TEMP/eyeofsauron-${GITHUB_SHA}.tar.gz"
+          sudo env \
+            RUNNER_TEMP="$RUNNER_TEMP" \
+            ARGUS_PYTHON="$(command -v python)" \
+            scripts/ci/release-drill.sh "$release_archive" "$RELEASE_ID"
       - name: Build Python distributions
         run: python -m build --no-isolation
       - name: Install wheel in a clean environment

@@ -5,6 +5,26 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.22.5] - 2026-09-25
+
+### Changed
+
+- Sample JMA's nationwide bulletin feed every six hours, retaining its
+  importance-1, exceptional-evidence-only, no-direct-notification policy.
+  Apply the same defaults to backend and administration catalog drafts;
+  five-minute USGS significant-earthquake coverage is unchanged.
+
+### Fixed
+
+- Persist digest projection and build failures separately from the five-attempt
+  AI budget, expose their stage and sanitized error in digest run history, and
+  clear the failure record after successful preparation.
+- Add bounded offline source parser replays and an isolated database restore
+  drill, with explicit evidence that database restore time is not full service
+  recovery time.
+- Exercise release activation, readiness failure, explicit rollback, and
+  automatic recovery in an isolated CI drill without touching production.
+
 ## [0.22.4] - 2026-09-25
 
 ### Fixed

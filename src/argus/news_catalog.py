@@ -165,7 +165,7 @@ class NewsSourceCatalog:
         *,
         enabled: bool = False,
         user_confirmed: bool = False,
-        poll_interval_seconds: int = 300,
+        poll_interval_seconds: int | None = None,
     ) -> dict[str, Any]:
         entry = self.require(entry_id)
         feed = next((item for item in entry.feeds if item.id == feed_id), None)
@@ -175,6 +175,8 @@ class NewsSourceCatalog:
             raise NewsCatalogError("enabling a catalog source requires explicit user confirmation")
         if not _CATALOG_ID.fullmatch(source_id):
             raise NewsCatalogError(f"invalid source id: {source_id}")
+        if poll_interval_seconds is None:
+            poll_interval_seconds = 21600 if entry.id == "japan_meteorological_agency" else 300
         if not 30 <= poll_interval_seconds <= 86400:
             raise NewsCatalogError("poll interval must be between 30 and 86400 seconds")
         return {

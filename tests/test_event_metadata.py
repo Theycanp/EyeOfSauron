@@ -26,7 +26,7 @@ class EventMetadataTests(unittest.TestCase):
             [source["id"] for source in probes],
         )
         self.assertEqual(300, original["sources"][0]["poll_interval_seconds"])
-        self.assertEqual(3600, planned["sources"][0]["poll_interval_seconds"])
+        self.assertEqual(21600, planned["sources"][0]["poll_interval_seconds"])
         self.assertEqual(1, planned["sources"][0]["default_importance"])
         self.assertEqual(
             "jma_exceptional_hazards",

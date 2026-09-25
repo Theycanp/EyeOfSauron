@@ -53,7 +53,8 @@ Never restore only `state.db` while a writer is running. Stop both `argus` and
 
 ## Initial layout migration
 
-Existing installations that use `/opt/eyeofsauron` as a normal code directory
+Production completed this migration before the current release series. Older
+installations that use `/opt/eyeofsauron` as a normal code directory
 must be migrated once to `/opt/eyeofsauron/releases/<release-id>` plus the
 `/opt/eyeofsauron/current` symlink. This is a manual maintenance operation with
 a verified backup. The release installer refuses to replace a normal `current`

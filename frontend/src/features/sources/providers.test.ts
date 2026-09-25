@@ -83,6 +83,17 @@ describe('source provider registry', () => {
     expect(serializeSource(catalogSourceDraft(entry, { ...feed, max_content_age_seconds: undefined }, [])).settings?.max_content_age_seconds).toBe(0)
   })
 
+  it('keeps JMA catalog drafts at low frequency and out of direct notifications', () => {
+    const entry = { id: 'japan_meteorological_agency', publisher: 'JMA', default_importance: 1 } as NewsCatalogEntry
+    const feed: NewsCatalogFeed = { id: 'high_frequency', label: 'Bulletins', section: 'Disaster', url: 'https://www.data.jma.go.jp/developer/xml/feed/extra.xml', allowed_hosts: ['www.data.jma.go.jp'] }
+    const source = serializeSource(catalogSourceDraft(entry, feed, []))
+    expect(source).toMatchObject({
+      poll_interval_seconds: 21_600,
+      default_importance: 1,
+      settings: { entry_filter_profile: 'jma_exceptional_hazards', notification_eligible: false },
+    })
+  })
+
   it('serializes and preserves the explicit RSS content policy', () => {
     const draft = createSourceDraft('rss', 'typed')
     draft.publisher = 'Official agency'

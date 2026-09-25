@@ -10,6 +10,7 @@ const states: Record<DigestRun['state'], { label: string; tone: string }> = {
   retry_exhausted: { label: '重试已结束', tone: 'warning' },
   ai_retrying: { label: '等待 AI 重试', tone: 'warning' },
   algorithm_published: { label: '算法版已发布', tone: 'neutral' },
+  preparation_failed: { label: '准备失败', tone: 'danger' },
   unpublished: { label: '尚未发布', tone: 'neutral' },
 }
 const attemptLabels: Record<string, string> = {
@@ -102,6 +103,7 @@ export function DigestRunsPanel({ api, onUnauthorized, canRetry }: {
             <div><dt>预留次数</dt><dd>{run.reserved_attempts} / 5 次逻辑生成</dd></div>
             <div><dt>下一次</dt><dd>{run.retry?.status === 'pending' && run.retry.next_attempt_at ? formatDate(run.retry.next_attempt_at) : '无已排定重试'}</dd></div>
             <div><dt>窗口截止</dt><dd>{run.retry ? formatDate(run.retry.retry_deadline_at) : '未建立重试窗口'}</dd></div>
+            {run.preparation && <div><dt>准备阶段</dt><dd>{run.preparation.stage} · 已失败 {run.preparation.failure_count} 次，最近于 {formatDate(run.preparation.last_failed_at)}：{run.preparation.last_error}</dd></div>}
             {firstError && <div><dt>最早已记录错误</dt><dd>{firstError}</dd></div>}
             {latestError && <div><dt>最近错误</dt><dd>{latestError}</dd></div>}
           </dl>

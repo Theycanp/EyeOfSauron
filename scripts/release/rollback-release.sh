@@ -19,6 +19,13 @@ if [[ ! "$release_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
   echo "usage: $0 RELEASE_ID [PRE_RELEASE_BACKUP_BUNDLE]" >&2
   exit 2
 fi
+configure_release_environment
+if [[ -n "$release_drill_root" && -n "$restore_bundle" ]]; then
+  [[ "$(realpath -m "$restore_bundle")" == "$release_drill_root/"* ]] || {
+    echo "release drill restore bundle escapes its temporary root" >&2
+    exit 2
+  }
+fi
 lock_releases
 target="$install_root/releases/$release_id"
 [[ -d "$target" && ! -L "$target" ]] || { echo "release not found or is a symlink: $target" >&2; exit 1; }
@@ -46,7 +53,7 @@ restore_current() {
   set +e
   if ((rollback_required)); then
     echo "rollback failed; restoring the previously active release and state" >&2
-    systemctl stop argus-admin argus || exit 1
+    release_systemctl stop argus-admin argus || exit 1
     failed_state="$backup_root/failed-rollback-${release_id}-${timestamp}"
     install -d -m 0700 -o root -g root "$failed_state" || exit 1
     for item in "$state_database" "$state_database-wal" "$state_database-shm" "$managed_config"; do
@@ -59,24 +66,24 @@ restore_current() {
       echo "database recovery failed; services remain stopped; backup: $safety_backup" >&2
       exit 1
     fi
-    chown argus:argus "$state_database" && chmod 0600 "$state_database" || exit 1
+    chown "$release_service_user:$release_service_user" "$state_database" && chmod 0600 "$state_database" || exit 1
     if [[ -f "$safety_backup/managed-sources.json" ]]; then
-      install -m 0600 -o argus -g argus "$safety_backup/managed-sources.json" "$managed_config" || exit 1
+      install -m 0600 -o "$release_service_user" -g "$release_service_user" "$safety_backup/managed-sources.json" "$managed_config" || exit 1
     fi
     recovery_link="$install_root/.current.recover.$$"
     rm -f "$recovery_link"
     ln -s "$previous" "$recovery_link" && mv -Tf "$recovery_link" "$install_root/current" || exit 1
     restore_units "$safety_backup/units" || exit 1
-    systemctl start argus argus-admin || exit 1
+    release_systemctl start argus argus-admin || exit 1
   elif ((services_stopped)); then
-    systemctl start argus argus-admin
+    release_systemctl start argus argus-admin
   fi
   exit "$exit_code"
 }
 trap restore_current EXIT
 
 services_stopped=1
-systemctl stop argus-admin argus
+release_systemctl stop argus-admin argus
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 safety_backup="$backup_root/pre-rollback-${release_id}-${timestamp}"
 PYTHONPATH="$previous/src" /usr/bin/python3 -m argus.backup backup \
@@ -102,10 +109,10 @@ if [[ -n "$restore_bundle" ]]; then
   done
   PYTHONPATH="$target/src" /usr/bin/python3 -m argus.backup restore \
     "$restore_bundle" --database "$state_database"
-  chown argus:argus "$state_database"
+  chown "$release_service_user:$release_service_user" "$state_database"
   chmod 0600 "$state_database"
   if [[ -f "$restore_bundle/managed-sources.json" ]]; then
-    install -m 0600 -o argus -g argus "$restore_bundle/managed-sources.json" "$managed_config"
+    install -m 0600 -o "$release_service_user" -g "$release_service_user" "$restore_bundle/managed-sources.json" "$managed_config"
   fi
 fi
 
@@ -115,11 +122,11 @@ ln -s "$target" "$rollback_link"
 mv -Tf "$rollback_link" "$install_root/current"
 for unit in "$target"/deploy/*.service "$target"/deploy/*.timer; do
   [[ -f "$unit" ]] || continue
-  install -m 0644 -o root -g root "$unit" /etc/systemd/system/
+  install -m 0644 -o root -g root "$unit" "$release_unit_root/"
 done
-systemctl daemon-reload
-systemctl start argus argus-admin
-"$target/scripts/operations/health-gate.sh" --wait-seconds 120
+release_systemctl daemon-reload
+release_systemctl start argus argus-admin
+release_health_gate "$target"
 rollback_required=0
 services_stopped=0
 trap - EXIT

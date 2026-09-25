@@ -57,7 +57,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 
 _DIGEST_PROVIDER_TRACE_FIELDS = frozenset({
@@ -1386,6 +1386,45 @@ class Database:
                     "ON digest_generation_attempts(digest_key, id DESC)"
                 )
                 self.connection.execute("PRAGMA user_version=19")
+            version = 19
+        if version < 20:
+            with self.unit_of_work():
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS digest_preparation_failures (
+                        digest_key TEXT PRIMARY KEY,
+                        stage TEXT NOT NULL CHECK(stage IN ('projection', 'build')),
+                        last_error TEXT NOT NULL,
+                        first_failed_at INTEGER NOT NULL,
+                        last_failed_at INTEGER NOT NULL,
+                        failure_count INTEGER NOT NULL CHECK(failure_count > 0)
+                    )
+                """)
+                self.connection.execute("PRAGMA user_version=20")
+
+    def record_digest_preparation_failure(
+        self, digest_key: str, *, stage: str, error: BaseException | str, now: int,
+    ) -> None:
+        if not digest_key or len(digest_key) > 128 or stage not in {"projection", "build"} or now < 0:
+            raise ValueError("invalid digest preparation failure")
+        with self.unit_of_work():
+            self.connection.execute("""
+                INSERT INTO digest_preparation_failures
+                    (digest_key,stage,last_error,first_failed_at,last_failed_at,failure_count)
+                VALUES (?,?,?,?,?,1)
+                ON CONFLICT(digest_key) DO UPDATE SET
+                    stage=excluded.stage,
+                    last_error=excluded.last_error,
+                    last_failed_at=excluded.last_failed_at,
+                    failure_count=failure_count+1
+            """, (digest_key, stage, sanitize_error(error), now, now))
+
+    def clear_digest_preparation_failure(self, digest_key: str) -> None:
+        if not digest_key or len(digest_key) > 128:
+            raise ValueError("invalid digest key")
+        with self.unit_of_work():
+            self.connection.execute(
+                "DELETE FROM digest_preparation_failures WHERE digest_key=?", (digest_key,),
+            )
 
     def start_digest_attempt(self, digest_key: str, *, now: int) -> int:
         if not digest_key or len(digest_key) > 128 or now < 0:
@@ -1429,6 +1468,11 @@ class Database:
                 "SELECT * FROM digest_retry_state WHERE digest_key=?", (digest_key,),
             ).fetchone()
             retry = dict(retry_row) if retry_row else None
+            preparation_row = self.connection.execute(
+                "SELECT stage,last_error,first_failed_at,last_failed_at,failure_count "
+                "FROM digest_preparation_failures WHERE digest_key=?", (digest_key,),
+            ).fetchone()
+            preparation = dict(preparation_row) if preparation_row else None
             attempts = [dict(row) for row in self.connection.execute(
                 "SELECT * FROM digest_generation_attempts WHERE digest_key=? ORDER BY id DESC LIMIT 50",
                 (digest_key,),
@@ -1436,7 +1480,7 @@ class Database:
             usage = self.connection.execute(
                 "SELECT calls FROM digest_api_usage WHERE digest_key=?", (digest_key,),
             ).fetchone()
-        if digest is None and retry is None and not attempts:
+        if digest is None and retry is None and not attempts and preparation is None:
             return None
         for attempt in attempts:
             attempt["providers"] = _read_digest_provider_trace(attempt.pop("providers_json", None))
@@ -1444,11 +1488,12 @@ class Database:
         return {
             "digest_key": digest_key,
             "state": digest_run_state(generation_kind=generation_kind, retry=retry,
-                                      latest_attempt=attempts[0] if attempts else None, now=now),
+                                      latest_attempt=attempts[0] if attempts else None,
+                                      preparation=preparation, now=now),
             "published_version": digest["version"] if digest else None,
             "generation_kind": generation_kind,
             "published_at": digest["published_at"] if digest else None,
-            "retry": retry, "attempts": attempts,
+            "retry": retry, "attempts": attempts, "preparation": preparation,
             "reserved_attempts": int(usage["calls"]) if usage else 0,
             "attempt_history_available": bool(attempts),
             "can_retry_now": bool(retry and retry["status"] == "pending"
@@ -1466,7 +1511,8 @@ class Database:
         rows = self.connection.execute(
             "SELECT digest_key FROM (SELECT digest_key,created_at AS at FROM digests "
             "UNION ALL SELECT digest_key,started_at FROM digest_generation_attempts "
-            "UNION ALL SELECT digest_key,started_at FROM digest_retry_state) "
+            "UNION ALL SELECT digest_key,started_at FROM digest_retry_state "
+            "UNION ALL SELECT digest_key,last_failed_at FROM digest_preparation_failures) "
             "GROUP BY digest_key ORDER BY MAX(at) DESC, digest_key DESC LIMIT ?", (limit,),
         ).fetchall()
         return [run for row in rows if (run := self.get_digest_run(str(row[0]), now=now)) is not None]

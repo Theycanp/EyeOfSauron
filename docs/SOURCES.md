@@ -13,6 +13,12 @@ network fetch and parser pass. If any new source fails, no configuration revisio
 is written. First success establishes a baseline, so adding an existing feed does
 not flood ntfy with historical entries.
 
+Offline parser replay fixtures in `tests/fixtures/` retain short attributed
+public RSS/RDF and official HTML excerpts. `tests/test_source_replay.py` checks
+stable IDs, publication times, publisher metadata, duplicate filtering and
+fail-closed behavior when a page layout or encoding changes. Add a reviewed
+fixture when a source-specific parser is introduced or repaired.
+
 ## Current policy
 
 Commercial sources retain feed metadata/excerpts and original links. Public
@@ -33,7 +39,7 @@ or embassy security alerts. A source being primary does not mean every item is
 urgent.
 
 The JMA nationwide feed is a deliberately stricter exception. It is sampled
-hourly at importance 1, routine local advisories are discarded before storage,
+every six hours at importance 1, routine local advisories are discarded before storage,
 and retained exceptional-hazard evidence is never directly notification-eligible.
 USGS significant earthquakes and independently reviewed global reporting decide
 whether a disaster has enough international impact to interrupt the user.

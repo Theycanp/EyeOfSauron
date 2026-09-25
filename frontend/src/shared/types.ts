@@ -464,10 +464,17 @@ export interface DigestGenerationAttempt {
 
 export interface DigestRun {
   digest_key: string
-  state: 'ai_published' | 'generating' | 'retry_exhausted' | 'ai_retrying' | 'algorithm_published' | 'unpublished'
+  state: 'ai_published' | 'generating' | 'retry_exhausted' | 'ai_retrying' | 'algorithm_published' | 'preparation_failed' | 'unpublished'
   published_version: number | null
   generation_kind: string | null
   published_at: number | null
+  preparation?: {
+    stage: string
+    last_error: string
+    first_failed_at: number
+    last_failed_at: number
+    failure_count: number
+  } | null
   retry: {
     status: 'pending' | 'succeeded' | 'failed'
     attempts: number
