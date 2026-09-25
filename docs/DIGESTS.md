@@ -10,7 +10,9 @@ available in the daily review.
 Candidates are read from the continuously maintained event pool also used by the
 daily-events reader. Missing observations in the target period are projected
 before selection; async preparation yields between batches of 50, allowing other
-daemon workers to continue. The synchronous builder remains available to offline
+daemon workers to continue. Selection follows event-page cursors up to the
+configured candidate budget, so a filtered first page does not hide later eligible
+events. The synchronous builder remains available to offline
 tools. Records are clustered by the event-centric adapter (`cluster_events`) using
 normalized title, entities, numbers, topic, region, and time-window signals.
 Each event keeps first-party, secondary, and social reports as parallel
@@ -24,19 +26,25 @@ Stable event identities are unique within a digest. If conservative batch
 clusters resolve to the same historical identity, their evidence is recombined
 before AI synthesis and storage; reports are not discarded to satisfy uniqueness.
 Delayed notifications can contribute old evidence to the notification-day window.
+New digest versions freeze their selected EventReport evidence in the same
+transaction as the digest items. Later report edits or 90-day observation cleanup
+cannot change those published versions. Versions created before this change may
+still use the legacy live-report reconstruction path.
 
 The configured `item_limit` is a hard ceiling, currently 50. The actual count is
 chosen without AI:
 
 ```text
-signal_mass = sum(clamp(cluster.score, 1, 6))
-score_target = ceil(signal_mass / 4)
-selected_count = min(item_limit,
+signal_energy = sum(max(0, clamp(cluster.score, 0, 6) - 2.5)^2)
+topic_bonus = min(3, max(0, number_of_distinct_meaningful_topics - 1))
+score_target = ceil(2 * sqrt(signal_energy) + topic_bonus)
+selected_count = min(item_limit, candidate_count,
                      max(1, score_target, number_of_immediate_clusters))
 ```
 
-This makes quiet days shorter and dense, high-value days longer. The calculation
-is deterministic, explainable, and covered by tests. Empty days remain empty.
+The 2.5 floor keeps background reports from filling the digest through volume
+alone. Stronger and more varied days can still reach 50. The calculation is
+deterministic and covered by tests; empty days remain empty.
 
 Before adaptive ranking, the builder reads global event editorial choices through
 the event repository port. `exclude` removes an event from this digest window;
@@ -118,8 +126,9 @@ schema 19 after the event workspace migration in schema 18). Errors are sanitize
 before persistence and notification. The outbox remains responsible for actual
 delivery and retry.
 
-The ntfy adapter enforces the provider's 4,096-byte message and 256-byte title
-limits using UTF-8-safe truncation. The notification keeps the authenticated EOS
+The ntfy adapter caps the message at 4,000 UTF-8 bytes, below the server's
+nominal 4,096-byte attachment boundary, and caps titles at 256 bytes. The
+notification keeps the authenticated EOS
 detail URL, so truncation affects only the push preview; the immutable full digest
 remains available in the web reader.
 

@@ -339,7 +339,7 @@ def _canonical_actions(item: Mapping[str, Any]) -> frozenset[str]:
     )
 
 
-def _is_context_report(item: Mapping[str, Any]) -> bool:
+def event_report_is_context(item: Mapping[str, Any]) -> bool:
     text = _text(f"{item.get('title', '')} {item.get('summary', '')}")
     markers = (
         " after ", " following ", " reaction", " reacts ", " market ",
@@ -399,7 +399,7 @@ def _pair_score(left: Mapping[str, Any], right: Mapping[str, Any], *, window: in
     canonical_right = _canonical_terms(f"{right.get('title', '')} {right.get('summary', '')}")
     shared_canonical = canonical_left & canonical_right
     shared_entities = _entities(left) & _entities(right)
-    if shared_canonical and (actions_left & actions_right or _is_context_report(left) or _is_context_report(right)):
+    if shared_canonical and (actions_left & actions_right or event_report_is_context(left) or event_report_is_context(right)):
         score = max(
             score,
             min(
@@ -428,7 +428,7 @@ def _pair_score(left: Mapping[str, Any], right: Mapping[str, Any], *, window: in
     elif semantic_left is not None and semantic_right is not None:
         return 0.0, False
     elif topic_left != topic_right and "general" not in {topic_left, topic_right}:
-        if not shared_entities or not (_is_context_report(left) or _is_context_report(right)):
+        if not shared_entities or not (event_report_is_context(left) or event_report_is_context(right)):
             return 0.0, False
     # Distinct figures in otherwise similar reports are retained as one event
     # with a contradiction marker, rather than silently replacing either fact.
@@ -615,12 +615,13 @@ def cluster_events(
             semantic = identify_semantic_event(
                 str(item.get("title", "")), str(item.get("summary", ""))
             )
-            if semantic is not None and semantic.relation_hint == "context":
+            if ((semantic is not None and semantic.relation_hint == "context")
+                    or (tier == "secondary" and event_report_is_context(item))):
                 relation_by_id[_report_id(item)] = "context"
-            elif source_id in source_seen:
-                relation_by_id[_report_id(item)] = "updates"
             elif tier == "primary":
                 relation_by_id[_report_id(item)] = "primary"
+            elif source_id in source_seen:
+                relation_by_id[_report_id(item)] = "updates"
             elif tier == "secondary" and primary_present:
                 relation_by_id[_report_id(item)] = "corroborates"
             elif tier == "social":

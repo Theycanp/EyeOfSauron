@@ -73,6 +73,96 @@ class EventPersistenceTests(unittest.TestCase):
         self.assertEqual([evidence.stance], [item.stance for item in self.database.list_claim_evidence("claim-1")])
         self.assertEqual([timeline.text], [item.text for item in self.database.list_event_timeline("event-1")])
 
+    def _event_report(self, event_key: str, source_id: str, observation_id: int) -> PersistedEventReport:
+        self.database.save_event(PersistedEvent(
+            event_key=event_key, fingerprint=event_key, title="An event", summary="Summary",
+            score=4.2, importance=4, urgency=3, relevance=4, confidence=0.8,
+            first_seen_at=100, last_seen_at=100,
+        ))
+        return self.database.save_event_report(PersistedEventReport(
+            event_key=event_key, observation_id=observation_id, source_id=source_id,
+            publisher=source_id, source_tier="primary", relation="primary",
+            match_score=1.0, is_representative=True, published_at=100,
+            title="An event", summary="Summary", url="https://example.test/report",
+        ))
+
+    def _second_event_report(self) -> PersistedEventReport:
+        self.database.record_source_success(
+            "source-b", FeedFetchResult((observation("obs-2", "Another event", source_id="source-b"),), None, None),
+            self.rules, 100, self.config.ntfy.default_topic,
+        )
+        return self._event_report("event-2", "source-b", 2)
+
+    def test_claim_evidence_resolves_same_event_and_rejects_cross_event_report(self) -> None:
+        first_report = self._event_report("event-1", "source-a", 1)
+        second_report = self._second_event_report()
+        first_claim = self.database.save_event_claim(PersistedEventClaim(
+            event_key="event-1", claim_key="shared", text="First claim", status="active",
+            confidence=0.8, first_seen_at=100, last_seen_at=100,
+        ))
+        with self.assertRaisesRegex(ValueError, "same event"):
+            self.database.save_claim_evidence(PersistedEventClaimEvidence(
+                claim_key="shared", report_id=second_report.report_id or 0, stance="supports",
+            ))
+        second_claim = self.database.save_event_claim(PersistedEventClaim(
+            event_key="event-2", claim_key="shared", text="Second claim", status="active",
+            confidence=0.8, first_seen_at=100, last_seen_at=100,
+        ))
+        first = self.database.save_claim_evidence(PersistedEventClaimEvidence(
+            claim_key="shared", report_id=first_report.report_id or 0, stance="supports",
+        ))
+        second = self.database.save_claim_evidence(PersistedEventClaimEvidence(
+            claim_key="shared", report_id=second_report.report_id or 0, stance="refutes",
+        ))
+        self.assertEqual(
+            [first_claim.claim_id, second_claim.claim_id],
+            [row["claim_id"] for row in self.database.connection.execute(
+                "SELECT claim_id FROM event_claim_evidence ORDER BY id"
+            )],
+        )
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            self.database.list_claim_evidence("shared")
+        self.assertEqual([first.evidence_id], [item.evidence_id for item in self.database.list_claim_evidence(
+            "shared", event_key="event-1"
+        )])
+        self.assertEqual([second.evidence_id], [item.evidence_id for item in self.database.list_claim_evidence(
+            "shared", event_key="event-2"
+        )])
+
+    def test_timeline_report_must_belong_to_event(self) -> None:
+        self._event_report("event-1", "source-a", 1)
+        other_report = self._second_event_report()
+        with self.assertRaisesRegex(ValueError, "same event"):
+            self.database.save_event_timeline(PersistedEventTimelineItem(
+                event_key="event-1", occurred_at=100, kind="reported", text="Wrong evidence",
+                confidence=0.8, report_id=other_report.report_id,
+            ))
+        self.assertEqual([], self.database.list_event_timeline("event-1"))
+
+    def test_claim_supersedes_requires_existing_acyclic_predecessor(self) -> None:
+        self._event_report("event-1", "source-a", 1)
+        original = self.database.save_event_claim(PersistedEventClaim(
+            event_key="event-1", claim_key="original", text="Two people", status="active",
+            confidence=0.9, first_seen_at=100, last_seen_at=100,
+        ))
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            self.database.save_event_claim(replace(
+                original, claim_key="corrected", text="Three people", supersedes_claim_key="missing",
+            ))
+        with self.assertRaisesRegex(ValueError, "itself"):
+            self.database.save_event_claim(replace(original, supersedes_claim_key="original"))
+        corrected = self.database.save_event_claim(replace(
+            original, claim_key="corrected", text="Three people", supersedes_claim_key="original",
+        ))
+        self.assertEqual("original", corrected.supersedes_claim_key)
+        self.assertEqual("superseded", next(
+            claim.status for claim in self.database.list_event_claims("event-1")
+            if claim.claim_key == "original"
+        ))
+        with self.assertRaisesRegex(ValueError, "cycle"):
+            self.database.save_event_claim(replace(original, supersedes_claim_key="corrected"))
+        self.assertEqual(2, len(self.database.list_event_claims("event-1")))
+
     def test_event_schema_migrates_additively_from_version_16(self) -> None:
         path = self.config.service.database_path
         self.database.connection.execute("DROP TABLE event_claim_evidence")
@@ -250,6 +340,33 @@ class EventPersistenceTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.database.save_event_projection(event, invalid)
         self.assertIsNone(self.database.get_event(event.event_key))
+
+    def test_event_relation_update_failure_rolls_back_new_report(self) -> None:
+        EventPoolProjector(self.database).project_pending(now=200, limit=50)
+        existing = self.database.list_events()[0]
+        prior = self.database.list_event_reports(existing.event_key)[0]
+        self.database.record_source_success(
+            "source-a",
+            FeedFetchResult((observation(
+                "new-report", "Official event update", source_id="source-a", timestamp=300,
+            ),), None, None),
+            self.rules, 300, self.config.ntfy.default_topic,
+        )
+        pending = self.database.list_unassigned_event_observations(limit=1)
+        self.assertEqual(1, len(pending))
+        incoming = replace(
+            prior, report_id=None, observation_id=int(pending[0]["id"]),
+            published_at=300, created_at=300, relation="updates",
+        )
+        invalid_update = replace(prior, report_id=999999, relation="corroborates")
+        with self.assertRaises(ValueError):
+            self.database.save_event_projection(
+                replace(existing, last_seen_at=300, updated_at=300), incoming,
+                relation_updates=(invalid_update,),
+            )
+        self.assertEqual(existing.last_seen_at, self.database.get_event(existing.event_key).last_seen_at)
+        self.assertEqual(1, len(self.database.list_event_reports(existing.event_key)))
+        self.assertEqual(1, len(self.database.list_unassigned_event_observations(limit=1)))
 
     def test_event_projection_repeated_assignment_does_not_create_orphan(self) -> None:
         projector = EventPoolProjector(self.database)

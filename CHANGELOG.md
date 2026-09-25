@@ -5,6 +5,27 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.22.4] - 2026-09-25
+
+### Fixed
+
+- Keep ntfy push previews below its 4 KiB attachment boundary. The 24 September
+  daily digest body at exactly 4,096 UTF-8 bytes was rejected with HTTP 400;
+  the full digest remains available through its detail URL.
+- Freeze selected EventReport evidence when each digest version is saved, so
+  later report changes and observation retention cannot rewrite published
+  evidence. Existing older versions retain their legacy read behavior.
+- Read all event-pool pages within the digest candidate budget before source
+  filtering; eligible events on later pages are no longer hidden by page one.
+- Stop low-score event volume alone from filling the daily 50-item ceiling.
+  Production read-only replays for 18–25 September selected 21–38 items instead
+  of 50 every day; previously published digests were not modified.
+- Correct late-primary report relations in one event-projection transaction,
+  preserving true context reports and marking a same-source official report as
+  primary.
+- Scope Claim evidence and Timeline links to their event, reject invalid
+  supersedes chains, and make digest run publication lookup deterministic.
+
 ## [0.22.3] - 2026-09-23
 
 ### Changed

@@ -7,7 +7,7 @@ import math
 import os
 import sqlite3
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import asdict, replace
 import time
 import uuid
 from datetime import UTC, date, datetime
@@ -1423,7 +1423,7 @@ class Database:
         with (nullcontext() if self.connection.in_transaction else self.unit_of_work(immediate=False)):
             digest = self.connection.execute(
                 "SELECT version,generation_kind,published_at FROM digests "
-                "WHERE digest_key=? AND status='published'", (digest_key,),
+                "WHERE digest_key=? AND status='published' ORDER BY version DESC LIMIT 1", (digest_key,),
             ).fetchone()
             retry_row = self.connection.execute(
                 "SELECT * FROM digest_retry_state WHERE digest_key=?", (digest_key,),
@@ -4109,7 +4109,7 @@ class Database:
     def list_unassigned_event_observations(
         self, *, since: int | None = None, until: int | None = None, limit: int = 500
     ) -> list[dict[str, Any]]:
-        """Return a bounded FIFO batch for the background event projector."""
+        """Return a bounded newest-first batch for the background event projector."""
         if not 1 <= limit <= 500:
             raise ValueError("event projection limit is out of range")
         if since is not None and since < 0 or until is not None and until < 0:
@@ -4543,10 +4543,13 @@ class Database:
             return target.event_key
 
     def save_event_projection(
-        self, event: PersistedEvent, report: PersistedEventReport
+        self, event: PersistedEvent, report: PersistedEventReport,
+        *, relation_updates: Sequence[PersistedEventReport] = (),
     ) -> PersistedEventReport:
         if event.event_key != report.event_key:
             raise ValueError("event projection identities do not match")
+        if any(update.event_key != event.event_key for update in relation_updates):
+            raise ValueError("event relation update identity does not match")
         with self.unit_of_work():
             # Another projector may have assigned this observation while the
             # caller computed a match. Its committed identity wins.
@@ -4561,6 +4564,17 @@ class Database:
                 raise ValueError("event was merged during projection; retry with current candidates")
             self._save_event(event)
             saved = self._save_event_report(report)
+            for update in relation_updates:
+                if update.report_id is None or update.relation != "corroborates":
+                    raise ValueError("event relation update is invalid")
+                changed = self.connection.execute(
+                    "UPDATE event_reports SET relation='corroborates' "
+                    "WHERE id=? AND event_id=(SELECT id FROM events WHERE event_key=?) "
+                    "AND source_tier='secondary' AND relation='context'",
+                    (update.report_id, event.event_key),
+                )
+                if changed.rowcount != 1:
+                    raise ValueError("event relation changed during projection")
             self.connection.execute(
                 "UPDATE events SET independent_source_count=("
                 "SELECT COUNT(DISTINCT COALESCE(NULLIF(LOWER(TRIM(o.publisher)), ''), er.source_id)) "
@@ -4658,17 +4672,35 @@ class Database:
     def save_event_claim(self, claim: PersistedEventClaim) -> PersistedEventClaim:
         if not isinstance(claim, PersistedEventClaim):
             raise TypeError("claim must be a PersistedEventClaim")
-        event = self.connection.execute("SELECT id FROM events WHERE event_key = ?", (claim.event_key,)).fetchone()
-        if event is None:
-            raise KeyError(f"event does not exist: {claim.event_key}")
-        supersedes_id = None
-        if claim.supersedes_claim_key:
-            row = self.connection.execute(
-                "SELECT id FROM event_claims WHERE event_id = ? AND claim_key = ?",
-                (int(event["id"]), claim.supersedes_claim_key),
-            ).fetchone()
-            supersedes_id = int(row["id"]) if row is not None else None
         with self.unit_of_work():
+            event = self.connection.execute("SELECT id FROM events WHERE event_key = ?", (claim.event_key,)).fetchone()
+            if event is None:
+                raise KeyError(f"event does not exist: {claim.event_key}")
+            event_id = int(event["id"])
+            supersedes_id = None
+            if claim.supersedes_claim_key:
+                if claim.supersedes_claim_key == claim.claim_key:
+                    raise ValueError("claim cannot supersede itself")
+                row = self.connection.execute(
+                    "SELECT id FROM event_claims WHERE event_id = ? AND claim_key = ?",
+                    (event_id, claim.supersedes_claim_key),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("superseded claim does not exist in this event")
+                supersedes_id = int(row["id"])
+                existing = self.connection.execute(
+                    "SELECT id FROM event_claims WHERE event_id = ? AND claim_key = ?",
+                    (event_id, claim.claim_key),
+                ).fetchone()
+                if existing is not None and self.connection.execute(
+                    "WITH RECURSIVE ancestors(id, parent_id) AS ("
+                    "SELECT id, supersedes_claim_id FROM event_claims WHERE id = ? "
+                    "UNION ALL SELECT ec.id, ec.supersedes_claim_id FROM event_claims ec "
+                    "JOIN ancestors a ON ec.id = a.parent_id) "
+                    "SELECT 1 FROM ancestors WHERE id = ? LIMIT 1",
+                    (supersedes_id, int(existing["id"])),
+                ).fetchone() is not None:
+                    raise ValueError("claim supersedes relationship would form a cycle")
             self.connection.execute(
                 """
                 INSERT INTO event_claims(
@@ -4680,13 +4712,18 @@ class Database:
                     first_seen_at=excluded.first_seen_at, last_seen_at=excluded.last_seen_at,
                     supersedes_claim_id=excluded.supersedes_claim_id, updated_at=excluded.updated_at
                 """,
-                (int(event["id"]), claim.claim_key, claim.text, claim.status, claim.confidence,
+                (event_id, claim.claim_key, claim.text, claim.status, claim.confidence,
                  claim.first_seen_at, claim.last_seen_at, supersedes_id, claim.created_at, claim.updated_at),
             )
+            if supersedes_id is not None and claim.status == "active":
+                self.connection.execute(
+                    "UPDATE event_claims SET status = 'superseded', updated_at = ? WHERE id = ?",
+                    (claim.updated_at, supersedes_id),
+                )
         row = self.connection.execute(
             "SELECT ec.*, e.event_key, parent.claim_key AS supersedes_claim_key FROM event_claims ec "
             "JOIN events e ON e.id=ec.event_id LEFT JOIN event_claims parent ON parent.id=ec.supersedes_claim_id "
-            "WHERE ec.event_id = ? AND ec.claim_key = ?", (int(event["id"]), claim.claim_key)
+            "WHERE ec.event_id = ? AND ec.claim_key = ?", (event_id, claim.claim_key)
         ).fetchone()
         assert row is not None
         return self._event_claim_from_row(row)
@@ -4714,12 +4751,18 @@ class Database:
     def save_claim_evidence(self, evidence: PersistedEventClaimEvidence) -> PersistedEventClaimEvidence:
         if not isinstance(evidence, PersistedEventClaimEvidence):
             raise TypeError("evidence must be PersistedEventClaimEvidence")
-        claim = self.connection.execute("SELECT id FROM event_claims WHERE claim_key = ?", (evidence.claim_key,)).fetchone()
-        if claim is None:
-            raise KeyError(f"claim does not exist: {evidence.claim_key}")
-        if self.connection.execute("SELECT 1 FROM event_reports WHERE id = ?", (evidence.report_id,)).fetchone() is None:
-            raise KeyError(f"report does not exist: {evidence.report_id}")
         with self.unit_of_work():
+            report = self.connection.execute(
+                "SELECT event_id FROM event_reports WHERE id = ?", (evidence.report_id,)
+            ).fetchone()
+            if report is None:
+                raise KeyError(f"report does not exist: {evidence.report_id}")
+            claim = self.connection.execute(
+                "SELECT id FROM event_claims WHERE event_id = ? AND claim_key = ?",
+                (int(report["event_id"]), evidence.claim_key),
+            ).fetchone()
+            if claim is None:
+                raise ValueError("claim and evidence report must belong to the same event")
             self.connection.execute(
                 "INSERT INTO event_claim_evidence(claim_id, report_id, stance, note, created_at) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(claim_id, report_id, stance) DO UPDATE SET note=excluded.note",
@@ -4735,13 +4778,28 @@ class Database:
                                   stance=str(row["stance"]), note=str(row["note"]),
                                   created_at=int(row["created_at"]), evidence_id=int(row["id"]))
 
-    def list_claim_evidence(self, claim_key: str, *, limit: int = 500) -> list[PersistedEventClaimEvidence]:
+    def list_claim_evidence(self, claim_key: str, *, limit: int = 500, event_key: str | None = None) -> list[PersistedEventClaimEvidence]:
         if not 1 <= limit <= 2000:
             raise ValueError("claim evidence limit is out of range")
+        if event_key is None:
+            matches = self.connection.execute(
+                "SELECT id FROM event_claims WHERE claim_key = ? LIMIT 2", (claim_key,)
+            ).fetchall()
+            if len(matches) > 1:
+                raise ValueError("claim key is ambiguous; provide event_key")
+            claim_id = int(matches[0]["id"]) if matches else None
+        else:
+            row = self.connection.execute(
+                "SELECT ec.id FROM event_claims ec JOIN events e ON e.id = ec.event_id "
+                "WHERE ec.claim_key = ? AND e.event_key = ?", (claim_key, event_key),
+            ).fetchone()
+            claim_id = int(row["id"]) if row is not None else None
+        if claim_id is None:
+            return []
         rows = self.connection.execute(
             "SELECT ece.id, ec.claim_key, ece.report_id, ece.stance, ece.note, ece.created_at "
             "FROM event_claim_evidence ece JOIN event_claims ec ON ec.id=ece.claim_id "
-            "WHERE ec.claim_key = ? ORDER BY ece.created_at DESC, ece.id DESC LIMIT ?", (claim_key, limit)
+            "WHERE ec.id = ? ORDER BY ece.created_at DESC, ece.id DESC LIMIT ?", (claim_id, limit)
         )
         return [PersistedEventClaimEvidence(claim_key=str(row["claim_key"]), report_id=int(row["report_id"]),
                                    stance=str(row["stance"]), note=str(row["note"]),
@@ -4757,8 +4815,14 @@ class Database:
         event = self.connection.execute("SELECT id FROM events WHERE event_key = ?", (item.event_key,)).fetchone()
         if event is None:
             raise KeyError(f"event does not exist: {item.event_key}")
-        if item.report_id is not None and self.connection.execute("SELECT 1 FROM event_reports WHERE id = ?", (item.report_id,)).fetchone() is None:
-            raise KeyError(f"report does not exist: {item.report_id}")
+        if item.report_id is not None:
+            report = self.connection.execute(
+                "SELECT event_id FROM event_reports WHERE id = ?", (item.report_id,)
+            ).fetchone()
+            if report is None:
+                raise KeyError(f"report does not exist: {item.report_id}")
+            if int(report["event_id"]) != int(event["id"]):
+                raise ValueError("timeline report must belong to the same event")
         cursor = self.connection.execute(
             "INSERT INTO event_timeline(event_id, occurred_at, kind, text, confidence, report_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (int(event["id"]), item.occurred_at, item.kind, item.text, item.confidence, item.report_id, item.created_at),
@@ -4827,6 +4891,20 @@ class Database:
                     event_row = self.connection.execute(
                         "SELECT id FROM events WHERE event_key = ?", (item.event_id,)
                     ).fetchone()
+                frozen_reports = None
+                if event_row is not None:
+                    if item.reports and all(isinstance(report, PersistedEventReport) for report in item.reports):
+                        reports = item.reports
+                    else:
+                        rows = self.connection.execute(
+                            "SELECT er.id, e.event_key, o.publisher, er.* FROM event_reports er "
+                            "JOIN events e ON e.id=er.event_id JOIN observations o ON o.id=er.observation_id "
+                            "WHERE er.event_id=? AND er.observation_id IN "
+                            "(SELECT value FROM json_each(?)) ORDER BY er.published_at DESC, er.id DESC",
+                            (int(event_row["id"]), json.dumps(item.observation_ids)),
+                        )
+                        reports = tuple(self._event_report_from_row(row) for row in rows)
+                    frozen_reports = json.dumps([asdict(report) for report in reports], ensure_ascii=False)
                 self.connection.execute(
                     """
                     INSERT INTO digest_items(
@@ -4834,8 +4912,8 @@ class Database:
                         importance, urgency, relevance, confidence, published_at,
                         regions_json, topics_json, source_ids_json,
                         observation_ids_json, links_json, handling, source_tiers_json,
-                        event_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        event_id, event_reports_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         digest_id,
@@ -4857,6 +4935,7 @@ class Database:
                         item.handling,
                         json.dumps(item.source_tiers, ensure_ascii=False),
                         (int(event_row["id"]) if event_row is not None else None),
+                        frozen_reports,
                     ),
                 )
             for item in digest.coverage:

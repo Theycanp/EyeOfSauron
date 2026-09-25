@@ -81,6 +81,9 @@ class EventWorkspaceTests(unittest.TestCase):
         self.add_report("A", 100)
         self.add_report("B", 110)
         digest = self.save_digest()
+        frozen_before = self.database.connection.execute(
+            "SELECT COUNT(*) FROM digest_items WHERE event_reports_json IS NOT NULL"
+        ).fetchone()[0]
         preview = self.database.preview_event_repair("merge", ["A", "B"])
         with patch("argus.sqlite_event_workspace.SQLiteEventWorkspace._audit", side_effect=RuntimeError("disk full")):
             with self.assertRaisesRegex(RuntimeError, "disk full"):
@@ -88,7 +91,7 @@ class EventWorkspaceTests(unittest.TestCase):
         self.assertEqual(1, len(self.database.list_event_reports("B")))
         self.assertEqual("B", self.database.canonical_event_key("B"))
         self.assertEqual(digest, self.database.get_digest(digest.digest_key, digest.version))
-        self.assertEqual(0, self.database.connection.execute("SELECT COUNT(*) FROM digest_items WHERE event_reports_json IS NOT NULL").fetchone()[0])
+        self.assertEqual(frozen_before, self.database.connection.execute("SELECT COUNT(*) FROM digest_items WHERE event_reports_json IS NOT NULL").fetchone()[0])
 
     def test_split_rejects_all_evidence_and_claims_require_specialized_repair(self):
         report = self.add_report("A", 100)

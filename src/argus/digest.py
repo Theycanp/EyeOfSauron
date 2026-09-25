@@ -349,23 +349,30 @@ def adaptive_digest_item_count(
 ) -> int:
     """Choose a deterministic daily item count from the ranked cluster scores.
 
-    ``max_items`` is a safety ceiling, not the normal publication size.  A
-    cluster contributes one slot for roughly four points of weighted signal;
-    lower-signal days therefore produce shorter digests while a dense day can
-    use most of the configured ceiling.  Immediate clusters are never removed
-    merely because the day is otherwise quiet (subject to the hard ceiling).
+    ``max_items`` is a safety ceiling, not the normal publication size.  Scores
+    below the background-noise floor do not accumulate into a full digest.
+    Strong independent events add capacity with diminishing returns, with a
+    small allowance for genuinely different topics.  Immediate clusters are
+    never removed merely because the day is otherwise quiet.
     """
     if not 1 <= max_items <= 500:
         raise ValueError("digest item limit is out of range")
     if not clusters:
         return 0
-    # Scores are already a bounded combination of durable triage dimensions,
-    # confidence, regional interest and corroboration.  Clamp malformed or
-    # future-extensible values before they can influence the publication size.
-    signal_mass = sum(max(1.0, min(6.0, float(cluster.score))) for cluster in clusters)
-    score_target = math.ceil(signal_mass / 4.0)
+    # Source quality, corroboration and regional interest are already included
+    # in each score. The square root prevents a flood of modest reports from
+    # exhausting the hard ceiling solely through volume.
+    signal_energy = sum(
+        max(0.0, min(6.0, float(cluster.score)) - 2.5) ** 2
+        for cluster in clusters
+    )
+    topics = {
+        topic for cluster in clusters if cluster.score >= 3.0
+        for topic in cluster.topics if topic and topic != "general"
+    }
+    score_target = math.ceil(2.0 * math.sqrt(signal_energy) + min(3, max(0, len(topics) - 1)))
     immediate_count = sum(cluster.handling == "immediate" for cluster in clusters)
-    return min(max_items, max(1, score_target, immediate_count))
+    return min(max_items, len(clusters), max(1, score_target, immediate_count))
 
 
 def cluster_observations(
@@ -643,19 +650,28 @@ class DigestBuilder:
                 if batch == 0:
                     break
         page_reader = getattr(self.repository, "list_event_page", None)
-        page = (
-            page_reader(
-                since=period_start,
-                until=period_end,
-                sort="importance",
-                limit=min(1000, self.observation_limit),
-                reports_per_event=100,
-            )
-            if page_reader is not None
-            else None
-        )
-        if page is not None and page.items:
-            clusters = self._clusters_from_event_pool(page.items, source_ids=source_ids)
+        page_items: list[Any] = []
+        if page_reader is not None:
+            cursor: str | None = None
+            remaining = self.observation_limit
+            while remaining > 0:
+                page = page_reader(
+                    since=period_start,
+                    until=period_end,
+                    sort="importance",
+                    limit=min(1000, remaining),
+                    cursor=cursor,
+                    reports_per_event=100,
+                )
+                page_items.extend(page.items)
+                remaining -= len(page.items)
+                if not page.items or page.next_cursor is None:
+                    break
+                if page.next_cursor == cursor:
+                    raise ValueError("event page cursor did not advance")
+                cursor = page.next_cursor
+        if page_items:
+            clusters = self._clusters_from_event_pool(page_items, source_ids=source_ids)
         else:
             # Compatibility/backfill path for a newly migrated database. It is
             # never used by HTTP reads; the dedicated projector will make this

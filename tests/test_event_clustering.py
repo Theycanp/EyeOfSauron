@@ -179,6 +179,16 @@ class EventClusteringTests(unittest.TestCase):
         self.assertEqual(relations["wire"], "corroborates")
         self.assertEqual(relations["social"], "context")
 
+    def test_late_primary_from_same_source_is_not_an_update(self) -> None:
+        rows = [
+            _row(1, "Federal Reserve raises interest rates", source_id="fed", published_at=1_800_000_000),
+            _row(2, "Fed raises interest rates", source_id="fed", tier="primary", published_at=1_800_000_060),
+        ]
+        for ordered in (rows, list(reversed(rows))):
+            reports = {report.observation_id: report for report in cluster_events(ordered)[0].reports}
+            self.assertEqual("primary", reports[2].relation)
+            self.assertEqual("corroborates", reports[1].relation)
+
     def test_conflicting_numbers_are_retained_and_marked(self) -> None:
         event = cluster_events(
             [

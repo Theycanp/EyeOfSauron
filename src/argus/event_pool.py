@@ -7,7 +7,9 @@ import logging
 from dataclasses import replace
 from typing import Any
 
-from .event_clustering import cluster_events, event_match_score, generic_event_title
+from .event_clustering import (
+    cluster_events, event_match_score, event_report_is_context, generic_event_title,
+)
 from .event_identity import identify_semantic_event
 from .events import (
     EventPoolRepository,
@@ -138,18 +140,19 @@ class EventPoolProjector:
                 new_identity = hashlib.sha256(identity_seed.encode("ascii")).hexdigest()[:24]
                 event_key = existing.event_key if existing is not None else new_identity
                 prior_reports = (
-                    self.repository.list_event_reports(event_key, limit=500)
+                    self.repository.list_event_reports(event_key, limit=2000)
                     if existing is not None
                     else []
                 )
                 prior_sources = {item.source_id for item in prior_reports}
                 has_primary = any(item.source_tier == "primary" for item in prior_reports)
-                if semantic is not None and semantic.relation_hint == "context":
+                if ((semantic is not None and semantic.relation_hint == "context")
+                        or (report.source_tier == "secondary" and event_report_is_context(observation))):
                     relation = "context"
-                elif report.source_id in prior_sources:
-                    relation = "updates"
                 elif report.source_tier == "primary":
                     relation = "primary"
+                elif report.source_id in prior_sources:
+                    relation = "updates"
                 elif report.source_tier == "secondary":
                     relation = "corroborates" if has_primary else "context"
                 else:
@@ -194,6 +197,20 @@ class EventPoolProjector:
                         independent_source_count=len(prior_sources | {report.source_id}),
                         updated_at=now,
                     )
+                relation_updates = []
+                if report.source_tier == "primary" and not has_primary:
+                    for prior in prior_reports:
+                        if prior.source_tier != "secondary" or prior.relation != "context":
+                            continue
+                        prior_identity = identify_semantic_event(prior.title, prior.summary)
+                        if ((prior_identity is not None and prior_identity.relation_hint == "context")
+                                or event_report_is_context({
+                                    "title": prior.title,
+                                    "summary": prior.summary,
+                                    "source_tier": prior.source_tier,
+                                })):
+                            continue
+                        relation_updates.append(replace(prior, relation="corroborates"))
                 self.repository.save_event_projection(
                     event,
                     PersistedEventReport(
@@ -210,7 +227,8 @@ class EventPoolProjector:
                         summary=report.summary,
                         url=report.url,
                         created_at=now,
-                    )
+                    ),
+                    relation_updates=relation_updates,
                 )
                 projected += 1
             except (KeyError, TypeError, ValueError) as exc:
