@@ -222,9 +222,10 @@ class EventPoolRepository(EventPageRepository, Protocol):
     """Bounded work port used by the continuous event projector."""
 
     def save_event_projection(
-        self, event: PersistedEvent, report: PersistedEventReport
+        self, event: PersistedEvent, report: PersistedEventReport,
+        *, relation_updates: Sequence[PersistedEventReport] = (),
     ) -> PersistedEventReport:
-        """Atomically update an event and attach its observation evidence."""
+        """Atomically attach evidence and revise earlier report relationships."""
         ...
 
     def list_unassigned_event_observations(
@@ -267,7 +268,9 @@ class EventRepository(Protocol):
 
     def save_claim_evidence(self, evidence: PersistedEventClaimEvidence) -> PersistedEventClaimEvidence: ...
 
-    def list_claim_evidence(self, claim_key: str, *, limit: int = 500) -> list[PersistedEventClaimEvidence]: ...
+    def list_claim_evidence(
+        self, claim_key: str, *, limit: int = 500, event_key: str | None = None
+    ) -> list[PersistedEventClaimEvidence]: ...
 
     def save_event_timeline(self, item: PersistedEventTimelineItem) -> PersistedEventTimelineItem: ...
 

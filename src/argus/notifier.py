@@ -14,7 +14,9 @@ from .models import OutboxMessage
 
 
 _TOPIC_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_NTFY_MESSAGE_BYTES = 4096
+# The ntfy server rejects a message at the nominal 4 KiB boundary as an
+# attachment; leave room below that boundary for UTF-8 truncation.
+_NTFY_MESSAGE_BYTES = 4000
 _NTFY_TITLE_BYTES = 256
 _TRUNCATED_NOTICE = "\n\n[内容较长，完整内容请点击通知查看]"
 

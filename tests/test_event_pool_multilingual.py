@@ -88,6 +88,75 @@ class EventPoolMultilingualReplayTests(unittest.TestCase):
         self.projector.project_pending(now=now + 90)
         self.assertEqual(2, len(self.database.list_events()))
 
+    def test_late_primary_reclassifies_secondary_but_preserves_market_context(self) -> None:
+        now = 1_800_000_000
+        self.add(
+            "wire", "wire-1", "Fed raises interest rates",
+            publisher="Reuters", tier="secondary", topic="policy", region="US", timestamp=now,
+        )
+        self.assertEqual(1, self.projector.project_pending(now=now + 10))
+        event_key = self.database.list_events()[0].event_key
+        self.assertEqual("context", self.database.list_event_reports(event_key)[0].relation)
+
+        self.add(
+            "market", "market-1", "Stocks rise after Fed raises interest rates",
+            publisher="Market Wire", tier="secondary", topic="policy", region="US", timestamp=now + 20,
+        )
+        self.assertEqual(1, self.projector.project_pending(now=now + 30))
+        self.add(
+            "fed", "fed-1", "Federal Reserve raises interest rates",
+            publisher="Federal Reserve", tier="primary", topic="policy", region="US", timestamp=now + 40,
+        )
+        self.assertEqual(1, self.projector.project_pending(now=now + 50))
+        self.assertEqual(1, len(self.database.list_events()))
+        reports = {report.source_id: report for report in self.database.list_event_reports(event_key)}
+        self.assertEqual("corroborates", reports["wire"].relation)
+        self.assertEqual("context", reports["market"].relation)
+        self.assertEqual("primary", reports["fed"].relation)
+        self.assertEqual(0, self.projector.project_pending(now=now + 60))
+        self.assertEqual(reports, {report.source_id: report for report in self.database.list_event_reports(event_key)})
+
+    def test_late_primary_from_same_source_remains_primary(self) -> None:
+        now = 1_800_000_000
+        self.add(
+            "fed", "fed-wire", "Fed raises interest rates",
+            publisher="Federal Reserve", tier="secondary", topic="policy", region="US", timestamp=now,
+        )
+        self.projector.project_pending(now=now + 10)
+        event_key = self.database.list_events()[0].event_key
+        self.add(
+            "fed", "fed-official", "Federal Reserve raises interest rates",
+            publisher="Federal Reserve", tier="primary", topic="policy", region="US", timestamp=now + 30,
+        )
+        self.assertEqual(1, self.projector.project_pending(now=now + 40))
+        reports = {report.observation_id: report for report in self.database.list_event_reports(event_key)}
+        self.assertEqual(1, len(self.database.list_events()))
+        self.assertEqual({"primary", "corroborates"}, {report.relation for report in reports.values()})
+
+    def test_nonsemantic_market_context_stays_context_after_late_primary(self) -> None:
+        now = 1_800_000_000
+        self.add(
+            "wire", "wire-1", "BOJ keeps its benchmark rate at 0.25%",
+            publisher="Reuters", tier="secondary", topic="policy", region="JP", timestamp=now,
+        )
+        self.projector.project_pending(now=now + 10)
+        event_key = self.database.list_events()[0].event_key
+        self.add(
+            "market", "market-1", "Yen rises after BOJ decision",
+            publisher="Market Wire", tier="secondary", topic="policy", region="JP", timestamp=now + 20,
+        )
+        self.assertEqual(1, self.projector.project_pending(now=now + 30))
+        self.add(
+            "boj", "boj-1", "日本銀行、政策金利を0.25％に据え置き",
+            publisher="BOJ", tier="primary", topic="policy", region="JP", timestamp=now + 40,
+        )
+        self.assertEqual(1, self.projector.project_pending(now=now + 50))
+        self.assertEqual(1, len(self.database.list_events()))
+        reports = {report.source_id: report for report in self.database.list_event_reports(event_key)}
+        self.assertEqual("corroborates", reports["wire"].relation)
+        self.assertEqual("context", reports["market"].relation)
+        self.assertEqual("primary", reports["boj"].relation)
+
 
 if __name__ == "__main__":
     unittest.main()

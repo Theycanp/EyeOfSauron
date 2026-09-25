@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 from argus.auth import AdminAuth
 from argus.database import Database
-from argus.digest import DigestCluster, DigestDocument, SourceCoverage
+from argus.digest import DigestCluster, DigestDocument, SourceCoverage, with_api_summary
 from argus.digest_analysis import ApiDigestSummarizer
 from argus.model_analyzers import AnalyzerSettings, OpenAICompatibleAnalyzer
 
@@ -35,6 +35,37 @@ def digest() -> DigestDocument:
 
 
 class DigestRunRepositoryTests(unittest.TestCase):
+    def test_run_uses_latest_published_ai_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "state.db")
+            try:
+                algorithm = database.save_digest(digest())
+                algorithm = database.publish_digest(algorithm.digest_key, algorithm.version, NOW)
+                ai = database.save_digest(with_api_summary(algorithm, "AI summary", created_at=NOW + 1))
+                database.publish_digest(ai.digest_key, ai.version, NOW + 1)
+
+                run = database.get_digest_run(ai.digest_key, now=NOW + 2)
+                assert run is not None
+                self.assertEqual(("ai_published", ai.version, "api"), (
+                    run["state"], run["published_version"], run["generation_kind"],
+                ))
+
+                # A damaged legacy index can leave two published rows. Keep the
+                # read model deterministic until that data is repaired.
+                with database.unit_of_work():
+                    database.connection.execute("DROP INDEX digests_one_published_idx")
+                    database.connection.execute(
+                        "UPDATE digests SET status='published' WHERE digest_key=? AND version=?",
+                        (algorithm.digest_key, algorithm.version),
+                    )
+                run = database.get_digest_run(ai.digest_key, now=NOW + 2)
+                assert run is not None
+                self.assertEqual(("ai_published", ai.version, "api"), (
+                    run["state"], run["published_version"], run["generation_kind"],
+                ))
+            finally:
+                database.close()
+
     def test_running_attempt_is_interrupted_once_after_restart_and_history_is_readable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.db"

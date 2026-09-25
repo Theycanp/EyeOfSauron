@@ -310,10 +310,13 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
             _row(index, f'独立主题 {index}', source_id=f'source_{index}', topic=f'topic_{index}')
             for index in range(1, 16)
         ]
+        for row in rows:
+            row['handling'] = 'immediate'
         digest = DigestBuilder(FakeDigestRepository(rows)).build(
             digest_key='test:all-selected', period_start=self.now - 86400, period_end=self.now,
             timezone='Asia/Shanghai', created_at=self.now,
         )
+        self.assertEqual(15, len(digest.items))
         client = OpenAICompatibleAnalyzer(AnalyzerSettings('https://api.example.test/v1', 'model'))
         calls = []
 

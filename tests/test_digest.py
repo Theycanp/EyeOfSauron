@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
@@ -20,7 +21,8 @@ from argus.digest import (
     DigestScheduler,
     adaptive_digest_item_count,
 )
-from argus.events import EventListItem, PersistedEvent, PersistedEventReport
+from argus.events import EventListItem, EventPage, PersistedEvent, PersistedEventReport
+import test_event_page_consistency as event_fixtures
 
 
 START = 1_788_307_200
@@ -130,6 +132,46 @@ class FakeDigestRepository:
 
 class DigestDomainTests(unittest.TestCase):
 
+    def test_digest_reads_later_event_pages_after_source_filter(self) -> None:
+        base = PersistedEvent(
+            event_key="base", fingerprint="base", title="事件", summary="摘要",
+            score=4.0, importance=4, urgency=3, relevance=4, confidence=0.9,
+            first_seen_at=START + 1, last_seen_at=START + 1,
+            regions=("EAST_ASIA",), topics=("policy",),
+            created_at=START + 1, updated_at=START + 1,
+        )
+
+        def item(index: int, source_id: str) -> EventListItem:
+            event = replace(base, event_key=f"event-{index}")
+            report = PersistedEventReport(
+                event_key=event.event_key, observation_id=index + 1,
+                source_id=source_id, publisher=source_id, source_tier="primary",
+                relation="primary", match_score=1.0, is_representative=True,
+                published_at=START + 1, title=event.title, summary=event.summary,
+                url=f"https://example.test/{index}", created_at=START + 1,
+            )
+            return EventListItem(event=event, reports=(report,), report_count=1)
+
+        repository = FakeDigestRepository([])
+        calls: list[str | None] = []
+
+        def page_reader(**kwargs: Any) -> EventPage:
+            calls.append(kwargs["cursor"])
+            if kwargs["cursor"] is None:
+                self.assertEqual(1000, kwargs["limit"])
+                return EventPage(tuple(item(index, "other") for index in range(1000)), "next")
+            self.assertEqual("next", kwargs["cursor"])
+            return EventPage((item(1000, "allowed"),), None)
+
+        repository.list_event_page = page_reader  # type: ignore[attr-defined]
+        digest = DigestBuilder(repository, observation_limit=1001).build(
+            digest_key="daily:test", period_start=START, period_end=END,
+            timezone="UTC", created_at=END, source_ids=("allowed",),
+            project_events=False,
+        )
+        self.assertEqual([None, "next"], calls)
+        self.assertEqual(("event-1000",), tuple(cluster.cluster_key for cluster in digest.items))
+
     def test_event_pool_duplicate_identity_is_recombined_before_selection(self) -> None:
         event = PersistedEvent(
             event_key="event-duplicate", fingerprint="fingerprint",
@@ -196,8 +238,14 @@ class DigestDomainTests(unittest.TestCase):
     def test_adaptive_item_count_scales_with_weighted_signal(self) -> None:
         quiet = adaptive_digest_item_count([self._cluster(2.0, key=str(i)) for i in range(4)], max_items=50)
         busy = adaptive_digest_item_count([self._cluster(5.5, key=str(i)) for i in range(20)], max_items=50)
-        self.assertEqual(2, quiet)
-        self.assertEqual(28, busy)
+        self.assertEqual(1, quiet)
+        self.assertEqual(20, busy)
+
+    def test_low_quality_volume_does_not_fill_daily_ceiling(self) -> None:
+        background = [self._cluster(2.0, key=str(index)) for index in range(200)]
+        strong = [self._cluster(4.0, key=str(index)) for index in range(100)]
+        self.assertEqual(1, adaptive_digest_item_count(background, max_items=50))
+        self.assertEqual(30, adaptive_digest_item_count(strong, max_items=50))
 
     def test_adaptive_item_count_keeps_immediate_events_and_hard_ceiling(self) -> None:
         clusters = [self._cluster(1.0, handling="immediate", key=str(i)) for i in range(8)]
@@ -280,10 +328,13 @@ class DigestDomainTests(unittest.TestCase):
 
 
 class DigestDatabaseTests(unittest.TestCase):
+    add_report = event_fixtures.EventPageConsistencyTests.add_report
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name) / "state.db"
         self.database = Database(self.path)
+        self.sequence = 0
 
     def tearDown(self) -> None:
         self.database.close()
@@ -341,6 +392,40 @@ class DigestDatabaseTests(unittest.TestCase):
         self.assertEqual("修订摘要", current.summary)
         self.assertEqual((42,), current.items[0].observation_ids)
         self.assertEqual("covered", current.coverage[0].status)
+
+    def test_published_event_reports_survive_updates_and_retention(self) -> None:
+        report = self.add_report("event-frozen", START + 100, title="Original report")
+        draft = DigestBuilder(self.database).build(
+            digest_key="daily:frozen-evidence", period_start=START,
+            period_end=END, timezone="UTC", created_at=END,
+        )
+        saved = self.database.save_digest(draft)
+        published = self.database.publish_digest(saved.digest_key, saved.version, END)
+        self.assertEqual((report,), published.items[0].reports)
+        snapshot = self.database.connection.execute(
+            "SELECT event_reports_json FROM digest_items WHERE digest_id = "
+            "(SELECT id FROM digests WHERE digest_key = ? AND version = ?)",
+            (published.digest_key, published.version),
+        ).fetchone()[0]
+        self.assertIsNotNone(snapshot)
+
+        self.database.save_event_report(replace(report, title="Revised report", summary="Revised summary"))
+        self.assertEqual(published.items[0].reports, self.database.get_digest(
+            published.digest_key, published.version,
+        ).items[0].reports)
+        ai = self.database.save_digest(with_api_summary(published, "AI summary", created_at=END + 1))
+        ai = self.database.publish_digest(ai.digest_key, ai.version, END + 1)
+        self.assertEqual(published.items[0].reports, ai.items[0].reports)
+
+        deleted_alerts, deleted_observations = self.database.cleanup(END + 1)
+        self.assertEqual((0, 1), (deleted_alerts, deleted_observations))
+        self.assertEqual([], self.database.list_event_reports("event-frozen"))
+        self.assertEqual(published.items[0].reports, self.database.get_digest(
+            published.digest_key, published.version,
+        ).items[0].reports)
+        self.assertEqual(published.items[0].reports, self.database.get_digest(
+            ai.digest_key, ai.version,
+        ).items[0].reports)
 
     def test_source_coverage_distinguishes_quiet_degraded_and_unknown(self) -> None:
         self.database.sync_source_runtime(

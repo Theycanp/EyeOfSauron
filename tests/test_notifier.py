@@ -75,9 +75,19 @@ class NotifierTests(unittest.TestCase):
         notifier.publish(alert)
         assert opener.request is not None
         payload = json.loads(opener.request.data)
-        self.assertLessEqual(len(payload["message"].encode("utf-8")), 4096)
+        self.assertLessEqual(len(payload["message"].encode("utf-8")), 4000)
         self.assertTrue(payload["message"].endswith("[内容较长，完整内容请点击通知查看]"))
         self.assertEqual(alert.click_url, payload["click"])
+
+    def test_truncates_message_at_provider_boundary(self) -> None:
+        notifier = NtfyNotifier("https://ntfy.example", "private-token", 10)
+        opener = _Opener()
+        notifier._opener = opener
+        notifier.publish(replace(_alert(), message="x" * 4096))
+        assert opener.request is not None
+        payload = json.loads(opener.request.data)
+        self.assertLess(len(payload["message"].encode("utf-8")), 4096)
+        self.assertTrue(payload["message"].endswith("[内容较长，完整内容请点击通知查看]"))
 
     def test_rejects_plain_http_endpoint(self) -> None:
         with self.assertRaisesRegex(NotifyError, "must be HTTPS"):
