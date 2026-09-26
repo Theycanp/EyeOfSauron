@@ -88,9 +88,9 @@ describe('source provider registry', () => {
     const feed: NewsCatalogFeed = { id: 'high_frequency', label: 'Bulletins', section: 'Disaster', url: 'https://www.data.jma.go.jp/developer/xml/feed/extra.xml', allowed_hosts: ['www.data.jma.go.jp'] }
     const source = serializeSource(catalogSourceDraft(entry, feed, []))
     expect(source).toMatchObject({
-      poll_interval_seconds: 21_600,
+      poll_interval_seconds: 43_200,
       default_importance: 1,
-      settings: { entry_filter_profile: 'jma_exceptional_hazards', notification_eligible: false },
+      settings: { entry_filter_profile: 'jma_global_significance', notification_eligible: false },
     })
   })
 

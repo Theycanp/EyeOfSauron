@@ -113,7 +113,7 @@ class RssTests(unittest.TestCase):
         with self.assertRaisesRegex(FeedError, "invalid XML"):
             parse_feed(payload.replace(b"</item>", b""), self.source)
 
-    def test_jma_profile_retains_only_exceptional_hazards_and_blocks_notifications(self) -> None:
+    def test_jma_profile_retains_only_globally_significant_hazards_and_blocks_notifications(self) -> None:
         payload = b'''<feed xmlns="http://www.w3.org/2005/Atom">
         <entry><id>routine</id><title>Weather bulletin</title>
         <summary><![CDATA[\xe3\x80\x90\xe7\xa5\x9e\xe5\xa5\x88\xe5\xb7\x9d\xe7\x9c\x8c\xe6\xb0\x97\xe8\xb1\xa1\xe8\xad\xa6\xe5\xa0\xb1\xe3\x83\xbb\xe6\xb3\xa8\xe6\x84\x8f\xe5\xa0\xb1\xe3\x80\x91\xe9\xab\x98\xe6\xb3\xa2\xe3\x81\xab\xe6\xb3\xa8\xe6\x84\x8f\xe3\x81\x97\xe3\x81\xa6\xe3\x81\x8f\xe3\x81\xa0\xe3\x81\x95\xe3\x81\x84\xe3\x80\x82]]></summary>
@@ -124,13 +124,42 @@ class RssTests(unittest.TestCase):
         source = replace(self.source, settings={
             **self.source.settings,
             "headline_from_summary": True,
-            "entry_filter_profile": "jma_exceptional_hazards",
+            "entry_filter_profile": "jma_global_significance",
             "notification_eligible": False,
         })
         observations = parse_feed(payload, source)
         self.assertEqual(["exceptional"], [item.external_id for item in observations])
         self.assertIn("大津波警報", observations[0].title)
         self.assertFalse(observations[0].attributes["notification_eligible"])
+
+    def test_jma_global_profile_drops_local_emergencies_and_keeps_mega_events(self) -> None:
+        entries = (
+            ("weather", "大雨特別警報", False),
+            ("volcano", "噴火警報（居住地域）", False),
+            ("early", "緊急地震速報（警報）", False),
+            ("tsunami", "津波警報", False),
+            ("major-tsunami", "大津波警報", True),
+            ("intensity", "最大震度６強を観測", True),
+            ("magnitude", "地震の規模はＭ8.2と推定", True),
+            ("nankai", "南海トラフ地震臨時情報（巨大地震警戒）", True),
+        )
+        body = "".join(
+            f"<entry><id>{entry_id}</id><title>JMA</title><summary>{summary}</summary>"
+            "<updated>2026-09-05T14:31:00Z</updated></entry>"
+            for entry_id, summary, _ in entries
+        )
+        source = replace(self.source, settings={
+            **self.source.settings,
+            "entry_filter_profile": "jma_global_significance",
+            "notification_eligible": False,
+        })
+        observations = parse_feed(
+            f'<feed xmlns="http://www.w3.org/2005/Atom">{body}</feed>'.encode(), source
+        )
+        self.assertEqual(
+            {entry_id for entry_id, _, retained in entries if retained},
+            {item.external_id for item in observations},
+        )
 
     def test_rejects_doctype_and_entities_in_all_encodings(self) -> None:
         document = '<!DOCTYPE rss [<!ENTITY x "expanded">]><rss><channel><item><title>&x;</title></item></channel></rss>'

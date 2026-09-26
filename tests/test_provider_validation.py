@@ -122,10 +122,10 @@ class ProviderValidationTests(unittest.TestCase):
     def test_rss_retention_profile_and_notification_policy_are_closed_enums(self) -> None:
         options = dict(url="https://example.com/feed", allowed_hosts=("example.com",))
         result = self.validate("rss", {
-            "entry_filter_profile": "jma_exceptional_hazards",
+            "entry_filter_profile": "jma_global_significance",
             "notification_eligible": False,
         }, **options)
-        self.assertEqual("jma_exceptional_hazards", result.settings["entry_filter_profile"])
+        self.assertEqual("jma_global_significance", result.settings["entry_filter_profile"])
         self.assertFalse(result.settings["notification_eligible"])
         for settings in (
             {"entry_filter_profile": "arbitrary-regex"},

@@ -176,7 +176,7 @@ class NewsSourceCatalog:
         if not _CATALOG_ID.fullmatch(source_id):
             raise NewsCatalogError(f"invalid source id: {source_id}")
         if poll_interval_seconds is None:
-            poll_interval_seconds = 21600 if entry.id == "japan_meteorological_agency" else 300
+            poll_interval_seconds = 43200 if entry.id == "japan_meteorological_agency" else 300
         if not 30 <= poll_interval_seconds <= 86400:
             raise NewsCatalogError("poll interval must be between 30 and 86400 seconds")
         return {
@@ -200,7 +200,7 @@ class NewsSourceCatalog:
                 "max_content_age_seconds": feed.max_content_age_seconds,
                 "topic": entry.topic,
                 **({"headline_from_summary": True,
-                    "entry_filter_profile": "jma_exceptional_hazards",
+                    "entry_filter_profile": "jma_global_significance",
                     "notification_eligible": False}
                    if entry.id == "japan_meteorological_agency" else {}),
                 **({"article_url_prefixes": list(feed.article_url_prefixes),
