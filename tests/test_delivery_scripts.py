@@ -82,6 +82,11 @@ class CiGateTests(unittest.TestCase):
 
 
 class ReleasePackagingTests(unittest.TestCase):
+    def test_release_drill_health_uses_selected_runtime(self) -> None:
+        script = (ROOT / "scripts/ci/release-drill-health.sh").read_text()
+        self.assertIn('"${ARGUS_PYTHON:-/usr/bin/python3}"', script)
+        self.assertNotIn('PYTHONPATH="$EOS_INSTALL_ROOT/current/src" /usr/bin/python3', script)
+
     def test_package_metadata_uses_selected_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
