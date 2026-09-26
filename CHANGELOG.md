@@ -5,6 +5,20 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-26
+
+### Added
+
+- Persist conservative, source-backed event occurrence identities and bounded
+  automatic fact jobs, preserving report-level evidence and audited manual
+  merge/split behavior. Expose an event evidence graph in the admin reader.
+
+### Fixed
+
+- Keep distinct verified occurrences separate across batches and publication
+  dates, and stop source configuration reloads from waiting indefinitely for
+  blocked network calls.
+
 ## [0.22.6] - 2026-09-26
 
 ### Changed
@@ -17,6 +31,15 @@ Semantic Versioning and the Keep a Changelog structure.
   longer stored. All retained JMA evidence remains importance 1 and ineligible
   for direct notification; five-minute USGS and global-news disaster alerts are
   unchanged.
+
+### Fixed
+
+- Namespace finance-ministry entities by jurisdiction, preventing similar
+  announcements from different countries or ambiguous multi-ministry stories
+  from being merged as one event.
+- Expose bounded event Claim/Evidence/Timeline and linked notification history
+  through a single read snapshot, with explicit missing/truncated states in the
+  responsive administration reader. Automatic fact projection remains pending.
 
 ## [0.22.5] - 2026-09-25
 

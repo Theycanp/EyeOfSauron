@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any, Sequence
 
 from .event_clustering import event_aggregate_score, event_evidence_score, explain_event_match
 from .events import EVENT_CLOSED_SECONDS, EVENT_QUIET_SECONDS, EventWorkspaceConflict, event_lifecycle
+from .event_fact_projection import SQLiteEventFacts
+from .event_facts import FACT_PRODUCER
 
 if TYPE_CHECKING:
     from .database import Database
@@ -152,18 +154,40 @@ class SQLiteEventWorkspace:
             raise ValueError("repair requires 1 to 200 reports in nonempty events")
         if action == "split" and not set(selected) < {report.observation_id for report in reports}:
             raise ValueError("split must select some, but not all, existing observations")
-        if any(self.database.list_event_claims(key, limit=1) for key in keys):
-            raise ValueError("events with claims require a claim-aware repair and cannot be moved here")
+        occurrences = self.connection.execute(
+            "SELECT er.observation_id,ro.occurrence_key FROM event_report_occurrences ro "
+            "JOIN event_reports er ON er.id=ro.report_id WHERE er.event_id IN "
+            "(SELECT value FROM json_each(?)) ORDER BY er.observation_id",
+            (json.dumps(identifiers),),
+        ).fetchall()
+        if action == "merge" and len({str(row["occurrence_key"]) for row in occurrences}) > 1:
+            raise ValueError("distinct verified occurrences cannot be merged")
+        if action == "split":
+            moving_keys = {str(row["occurrence_key"]) for row in occurrences
+                           if int(row["observation_id"]) in selected}
+            retained_keys = {str(row["occurrence_key"]) for row in occurrences
+                             if int(row["observation_id"]) not in selected}
+            if moving_keys & retained_keys:
+                raise ValueError("one verified occurrence cannot be split across events")
         if self.connection.execute(
-            "SELECT 1 FROM event_timeline WHERE event_id IN (SELECT value FROM json_each(?)) AND report_id IS NOT NULL LIMIT 1", (json.dumps(identifiers),),
+            "SELECT 1 FROM event_claims WHERE event_id IN (SELECT value FROM json_each(?)) "
+            "AND producer!=? LIMIT 1", (json.dumps(identifiers), FACT_PRODUCER),
         ).fetchone():
-            raise ValueError("events with report-linked timelines require a claim-aware repair")
+            raise ValueError("events with manual claims require a claim-aware repair")
+        if self.connection.execute(
+            "SELECT 1 FROM event_timeline WHERE event_id IN (SELECT value FROM json_each(?)) "
+            "AND report_id IS NOT NULL AND producer!=? LIMIT 1",
+            (json.dumps(identifiers), FACT_PRODUCER),
+        ).fetchone():
+            raise ValueError("events with manual report-linked timelines require a claim-aware repair")
         choices = self.get_event_digest_choices(keys)
         if action == "merge" and len(set(choices.values())) > 1:
             raise ValueError("conflicting digest choices must be resolved before merging")
         serialized = [asdict(report) for report in sorted(reports, key=lambda item: item.observation_id)]
         evidence = {"action": action, "event_keys": keys, "observation_ids": selected,
-                    "reports": serialized, "digest_choices": choices}
+                    "reports": serialized, "digest_choices": choices,
+                    "occurrences": [(int(row["observation_id"]), str(row["occurrence_key"]))
+                                    for row in occurrences]}
         revision = hashlib.sha256(json.dumps(evidence, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         representative = serialized[0]
         comparisons = [{"observation_id": item["observation_id"], **explain_event_match(item, representative)} for item in serialized[1:]]
@@ -225,6 +249,16 @@ class SQLiteEventWorkspace:
             keys = preview["event_keys"]
             identifiers = [self._id(key) for key in keys]
             self._freeze_digest_reports(identifiers)
+            moving_report_ids = [
+                int(report["report_id"]) for report in preview["reports"]
+                if (action == "split" and report["observation_id"] in preview["observation_ids"])
+                or (action == "merge" and report["event_key"] != min(
+                    preview["reports"], key=lambda item: (
+                        item["source_tier"] != "primary", item["published_at"], item["observation_id"]
+                    ))["event_key"])
+            ]
+            if moving_report_ids:
+                SQLiteEventFacts(self.database).detach_automatic_facts(moving_report_ids, now)
             if action == "merge":
                 target = min(preview["reports"], key=lambda report: (report["source_tier"] != "primary", report["published_at"], report["observation_id"]))["event_key"]
                 target_id = self._id(target)
@@ -235,6 +269,10 @@ class SQLiteEventWorkspace:
                     self.connection.execute("UPDATE events SET status='closed',updated_at=? WHERE id=?", (now, identifier))
                     self.connection.execute("UPDATE event_aliases SET target_id=? WHERE target_id=?", (target_id, identifier))
                     self.connection.execute("INSERT INTO event_aliases(event_id,target_id) VALUES(?,?)", (identifier, target_id))
+                self.connection.execute(
+                    "UPDATE event_occurrences SET event_id=? WHERE event_id IN "
+                    "(SELECT value FROM json_each(?))", (target_id, json.dumps(identifiers)),
+                )
                 # An unread event remains unread after a merge; following any
                 # member keeps the combined event in this user's bookmarks.
                 preferences = self.connection.execute(
@@ -271,6 +309,12 @@ class SQLiteEventWorkspace:
                 self.connection.execute(
                     "UPDATE event_reports SET event_id=? WHERE event_id=? AND observation_id IN (SELECT value FROM json_each(?))",
                     (target_id, identifiers[0], json.dumps(preview["observation_ids"])),
+                )
+                self.connection.execute(
+                    "UPDATE event_occurrences SET event_id=? WHERE occurrence_key IN "
+                    "(SELECT ro.occurrence_key FROM event_report_occurrences ro "
+                    "JOIN event_reports er ON er.id=ro.report_id WHERE er.event_id=? "
+                    "GROUP BY ro.occurrence_key)", (target_id, target_id),
                 )
                 self._rebuild(keys[0], now)
             self._rebuild(target, now)

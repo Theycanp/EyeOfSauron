@@ -29,8 +29,11 @@ from .digest import (
 )
 from .event_clustering import cluster_events, event_aggregate_score, event_evidence_score
 from .digest_operations import digest_run_state
-from .event_identity import identify_semantic_event
+from .event_identity import EventOccurrenceIdentity, identify_semantic_event
+from .event_fact_projection import EventFactWorkItem, SQLiteEventFacts
+from .event_facts import EventFactCandidate
 from .events import (
+    EventEvidenceGraph,
     EventListItem,
     EventPage,
     PersistedEvent,
@@ -57,7 +60,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 22
 
 
 _DIGEST_PROVIDER_TRACE_FIELDS = frozenset({
@@ -1400,6 +1403,71 @@ class Database:
                     )
                 """)
                 self.connection.execute("PRAGMA user_version=20")
+            version = 20
+        if version < 21:
+            with self.unit_of_work():
+                for table, fact_columns in {
+                    "event_claims": {
+                        "producer": "TEXT NOT NULL DEFAULT 'manual'",
+                        "extractor_version": "INTEGER", "slot_key": "TEXT", "fact_json": "TEXT",
+                    },
+                    "event_claim_evidence": {"producer": "TEXT NOT NULL DEFAULT 'manual'"},
+                    "event_timeline": {
+                        "producer": "TEXT NOT NULL DEFAULT 'manual'", "timeline_key": "TEXT",
+                    },
+                }.items():
+                    existing = {str(row[1]) for row in self.connection.execute(f"PRAGMA table_info({table})")}
+                    for name, definition in fact_columns.items():
+                        if name not in existing:
+                            self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                self.connection.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS event_timeline_key_idx "
+                    "ON event_timeline(event_id,timeline_key) WHERE timeline_key IS NOT NULL"
+                )
+                self.connection.execute(
+                    "CREATE INDEX IF NOT EXISTS event_claims_slot_idx ON event_claims(event_id,slot_key)"
+                )
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS event_fact_jobs (
+                        report_id INTEGER NOT NULL REFERENCES event_reports(id) ON DELETE CASCADE,
+                        extractor_version INTEGER NOT NULL CHECK(extractor_version > 0),
+                        status TEXT NOT NULL CHECK(status IN ('pending','leased','retry','completed','dead')),
+                        attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+                        next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                        lease_token TEXT,
+                        lease_until INTEGER,
+                        last_error TEXT,
+                        updated_at INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(report_id,extractor_version)
+                    )
+                """)
+                self.connection.execute(
+                    "CREATE INDEX IF NOT EXISTS event_fact_jobs_due_idx "
+                    "ON event_fact_jobs(status,next_attempt_at,lease_until,report_id)"
+                )
+                self.connection.execute("PRAGMA user_version=21")
+            version = 21
+        if version < 22:
+            with self.unit_of_work():
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS event_occurrences (
+                        occurrence_key TEXT PRIMARY KEY,
+                        event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                        identity_json TEXT NOT NULL,
+                        created_at INTEGER NOT NULL
+                    )
+                """)
+                self.connection.execute(
+                    "CREATE INDEX IF NOT EXISTS event_occurrences_event_idx "
+                    "ON event_occurrences(event_id,occurrence_key)"
+                )
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS event_report_occurrences (
+                        report_id INTEGER PRIMARY KEY REFERENCES event_reports(id) ON DELETE CASCADE,
+                        occurrence_key TEXT NOT NULL REFERENCES event_occurrences(occurrence_key)
+                    )
+                """)
+                self.connection.execute("PRAGMA user_version=22")
 
     def record_digest_preparation_failure(
         self, digest_key: str, *, stage: str, error: BaseException | str, now: int,
@@ -4591,12 +4659,25 @@ class Database:
     def save_event_projection(
         self, event: PersistedEvent, report: PersistedEventReport,
         *, relation_updates: Sequence[PersistedEventReport] = (),
+        occurrence: EventOccurrenceIdentity | None = None,
     ) -> PersistedEventReport:
         if event.event_key != report.event_key:
             raise ValueError("event projection identities do not match")
         if any(update.event_key != event.event_key for update in relation_updates):
             raise ValueError("event relation update identity does not match")
         with self.unit_of_work():
+            if occurrence is not None:
+                bound = self.find_event_by_occurrence(occurrence.key)
+                if bound is not None and bound.event_key != event.event_key:
+                    raise ValueError("occurrence is already assigned to another event")
+                event_id = self.connection.execute(
+                    "SELECT id FROM events WHERE event_key=?", (event.event_key,),
+                ).fetchone()
+                if event_id is not None and self.connection.execute(
+                    "SELECT 1 FROM event_occurrences WHERE event_id=? AND occurrence_key!=? LIMIT 1",
+                    (int(event_id["id"]), occurrence.key),
+                ).fetchone() is not None:
+                    raise ValueError("event has a different verified occurrence")
             # Another projector may have assigned this observation while the
             # caller computed a match. Its committed identity wins.
             assigned = self.connection.execute(
@@ -4610,6 +4691,19 @@ class Database:
                 raise ValueError("event was merged during projection; retry with current candidates")
             self._save_event(event)
             saved = self._save_event_report(report)
+            if occurrence is not None:
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO event_occurrences(occurrence_key,event_id,identity_json,created_at) "
+                    "VALUES(?,(SELECT id FROM events WHERE event_key=?),?,?)",
+                    (occurrence.key, event.event_key,
+                     json.dumps(asdict(occurrence), ensure_ascii=False, sort_keys=True),
+                     event.created_at),
+                )
+                self.connection.execute(
+                    "INSERT INTO event_report_occurrences(report_id,occurrence_key) VALUES(?,?) "
+                    "ON CONFLICT(report_id) DO UPDATE SET occurrence_key=excluded.occurrence_key",
+                    (saved.report_id, occurrence.key),
+                )
             for update in relation_updates:
                 if update.report_id is None or update.relation != "corroborates":
                     raise ValueError("event relation update is invalid")
@@ -4628,6 +4722,42 @@ class Database:
                 "WHERE er.event_id=events.id) WHERE event_key=?", (event.event_key,),
             )
             return saved
+
+    def find_event_by_occurrence(self, occurrence_key: str) -> PersistedEvent | None:
+        if not occurrence_key.startswith("occurrence:") or len(occurrence_key) > 160:
+            raise ValueError("invalid occurrence key")
+        row = self.connection.execute(
+            "SELECT e.event_key FROM event_occurrences x JOIN events e ON e.id=x.event_id "
+            "WHERE x.occurrence_key=?", (occurrence_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self.get_event(self.canonical_event_key(str(row["event_key"])))
+
+    def list_event_occurrences(self, event_key: str) -> tuple[EventOccurrenceIdentity, ...]:
+        rows = self.connection.execute(
+            "SELECT x.identity_json FROM event_occurrences x JOIN events e ON e.id=x.event_id "
+            "WHERE e.event_key=? ORDER BY x.occurrence_key LIMIT 100", (event_key,),
+        ).fetchall()
+        identities = []
+        for row in rows:
+            payload = json.loads(row["identity_json"])
+            payload["entity_ids"] = tuple(payload["entity_ids"])
+            identities.append(EventOccurrenceIdentity(**payload))
+        return tuple(identities)
+
+    def claim_event_fact_job(
+        self, now: int, *, version: int, lease_seconds: int = 60,
+    ) -> EventFactWorkItem | None:
+        return SQLiteEventFacts(self).claim_event_fact_job(now, version=version, lease_seconds=lease_seconds)
+
+    def complete_event_fact_job(
+        self, work: EventFactWorkItem, facts: Sequence[EventFactCandidate], now: int,
+    ) -> bool:
+        return SQLiteEventFacts(self).complete_event_fact_job(work, facts, now)
+
+    def fail_event_fact_job(self, work: EventFactWorkItem, error: BaseException | str, now: int) -> bool:
+        return SQLiteEventFacts(self).fail_event_fact_job(work, error, now)
 
     def _save_event_report(self, report: PersistedEventReport) -> PersistedEventReport:
         if not isinstance(report, PersistedEventReport):
@@ -4715,6 +4845,45 @@ class Database:
         )
         return [self._event_report_from_row(row) for row in rows]
 
+    def read_event_evidence(self, event_key: str) -> EventEvidenceGraph | None:
+        """Read graph and linked deliveries from one snapshot; never expose payloads."""
+        with (nullcontext() if self.connection.in_transaction else self.unit_of_work(immediate=False)):
+            event = self.get_event(event_key)
+            if event is None:
+                return None
+            reports = self.list_event_reports(event_key, limit=201)
+            claims = self.list_event_claims(event_key, limit=201)
+            timeline = self.list_event_timeline(event_key, limit=201)
+            selected_claims = [claim.claim_id for claim in claims[:200]]
+            evidence_rows = self.connection.execute(
+                "SELECT ce.id, c.claim_key, ce.report_id, ce.stance, ce.note, ce.created_at, ce.producer "
+                "FROM event_claim_evidence ce JOIN event_claims c ON c.id=ce.claim_id "
+                "WHERE c.id IN (SELECT value FROM json_each(?)) "
+                "ORDER BY ce.created_at DESC, ce.id DESC LIMIT 1001",
+                (json.dumps(selected_claims),),
+            ).fetchall()
+            evidence = tuple(PersistedEventClaimEvidence(
+                claim_key=str(row["claim_key"]), report_id=int(row["report_id"]),
+                stance=str(row["stance"]), note=str(row["note"]),
+                created_at=int(row["created_at"]), evidence_id=int(row["id"]),
+                producer=str(row["producer"]),
+            ) for row in evidence_rows[:1000])
+            notifications = self.connection.execute(
+                "SELECT a.id, a.observation_id, a.rule_id, a.title, a.priority, "
+                "a.status, a.created_at, a.delivered_at FROM alerts a "
+                "JOIN event_reports r ON r.observation_id=a.observation_id "
+                "JOIN events e ON e.id=r.event_id WHERE e.event_key=? "
+                "ORDER BY a.created_at DESC, a.id DESC LIMIT 101", (event_key,),
+            ).fetchall()
+            return EventEvidenceGraph(
+                event=event, reports=tuple(reports[:200]), claims=tuple(claims[:200]),
+                evidence=evidence, timeline=tuple(timeline[:200]),
+                notifications=tuple(dict(row) for row in notifications[:100]),
+                truncated={"reports": len(reports) > 200, "claims": len(claims) > 200,
+                           "claim_evidence": len(evidence_rows) > 1000,
+                           "timeline": len(timeline) > 200, "notifications": len(notifications) > 100},
+            )
+
     def save_event_claim(self, claim: PersistedEventClaim) -> PersistedEventClaim:
         if not isinstance(claim, PersistedEventClaim):
             raise TypeError("claim must be a PersistedEventClaim")
@@ -4782,6 +4951,10 @@ class Database:
             first_seen_at=int(row["first_seen_at"]), last_seen_at=int(row["last_seen_at"]),
             supersedes_claim_key=(str(row["supersedes_claim_key"]) if row["supersedes_claim_key"] is not None else None),
             claim_id=int(row["id"]), created_at=int(row["created_at"]), updated_at=int(row["updated_at"]),
+            producer=str(row["producer"]),
+            extractor_version=(int(row["extractor_version"]) if row["extractor_version"] is not None else None),
+            slot_key=(str(row["slot_key"]) if row["slot_key"] is not None else None),
+            fact=(json.loads(row["fact_json"]) if row["fact_json"] is not None else None),
         )
 
     def list_event_claims(self, event_key: str, *, limit: int = 500) -> list[PersistedEventClaim]:
@@ -4881,14 +5054,18 @@ class Database:
         if not 1 <= limit <= 2000:
             raise ValueError("event timeline limit is out of range")
         rows = self.connection.execute(
-            "SELECT et.id, e.event_key, et.occurred_at, et.kind, et.text, et.confidence, et.report_id, et.created_at "
+            "SELECT et.id, e.event_key, et.occurred_at, et.kind, et.text, et.confidence, et.report_id, "
+            "et.created_at, et.producer, et.timeline_key "
             "FROM event_timeline et JOIN events e ON e.id=et.event_id WHERE e.event_key = ? "
             "ORDER BY et.occurred_at ASC, et.id ASC LIMIT ?", (event_key, limit)
         )
         return [PersistedEventTimelineItem(event_key=str(row["event_key"]), occurred_at=int(row["occurred_at"]),
                                   kind=str(row["kind"]), text=str(row["text"]), confidence=float(row["confidence"]),
                                   report_id=(int(row["report_id"]) if row["report_id"] is not None else None),
-                                  timeline_id=int(row["id"]), created_at=int(row["created_at"])) for row in rows]
+                                  timeline_id=int(row["id"]), created_at=int(row["created_at"]),
+                                  producer=str(row["producer"]),
+                                  timeline_key=(str(row["timeline_key"]) if row["timeline_key"] is not None else None))
+                for row in rows]
 
     def save_digest(self, digest: DigestDocument) -> DigestDocument:
         """Allocate and store the next immutable version of a digest."""

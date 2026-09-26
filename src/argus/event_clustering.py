@@ -18,7 +18,9 @@ from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 from typing import Any, Mapping, Sequence
 
-from .event_identity import identify_semantic_event
+from .event_identity import (
+    event_occurrences_compatible, identify_event_occurrence, identify_semantic_event,
+)
 
 
 _SPACE_RE = re.compile(r"\s+")
@@ -54,8 +56,6 @@ _MULTILINGUAL_ALIASES = (
     ("people's bank of china", "entity_people_bank_of_china"),
     ("peoples bank of china", "entity_people_bank_of_china"),
     ("pboc", "entity_people_bank_of_china"),
-    ("finance ministry", "entity_finance_ministry"),
-    ("ministry of finance", "entity_finance_ministry"),
     ("industrial and commercial bank of china", "entity_icbc"),
     ("icbc", "entity_icbc"),
     ("central bank", "central_bank"),
@@ -67,8 +67,6 @@ _MULTILINGUAL_ALIASES = (
     ("日本銀行", "entity_bank_of_japan"),
     ("欧洲央行", "entity_european_central_bank"),
     ("中国人民银行", "entity_people_bank_of_china"),
-    ("财政部", "entity_finance_ministry"),
-    ("财务省", "entity_finance_ministry"),
     ("工商银行", "entity_icbc"),
     ("中国工商银行", "entity_icbc"),
     ("日本央行", "entity_bank_of_japan"),
@@ -123,6 +121,7 @@ _MULTILINGUAL_ALIASES = (
     ("利率上げ", "action_rate_hike"),
     ("注资", "action_capital_injection"),
     ("增资", "action_capital_injection"),
+    ("増資", "action_capital_injection"),
     ("capital injection", "action_capital_injection"),
     ("injects", "action_capital_injection"),
     ("event decision", "action_decision"),
@@ -149,19 +148,62 @@ _MULTILINGUAL_ALIASES = (
     ("关税", "event_tariff"),
 )
 
+_FINANCE_MINISTRY_RE = re.compile(
+    r"\b(?:finance ministry|ministry of finance|treasury department)\b|财政部|財政部|财务省|財務省"
+)
+_FINANCE_MINISTRY_ALIASES = (
+    ("CN", r"(?:\b(?:china(?:['’]s)?|chinese)\s+(?:finance ministry|ministry of finance)\b|"
+           r"\bministry of finance (?:of |in )?china\b|(?:中国|中國|中华人民共和国|中華人民共和國)(?:财政部|財政部))"),
+    ("JP", r"(?:\b(?:japan(?:['’]s)?|japanese)\s+(?:finance ministry|ministry of finance)\b|"
+           r"\bministry of finance (?:of |in )?japan\b|(?:日本)?(?:财务省|財務省)|日本(?:财政部|財政部))"),
+    ("US", r"(?:\b(?:u\.?s\.?|united states|american)\s+(?:finance ministry|ministry of finance|treasury(?: department)?)\b|"
+           r"\b(?:finance ministry|ministry of finance|treasury department) of (?:the )?united states\b|"
+           r"(?:美国|美國)(?:财政部|財政部))"),
+    ("GB", r"\b(?:british|uk|united kingdom)\s+(?:finance ministry|ministry of finance)\b|英国财政部|英國財政部"),
+    ("DE", r"\b(?:german|germany'?s)\s+(?:finance ministry|ministry of finance)\b|德国财政部|德國財政部"),
+    ("FR", r"\b(?:french|france'?s)\s+(?:finance ministry|ministry of finance)\b|法国财政部|法國財政部"),
+    ("IN", r"\b(?:indian|india'?s)\s+(?:finance ministry|ministry of finance)\b|印度财政部|印度財政部"),
+    ("AU", r"\b(?:australian|australia(?:['’]s)?)\s+(?:finance ministry|ministry of finance|treasury)\b|澳大利亚财政部|澳大利亞財政部"),
+    ("CA", r"\b(?:canadian|canada(?:['’]s)?)\s+(?:finance ministry|ministry of finance)\b|加拿大财政部|加拿大財政部"),
+    ("KR", r"\b(?:south korean|south korea(?:['’]s)?)\s+(?:finance ministry|ministry of finance)\b|韩国财政部|韓國財政部"),
+    ("SG", r"\b(?:singaporean|singapore(?:['’]s)?)\s+(?:finance ministry|ministry of finance)\b|新加坡财政部|新加坡財政部"),
+)
+_FINANCE_COUNTRY_REGIONS = frozenset({"CN", "JP", "US", "GB", "DE", "FR", "IN", "AU", "CA", "KR", "SG"})
 
-def _canonical_terms(value: Any) -> frozenset[str]:
+
+def _finance_ministry_scope(item: Mapping[str, Any]) -> tuple[bool, frozenset[str]]:
+    text = _text(f"{item.get('title', '')} {item.get('summary', '')}")
+    countries = frozenset(country for country, pattern in _FINANCE_MINISTRY_ALIASES if re.search(pattern, text))
+    present = bool(countries or _FINANCE_MINISTRY_RE.search(text))
+    if present and not countries:
+        region = str(item.get("region", "")).upper().strip()
+        if region in _FINANCE_COUNTRY_REGIONS:
+            countries = frozenset({region})
+    return present, countries
+
+
+def _finance_region(item: Mapping[str, Any]) -> str:
+    _, countries = _finance_ministry_scope(item)
+    return next(iter(countries)) if len(countries) == 1 else ""
+
+
+def _canonical_terms(value: Any, finance_region: str = "") -> frozenset[str]:
     """Return reviewed multi-word signals before they are split into tokens."""
     return frozenset(
         term
-        for term in re.findall(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", _canonicalize(value))
+        for term in re.findall(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", _canonicalize(value, finance_region))
         if term.startswith(("entity_", "action_", "event_", "policy_"))
     )
 
 
-def _canonicalize(value: Any) -> str:
+def _canonicalize(value: Any, finance_region: str = "") -> str:
     """Replace only reviewed cross-language aliases with stable signal terms."""
     text = _text(value)
+    for country, pattern in _FINANCE_MINISTRY_ALIASES:
+        text = re.sub(pattern, f" entity_finance_ministry_{country.lower()} ", text)
+    text = _FINANCE_MINISTRY_RE.sub(
+        f" entity_finance_ministry_{finance_region.lower()} " if finance_region else " finance_ministry ", text
+    )
     for alias, canonical in sorted(_MULTILINGUAL_ALIASES, key=lambda pair: len(pair[0]), reverse=True):
         if all(ord(character) < 128 for character in alias):
             pattern = rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])"
@@ -297,18 +339,19 @@ def _numbers(item: Mapping[str, Any]) -> frozenset[str]:
 
 
 def _entities(item: Mapping[str, Any]) -> frozenset[str]:
+    finance_region = _finance_region(item)
     attrs = item.get("attributes")
     if isinstance(attrs, Mapping):
         explicit = attrs.get("entities")
         if isinstance(explicit, (list, tuple, set)):
-            values = {_canonicalize(value) for value in explicit if str(value).strip()}
+            values = {_canonicalize(value, finance_region) for value in explicit if str(value).strip()}
             if values:
                 return frozenset(values) | frozenset(
                     term for term in _canonical_terms(
-                        f"{item.get('title', '')} {item.get('summary', '')}"
+                        f"{item.get('title', '')} {item.get('summary', '')}", finance_region
                     ) if term.startswith("entity_")
                 )
-    title = _canonicalize(f"{item.get('title', '')} {item.get('summary', '')}")
+    title = _canonicalize(f"{item.get('title', '')} {item.get('summary', '')}", finance_region)
     # Keep longer CJK runs as coarse entities.  This is intentionally light;
     # richer NER can be layered on later without changing this interface.
     return (
@@ -318,8 +361,8 @@ def _entities(item: Mapping[str, Any]) -> frozenset[str]:
 
 
 def _title_similarity(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
-    a = _canonicalize(left.get("title", ""))
-    b = _canonicalize(right.get("title", ""))
+    a = _canonicalize(left.get("title", ""), _finance_region(left))
+    b = _canonicalize(right.get("title", ""), _finance_region(right))
     if not a or not b:
         return 0.0
     if a == b:
@@ -358,15 +401,30 @@ def _region_compatible(left: str, right: str) -> bool:
 
 
 def _pair_score(left: Mapping[str, Any], right: Mapping[str, Any], *, window: int) -> tuple[float, bool]:
+    occurrence_match = event_occurrences_compatible(
+        identify_event_occurrence(left), identify_event_occurrence(right),
+    )
+    if occurrence_match is False:
+        return 0.0, False
+    if occurrence_match is True:
+        return 1.0, False
     if abs(int(left.get("published_at", 0) or 0) - int(right.get("published_at", 0) or 0)) > window:
         return 0.0, False
     # Section headings and recurring columns identify a format, not an event.
     if generic_event_title(str(left.get("title", ""))) or generic_event_title(str(right.get("title", ""))):
         return 0.0, False
+    finance_left, countries_left = _finance_ministry_scope(left)
+    finance_right, countries_right = _finance_ministry_scope(right)
+    if len(countries_left) > 1 or len(countries_right) > 1:
+        return 0.0, False
+    if finance_left and finance_right and (
+        not countries_left or not countries_right or countries_left != countries_right
+    ):
+        return 0.0, False
     topic_left = _text(left.get("topic", "general"))
     topic_right = _text(right.get("topic", "general"))
-    region_left = _text(left.get("region", "GLOBAL")).upper()
-    region_right = _text(right.get("region", "GLOBAL")).upper()
+    region_left = _finance_region(left) or _text(left.get("region", "GLOBAL")).upper()
+    region_right = _finance_region(right) or _text(right.get("region", "GLOBAL")).upper()
     title = _title_similarity(left, right)
     entities_left, entities_right = _entities(left), _entities(right)
     entity_score = len(entities_left & entities_right) / max(1, len(entities_left | entities_right))
@@ -395,8 +453,8 @@ def _pair_score(left: Mapping[str, Any], right: Mapping[str, Any], *, window: in
     capital_right = "action_capital_injection" in actions_right
     if capital_left != capital_right and title < 0.72:
         return 0.0, False
-    canonical_left = _canonical_terms(f"{left.get('title', '')} {left.get('summary', '')}")
-    canonical_right = _canonical_terms(f"{right.get('title', '')} {right.get('summary', '')}")
+    canonical_left = _canonical_terms(f"{left.get('title', '')} {left.get('summary', '')}", _finance_region(left))
+    canonical_right = _canonical_terms(f"{right.get('title', '')} {right.get('summary', '')}", _finance_region(right))
     shared_canonical = canonical_left & canonical_right
     shared_entities = _entities(left) & _entities(right)
     if shared_canonical and (actions_left & actions_right or event_report_is_context(left) or event_report_is_context(right)):
@@ -547,19 +605,25 @@ def cluster_events(
         topics = tuple(sorted({_text(item.get("topic", "general")) for item in members}))
         regions = tuple(sorted({_text(item.get("region", "GLOBAL")).upper() for item in members}))
         entity_union = sorted(set().union(*(_entities(item) for item in members)))
+        occurrence_keys = {
+            occurrence_identity.key for item in members
+            if (occurrence_identity := identify_event_occurrence(item)) is not None
+        }
         semantic_keys = {
-            identity.dated_key(int(item.get("published_at", 0) or 0))
+            semantic_identity.dated_key(int(item.get("published_at", 0) or 0))
             for item in members
-            if (identity := identify_semantic_event(
+            if (semantic_identity := identify_semantic_event(
                 str(item.get("title", "")), str(item.get("summary", ""))
             )) is not None
         }
         actions = {
-            identity.action for item in members
-            if (identity := identify_semantic_event(str(item.get("title", "")))) is not None
-            and identity.action != "announcement"
+            action_identity.action for item in members
+            if (action_identity := identify_semantic_event(str(item.get("title", "")))) is not None
+            and action_identity.action != "announcement"
         }
-        if len(semantic_keys) == 1:
+        if len(occurrence_keys) == 1:
+            fingerprint = next(iter(occurrence_keys))
+        elif len(semantic_keys) == 1:
             fingerprint = ":".join((
                 next(iter(semantic_keys)),
                 next(iter(actions)) if len(actions) == 1 else "announcement",
@@ -582,7 +646,7 @@ def cluster_events(
                 else set()
             )
             canonical_sets = [
-                _canonical_terms(f"{item.get('title', '')} {item.get('summary', '')}")
+                _canonical_terms(f"{item.get('title', '')} {item.get('summary', '')}", _finance_region(item))
                 for item in members
             ]
             common_canonical = (
@@ -701,8 +765,8 @@ def explain_event_match(left: Mapping[str, Any], right: Mapping[str, Any]) -> di
         "title_similarity": round(_title_similarity(left, right), 4),
         "shared_entities": sorted(_entities(left) & _entities(right))[:20],
         "shared_canonical_signals": sorted(
-            _canonical_terms(f"{left.get('title', '')} {left.get('summary', '')}")
-            & _canonical_terms(f"{right.get('title', '')} {right.get('summary', '')}")
+            _canonical_terms(f"{left.get('title', '')} {left.get('summary', '')}", _finance_region(left))
+            & _canonical_terms(f"{right.get('title', '')} {right.get('summary', '')}", _finance_region(right))
         )[:20],
         "left_canonical_actions": sorted(
             term for term in _canonical_terms(f"{left.get('title', '')} {left.get('summary', '')}")

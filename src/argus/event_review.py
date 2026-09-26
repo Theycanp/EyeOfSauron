@@ -7,7 +7,7 @@ from dataclasses import asdict
 from typing import Any
 
 from .event_clustering import explain_event_match, generic_event_title
-from .events import EventPageRepository, EventRepository
+from .events import EventEvidenceRepository, EventPageRepository, EventRepository
 
 
 def event_quality(repository: EventPageRepository, *, since: int, until: int) -> dict[str, Any]:
@@ -30,13 +30,23 @@ def event_quality(repository: EventPageRepository, *, since: int, until: int) ->
 
 
 def event_match_evidence(repository: EventRepository, event_key: str) -> dict[str, Any]:
-    event = repository.get_event(event_key)
+    graph = (repository.read_event_evidence(event_key)
+             if isinstance(repository, EventEvidenceRepository) else None)
+    event = graph.event if graph is not None else repository.get_event(event_key)
     if event is None:
         raise ValueError("event no longer exists")
-    reports = repository.list_event_reports(event_key, limit=201)
+    reports = list(graph.reports) if graph is not None else repository.list_event_reports(event_key, limit=201)
     representative = {"title": event.title, "summary": event.summary, "published_at": event.last_seen_at,
                       "topic": event.topics[0] if event.topics else "general",
                       "region": event.regions[0] if event.regions else "GLOBAL"}
-    return {"reports_truncated": len(reports) > 200, "reports": [
+    history = ({
+        "event": asdict(graph.event),
+        "claims": [asdict(item) for item in graph.claims],
+        "claim_evidence": [asdict(item) for item in graph.evidence],
+        "timeline": [asdict(item) for item in graph.timeline],
+        "notifications": list(graph.notifications),
+        "history_truncated": graph.truncated,
+    } if graph is not None else {})
+    return {**history, "reports_truncated": (graph.truncated["reports"] if graph is not None else len(reports) > 200), "reports": [
         {**asdict(report), "evidence": explain_event_match(asdict(report), representative)} for report in reports[:200]
     ]}

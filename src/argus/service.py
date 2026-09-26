@@ -18,11 +18,13 @@ from .analysis_orchestrator import AnalysisOrchestrator
 from .content import ContentFetchError, PublicDocumentFetcher
 from .digest import DigestScheduler
 from .event_pool import EventPoolProjector
+from .event_fact_projection import EventFactProjector
 from .config import AppConfig, parse_source_config
 from .persistence import RuntimeRepository
 from .models import FeedFetchResult, SourceState
 from .notifier import Notifier, delivery_error_details
 from .rules import RuleSet
+from .runtime_io import run_network_call
 from .util import now_epoch, sanitize_error
 
 
@@ -48,6 +50,10 @@ def _sd_notify(message: str) -> None:
 
 class AlreadyRunningError(RuntimeError):
     pass
+
+
+class _ServiceStopRequested(Exception):
+    """Cancel the TaskGroup when a controlled stop is requested."""
 
 
 class ProcessLock:
@@ -103,6 +109,7 @@ class ArgusService:
         self.analysis_orchestrator = analysis_orchestrator
         self.digest_scheduler = digest_scheduler
         self.event_pool = EventPoolProjector(database)
+        self.event_facts = EventFactProjector(database)
         self.content_fetcher = content_fetcher
         self.instance_id = uuid.uuid4().hex
         self._source_slots = asyncio.Semaphore(config.service.max_source_concurrency)
@@ -123,7 +130,7 @@ class ArgusService:
         for attempt in range(1, source_config.request_attempts + 1):
             try:
                 async with self._source_slots:
-                    result = await asyncio.to_thread(collector.fetch, state)  # type: ignore[attr-defined]
+                    result = await run_network_call(collector.fetch, state)  # type: ignore[attr-defined]
                 break
             except asyncio.CancelledError:
                 raise
@@ -223,7 +230,7 @@ class ArgusService:
         if alert is None:
             return False
         try:
-            await asyncio.to_thread(self.notifier.publish, alert)
+            await run_network_call(self.notifier.publish, alert)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -264,7 +271,7 @@ class ArgusService:
         if item is None:
             return False
         try:
-            document = await asyncio.to_thread(self.content_fetcher.fetch, item)
+            document = await run_network_call(self.content_fetcher.fetch, item)
         except asyncio.CancelledError:
             raise
         except ContentFetchError as exc:
@@ -463,6 +470,24 @@ class ArgusService:
             except TimeoutError:
                 pass
 
+    async def _event_fact_loop(self) -> None:
+        while not self.stop_event.is_set():
+            processed = 0
+            try:
+                for _ in range(10):
+                    if self.stop_event.is_set() or not self.event_facts.process_once(now_epoch()):
+                        break
+                    processed += 1
+                    await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.error("event_fact_worker_failed error=%s", sanitize_error(exc))
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=1.0 if processed else 10.0)
+            except TimeoutError:
+                pass
+
     def process_event_pool_once(self, *, limit: int = 50) -> int:
         """Project one deliberately small batch to protect daemon heartbeats."""
         return self.event_pool.project_pending(now=now_epoch(), limit=limit)
@@ -491,10 +516,7 @@ class ArgusService:
                     self.config_revision,
                     desired_revision,
                 )
-                _sd_notify(
-                    "RELOADING=1\n"
-                    f"STATUS=Argus is applying configuration revision {desired_revision}"
-                )
+                _sd_notify(f"STATUS=Argus is restarting for configuration revision {desired_revision}")
                 self.stop_event.set()
                 return
             try:
@@ -531,7 +553,7 @@ class ArgusService:
                 if collector is None:
                     raise RuntimeError("source has no active collector")
                 started = time.monotonic()
-                result = await asyncio.to_thread(
+                result = await run_network_call(
                     collector.fetch,
                     SourceState(source.id, False, None, None, None, None, 0, False, None),
                 )
@@ -604,11 +626,15 @@ class ArgusService:
                     group.create_task(self._digest_loop(), name="digest")
                 group.create_task(self._maintenance_loop(), name="maintenance")
                 group.create_task(self._event_pool_loop(), name="event-pool")
+                group.create_task(self._event_fact_loop(), name="event-facts")
                 group.create_task(self._heartbeat_loop(), name="heartbeat")
                 group.create_task(self._admin_job_loop(), name="admin-jobs")
                 group.create_task(self._config_revision_loop(), name="config-revision")
                 await self.stop_event.wait()
-        except BaseException as exc:
+                raise _ServiceStopRequested
+        except* _ServiceStopRequested:
+            pass
+        except* BaseException as exc:
             terminal_error = exc
             raise
         finally:

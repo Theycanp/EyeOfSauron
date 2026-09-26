@@ -26,6 +26,7 @@ from .event_pool import EventPoolProjector
 from .events import EventPoolRepository, EventRepository, PersistedEvent, PersistedEventReport
 from .reminders import next_daily_occurrence
 from .regions import effective_region_weights, region_weight
+from .runtime_io import run_network_call
 from .util import sanitize_error
 
 
@@ -1151,8 +1152,9 @@ class DigestScheduler:
         # connection owner's event-loop thread.
         journal = repository if isinstance(repository, DigestRunRepository) else None
         attempt_id = journal.start_digest_attempt(document.digest_key, now=now) if journal else None
+        assert self.summarizer is not None
         try:
-            summary = await asyncio.to_thread(self.summarizer.summarize, evidence)  # type: ignore[union-attr]
+            summary = await run_network_call(self.summarizer.summarize, evidence)
             with_api_summary(document, summary, created_at=now)
         except BaseException as exc:
             if journal is not None and attempt_id is not None:

@@ -73,7 +73,7 @@ export function EventReviewPanel({ api, event, canWrite, onChange, onUnauthorize
       <button className="button subtle" disabled={busy} aria-pressed={state.read} onClick={() => { void preference('read') }}>{state.read ? '已读' : '标记已读'}</button>
       <button className="button subtle" disabled={busy} aria-pressed={state.followed} onClick={() => { void preference('followed') }}>{state.followed ? '已关注' : '关注事件'}</button>
       <button className="button subtle" disabled={busy} aria-pressed={state.ignored} onClick={() => { void preference('ignored') }}>{state.ignored ? '已忽略（个人）' : '忽略（个人）'}</button>
-      <button className="button subtle" disabled={busy} onClick={() => { void run(async () => { setDetail(await api.eventReview(event.event_key)) }) }}>查看匹配依据与审计</button>
+      <button className="button subtle" disabled={busy} onClick={() => { void run(async () => { setDetail(await api.eventReview(event.event_key)) }) }}>查看事件历史与匹配依据</button>
     </div>
     <p className="hint">阅读标记仅属于当前账户；关注是收藏，忽略不会停用信源或影响通知和全局日报。</p>
     {error && <p className="inline-error" role="alert">{error}</p>}
@@ -84,6 +84,20 @@ export function EventReviewPanel({ api, event, canWrite, onChange, onUnauthorize
       <p>只影响以后生成的、时间窗内的日报；仍受容量上限约束，旧日报不变。{state.digest_reason && `当前原因：${state.digest_reason}`}</p>
     </form>}
     {detail && <div>
+      <h4>事实与证据</h4>
+      {detail.claims?.length ? <ul>{detail.claims.map(claim => <li key={claim.claim_key}>
+        <strong>{claim.status === 'disputed' ? '有争议' : claim.status === 'superseded' ? '已被更正' : '当前记录'}</strong>：{claim.text}
+        {claim.supersedes_claim_key && <span>（更正此前记录）</span>}
+        <ul>{detail.claim_evidence?.filter(evidence => evidence.claim_key === claim.claim_key).map(evidence => {
+          const report = detail.reports.find(item => item.report_id === evidence.report_id)
+          return <li key={`${evidence.report_id}-${evidence.stance}`}>{evidence.stance === 'supports' ? '支持' : evidence.stance === 'refutes' ? '反驳' : '背景'} · {report ? <a href={report.url || undefined} target="_blank" rel="noreferrer">{report.publisher || report.source_id}：{report.title}</a> : `报道 #${evidence.report_id}`}{evidence.note && ` · ${evidence.note}`}</li>
+        })}</ul>
+      </li>)}</ul> : <p>尚无结构化事实记录，不代表报道中没有事实。</p>}
+      <h4>时间线</h4>
+      {detail.timeline?.length ? <ol>{detail.timeline.map(item => <li key={item.timeline_id}>{formatDate(item.occurred_at)} · {item.text}</li>)}</ol> : <p>尚无时间线记录。</p>}
+      <h4>通知记录</h4>
+      {detail.notifications?.length ? <ul>{detail.notifications.map(item => <li key={item.id}>{formatDate(item.created_at)} · <a href={`/events/${item.id}`}>{item.title}</a> · {({ delivered: '已投递', pending: '待发送', sending: '发送中', dead: '投递失败', cancelled: '已取消' } as Record<string, string>)[item.status] || item.status}</li>)}</ul> : <p>此事件尚无关联通知。</p>}
+      {detail.history_truncated && Object.values(detail.history_truncated).some(Boolean) && <p role="status">部分历史超过读取上限，此处不是完整历史。</p>}
       <h4>当前规则重放</h4><p>匹配分不是正确概率，也不是历史决策记录。这里比较每篇报道与当前事件代表；原匹配分另行保留。</p>
       {detail.reports_truncated && <p role="status">超过 200 篇，仅展示前 200 篇；此事件需专门批次处理，不能在此拆分。</p>}
       {detail.reports.map(report => <div className="event-match-row" key={report.observation_id}>

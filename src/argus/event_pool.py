@@ -10,7 +10,7 @@ from typing import Any
 from .event_clustering import (
     cluster_events, event_match_score, event_report_is_context, generic_event_title,
 )
-from .event_identity import identify_semantic_event
+from .event_identity import EventOccurrenceIdentity, identify_event_occurrence, identify_semantic_event
 from .events import (
     EventPoolRepository,
     EventRepository,
@@ -65,7 +65,13 @@ class EventPoolProjector:
                              else event.last_seen_at),
         }
 
-    def _match(self, observation: dict[str, Any]) -> tuple[PersistedEvent | None, float]:
+    def _match(
+        self, observation: dict[str, Any], occurrence: EventOccurrenceIdentity | None,
+    ) -> tuple[PersistedEvent | None, float]:
+        if occurrence is not None:
+            bound = self.repository.find_event_by_occurrence(occurrence.key)
+            if bound is not None:
+                return bound, 1.0
         published_at = int(observation.get("published_at", 0))
         candidates = self.repository.list_event_candidates(
             max(0, published_at - self.match_window_seconds),
@@ -83,6 +89,11 @@ class EventPoolProjector:
         for score, candidate in ranked:
             if score < self.match_threshold:
                 break
+            if occurrence is not None and any(
+                prior.key != occurrence.key
+                for prior in self.repository.list_event_occurrences(candidate.event_key)
+            ):
+                continue
             reports = self.repository.list_event_reports(candidate.event_key, limit=2000)
             if len(reports) == 2000:
                 continue
@@ -131,13 +142,17 @@ class EventPoolProjector:
                     continue
                 incoming = clustered[0]
                 report = incoming.reports[0]
-                existing, match_score = self._match(observation)
+                occurrence = identify_event_occurrence(observation)
+                existing, match_score = self._match(observation, occurrence)
                 semantic = identify_semantic_event(report.title, report.summary)
-                bucket = incoming.published_at if semantic is not None else incoming.published_at // 86400
-                identity_seed = f"{incoming.event_id}:{bucket}"
-                if generic_event_title(report.title):
-                    identity_seed += f":{report.observation_id}"
-                new_identity = hashlib.sha256(identity_seed.encode("ascii")).hexdigest()[:24]
+                if occurrence is not None:
+                    new_identity = hashlib.sha256(occurrence.key.encode("ascii")).hexdigest()[:24]
+                else:
+                    bucket = incoming.published_at if semantic is not None else incoming.published_at // 86400
+                    identity_seed = f"{incoming.event_id}:{bucket}"
+                    if generic_event_title(report.title):
+                        identity_seed += f":{report.observation_id}"
+                    new_identity = hashlib.sha256(identity_seed.encode("ascii")).hexdigest()[:24]
                 event_key = existing.event_key if existing is not None else new_identity
                 prior_reports = (
                     self.repository.list_event_reports(event_key, limit=2000)
@@ -229,6 +244,7 @@ class EventPoolProjector:
                         created_at=now,
                     ),
                     relation_updates=relation_updates,
+                    occurrence=occurrence,
                 )
                 projected += 1
             except (KeyError, TypeError, ValueError) as exc:

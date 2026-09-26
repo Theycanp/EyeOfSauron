@@ -1,3 +1,3 @@
 """EyeOfSauron event monitoring service."""
 
-__version__ = "0.22.6"
+__version__ = "0.23.0"

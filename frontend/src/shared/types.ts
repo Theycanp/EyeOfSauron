@@ -599,6 +599,35 @@ export interface EventReviewDetail {
   reports_truncated: boolean
   audit: Array<{ id: number; action: string; actor: string; reason: string; created_at: number }>
   state: EventWorkspaceState
+  claims?: Array<{
+    claim_key: string
+    text: string
+    status: 'active' | 'superseded' | 'disputed'
+    confidence: number
+    supersedes_claim_key?: string | null
+  }>
+  claim_evidence?: Array<{
+    claim_key: string
+    report_id: number
+    stance: 'supports' | 'refutes' | 'context'
+    note: string
+  }>
+  timeline?: Array<{
+    timeline_id: number
+    occurred_at: number
+    kind: string
+    text: string
+    report_id?: number | null
+  }>
+  notifications?: Array<{
+    id: number
+    observation_id: number
+    title: string
+    status: string
+    created_at: number
+    delivered_at?: number | null
+  }>
+  history_truncated?: Record<string, boolean>
 }
 
 export interface EventRepairRequest {

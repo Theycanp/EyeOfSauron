@@ -38,6 +38,81 @@ def _row(
 
 
 class EventClusteringTests(unittest.TestCase):
+    def test_usgs_updates_retain_occurrence_and_event_key_across_days(self) -> None:
+        source = "usgs_earthquakes_significant_month"
+        first = {
+            **_row(1, "M 6.2 - Offshore Japan", source_id=source),
+            "external_id": "urn:earthquake-usgs-gov:us:6000txpi",
+            "topic": "earthquake", "region": "JP",
+        }
+        updated = {
+            **_row(2, "M 6.3 - Revised offshore Japan earthquake", source_id=source,
+                   published_at=1_800_000_000 + 5 * 86400),
+            "external_id": first["external_id"], "topic": "disaster", "region": "GLOBAL",
+        }
+        singleton_key = cluster_events([first])[0].event_id
+        self.assertEqual(1.0, event_match_score(first, updated))
+        for rows in ([first, updated], [updated, first]):
+            events = cluster_events(rows)
+            self.assertEqual(1, len(events))
+            self.assertEqual(singleton_key, events[0].event_id)
+            self.assertEqual(2, len(events[0].reports))
+
+    def test_distinct_official_occurrences_split_identical_headlines(self) -> None:
+        source = "usgs_earthquakes_significant_month"
+        first = {
+            **_row(1, "M 6.2 - Offshore Japan", source_id=source),
+            "external_id": "urn:earthquake-usgs-gov:us:6000txpi",
+        }
+        second = {
+            **_row(2, "M 6.2 - Offshore Japan", source_id=source, published_at=1_800_000_060),
+            "external_id": "urn:earthquake-usgs-gov:us:6000txpj",
+        }
+        self.assertEqual(0.0, event_match_score(first, second))
+        for rows in ([first, second], [second, first]):
+            events = cluster_events(rows)
+            self.assertEqual(2, len(events))
+            self.assertEqual(2, len({event.event_id for event in events}))
+
+    def test_verified_occurrence_overrides_generic_updated_headline(self) -> None:
+        source = "usgs_earthquakes_significant_month"
+        first = {
+            **_row(1, "M 6.2 - Offshore Japan", source_id=source),
+            "external_id": "urn:earthquake-usgs-gov:us:6000txpi",
+        }
+        updated = {
+            **_row(2, "Breaking News", source_id=source,
+                   published_at=1_800_000_000 + 5 * 86400),
+            "external_id": first["external_id"],
+        }
+        self.assertEqual(1.0, event_match_score(first, updated))
+        self.assertEqual(1, len(cluster_events([first, updated])))
+
+    def test_structured_occurrence_is_stable_across_sources_and_batches(self) -> None:
+        occurrence = {
+            "kind": "explosion", "entity_ids": ["plant:seven"], "location_id": "jp:tohoku",
+            "occurred_at": 1_800_000_000, "time_precision": "second",
+        }
+        first = {
+            **_row(1, "Explosion at plant seven", source_id="official-one", tier="primary"),
+            "attributes": {"event_identity": occurrence},
+        }
+        later = {
+            **_row(2, "Plant seven damage assessment updated", source_id="official-two",
+                   tier="primary", published_at=1_800_000_000 + 10 * 86400),
+            "attributes": {"event_identity": {**occurrence, "entity_ids": ["PLANT:SEVEN"]}},
+        }
+        singleton_key = cluster_events([first])[0].event_id
+        self.assertEqual(singleton_key, cluster_events([later])[0].event_id)
+        self.assertEqual(1.0, event_match_score(first, later))
+        self.assertEqual(singleton_key, cluster_events([later, first])[0].event_id)
+        different = {
+            **later, "attributes": {"event_identity": {
+                **occurrence, "occurred_at": 1_800_000_001,
+            }},
+        }
+        self.assertEqual(0.0, event_match_score(first, different))
+
     def test_fed_decision_reports_share_one_event_and_keep_market_context(self) -> None:
         titles = (
             "Federal Reserve issues FOMC statement",
