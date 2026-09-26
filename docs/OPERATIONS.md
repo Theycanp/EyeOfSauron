@@ -40,7 +40,7 @@ alert rules and official-warning coverage limits are in
 log line and the Weather page's success timestamp; do not simulate a severe
 weather warning on the production ntfy topic.
 When QWeather is configured, also verify independent `minutely`, `alerts` and
-astronomy
+`astronomy`
 success timestamps and zero unexplained failures. Keep JWT identifiers and the
 private-key path in `/etc/argus/qweather.env` (root:argus 0640), loaded only by
 the daemon. See `WEATHER.md` for variable names and `RELEASES.md` for selecting

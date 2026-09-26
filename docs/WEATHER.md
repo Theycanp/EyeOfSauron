@@ -79,7 +79,7 @@ is absent from the model or guarantee notice before an event begins.
 
 The `WeatherProvider` and `WeatherRepository` protocols isolate the forecast
 source and persistent state. `open_meteo.py` is the network adapter,
-`weather.py` owns validation and rules, `sqlite_weather.py` owns schema-24 state
+`weather.py` owns validation and rules, `sqlite_weather.py` owns schema-26 state
 and atomic outbox writes, and `service.py` owns scheduling. The admin API uses
 the same repository boundary; settings writes require `settings:write`, origin
 and CSRF validation, revision match, and an audit record. Read/search requires
