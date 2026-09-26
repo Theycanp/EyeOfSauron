@@ -94,6 +94,61 @@ class MultilingualEventReplayTests(unittest.TestCase):
         ]
         self.assertEqual(2, len(cluster_events(observations)))
 
+    def test_finance_ministries_use_country_namespaces(self) -> None:
+        observations = [
+            row(1, "Finance Ministry announces capital injection", source="cn", region="CN"),
+            row(2, "Finance Ministry announces capital injection", source="jp", region="JP"),
+            row(3, "Finance Ministry announces capital injection", source="us", region="US"),
+        ]
+        self.assertEqual(3, len(cluster_events(observations)))
+        for left, right in itertools.combinations(observations, 2):
+            self.assertEqual(0.0, event_match_score(left, right))
+
+    def test_explicit_finance_ministry_names_bridge_languages_and_regions(self) -> None:
+        cases = (
+            ("中国财政部宣布增资", "China's Finance Ministry announces capital injection", "entity_finance_ministry_cn"),
+            ("財務省が増資を発表", "Japan's Ministry of Finance announces capital injection", "entity_finance_ministry_jp"),
+            ("美国财政部宣布增资", "US Treasury announces capital injection", "entity_finance_ministry_us"),
+        )
+        for native, english, expected in cases:
+            with self.subTest(native=native):
+                left = row(1, native, source="official", region="GLOBAL")
+                right = row(2, english, source="wire", region="GLOBAL")
+                evidence = explain_event_match(left, right)
+                self.assertIn(expected, evidence["shared_entities"])
+                self.assertEqual(1, len(cluster_events([left, right])))
+                self.assertEqual(1, len(cluster_events([
+                    {**left, "region": "CN"}, {**right, "region": "US"},
+                ])))
+
+    def test_generic_finance_ministry_requires_specific_country_metadata(self) -> None:
+        generic = row(1, "Ministry of Finance announces capital injection", source="unknown", region="GLOBAL")
+        chinese = row(2, "中国财政部宣布增资", source="cn", region="CN")
+        self.assertEqual(0.0, event_match_score(generic, chinese))
+        self.assertEqual(2, len(cluster_events([generic, chinese])))
+        self.assertEqual(0.0, event_match_score(generic, {**generic, "region": "EAST_ASIA"}))
+        scoped = {**generic, "region": "CN"}
+        self.assertIn("entity_finance_ministry_cn", explain_event_match(scoped, chinese)["shared_entities"])
+        self.assertEqual(1, len(cluster_events([scoped, chinese])))
+
+    def test_explicit_finance_ministry_country_overrides_feed_region(self) -> None:
+        japanese = row(1, "Japan's Finance Ministry announces capital injection", source="media", region="CN")
+        chinese = row(2, "China's Finance Ministry announces capital injection", source="official", region="CN")
+        self.assertEqual(0.0, event_match_score(japanese, chinese))
+        self.assertEqual(2, len(cluster_events([japanese, chinese])))
+
+    def test_multiple_finance_ministries_in_title_or_summary_do_not_merge(self) -> None:
+        single = row(1, "China's Finance Ministry announces capital injection", source="cn", region="CN")
+        for title, summary in (
+            ("China's Finance Ministry and Japan's Ministry of Finance announce capital injection", ""),
+            (single["title"], "Japan's Ministry of Finance announces capital injection too"),
+            ("中国财政部与日本財務省讨论增资", ""),
+        ):
+            with self.subTest(title=title, summary=summary):
+                multiple = row(2, str(title), summary=summary, source="comparison", region="CN")
+                self.assertEqual(0.0, event_match_score(single, multiple))
+                self.assertEqual(2, len(cluster_events([single, multiple])))
+
     def test_order_independent_replay_and_match_explanation(self) -> None:
         observations = [
             row(1, "日本銀行、政策金利を0.25％に据え置き", source="boj", tier="primary"),

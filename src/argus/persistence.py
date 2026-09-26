@@ -6,7 +6,8 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 
 from .analysis_orchestrator import AnalysisRepository
 from .content import ContentDocumentDraft, ContentFetchWorkItem
-from .events import EventPageRepository, EventPoolRepository, EventRepository, EventWorkspaceRepository
+from .events import EventEvidenceRepository, EventPageRepository, EventPoolRepository, EventRepository, EventWorkspaceRepository
+from .event_fact_projection import EventFactWorkRepository
 from .digest_operations import DigestRunRepository
 from .digest import (
     DigestInputRepository,
@@ -64,7 +65,7 @@ class SQLiteUnitOfWork:
 class RuntimeRepository(
     AnalysisRepository, DigestInputRepository, DigestRepository, DigestNotificationRepository,
     DigestRetryRepository, DigestRunRepository, EventRepository, EventPoolRepository,
-    EventWorkspaceRepository, Protocol
+    EventWorkspaceRepository, EventFactWorkRepository, Protocol
 ):
     """Persistence port used by the always-on application service."""
 
@@ -234,7 +235,7 @@ class PromptRepository(Protocol):
 class ControlPlaneRepository(
     ManagedConfigRepository, PromptRepository, DigestReaderRepository,
     EventPageRepository, DigestRunRepository,
-    EventRepository, EventWorkspaceRepository, SourceHealthRepository, Protocol
+    EventRepository, EventEvidenceRepository, EventWorkspaceRepository, SourceHealthRepository, Protocol
 ):
     """Narrow persistence port used by the local administration API."""
 

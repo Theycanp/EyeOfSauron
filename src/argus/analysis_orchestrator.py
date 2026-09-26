@@ -25,6 +25,7 @@ from .analysis import (
 from .config import AnalysisConfig
 from .models import AnalysisWorkItem, Observation
 from .regions import region_weight
+from .runtime_io import run_network_call
 from .util import now_epoch, sanitize_error
 
 
@@ -118,7 +119,7 @@ class AnalysisOrchestrator:
     ) -> tuple[dict[str, object] | None, AnalysisAttempt]:
         started = time.monotonic()
         try:
-            advisory = dict(await asyncio.to_thread(analyzer.analyze, observation))
+            advisory = dict(await run_network_call(analyzer.analyze, observation))
         except asyncio.CancelledError:
             raise
         except Exception as exc:

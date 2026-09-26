@@ -9,9 +9,11 @@ the general similarity scorer.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 
@@ -66,6 +68,120 @@ class WeatherEventIdentity:
         # but must not split those equivalent bulletins.
         material = "|".join((self.area, self.hazard, self.severity))
         return "weather-event:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class EventOccurrenceIdentity:
+    """Evidence-backed occurrence identity, separate from a mutable event title."""
+
+    kind: str
+    namespace: str
+    external_id: str | None
+    occurred_at: int | None
+    time_precision: str | None
+    entity_ids: tuple[str, ...]
+    location_id: str | None
+    object_id: str | None
+    basis: str
+
+    @property
+    def key(self) -> str:
+        if self.basis == "official_id":
+            material: tuple[Any, ...] = (self.kind, self.namespace, self.external_id)
+        else:
+            material = (
+                self.kind, self.entity_ids, self.location_id, self.object_id,
+                self.occurred_at, self.time_precision,
+            )
+        encoded = json.dumps(material, ensure_ascii=True, separators=(",", ":"))
+        return "occurrence:" + hashlib.sha256(encoded.encode("ascii")).hexdigest()
+
+
+_OCCURRENCE_ATOM = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
+_USGS_URN = re.compile(r"urn:earthquake-usgs-gov:([a-z0-9_-]+):([a-z0-9_-]+)\Z", re.IGNORECASE)
+_USGS_SOURCE = "usgs_earthquakes_significant_month"
+
+
+def _occurrence_atom(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().casefold()
+    return normalized if _OCCURRENCE_ATOM.fullmatch(normalized) else None
+
+
+def identify_event_occurrence(observation: Mapping[str, Any]) -> EventOccurrenceIdentity | None:
+    """Use only source-gated official IDs or explicit, validated occurrence metadata.
+
+    A feed GUID and publication timestamp alone are never an occurrence identity.
+    The structured contract is supplied by a reviewed primary collector as
+    ``attributes.event_identity``; this function does not infer facts from prose.
+    """
+    source_id = str(observation.get("source_id", ""))
+    if source_id == _USGS_SOURCE:
+        match = _USGS_URN.fullmatch(str(observation.get("external_id", "")).strip())
+        if match is not None:
+            return EventOccurrenceIdentity(
+                kind="earthquake", namespace="usgs", external_id=f"{match.group(1)}:{match.group(2)}".casefold(),
+                occurred_at=None, time_precision=None, entity_ids=(), location_id=None,
+                object_id=None, basis="official_id",
+            )
+
+    attributes = observation.get("attributes")
+    if not isinstance(attributes, Mapping) or not isinstance(attributes.get("event_identity"), Mapping):
+        return None
+    if str(observation.get("source_tier", "")).casefold() != "primary":
+        return None
+    raw = attributes["event_identity"]
+    kind = _occurrence_atom(raw.get("kind"))
+    if kind is None:
+        return None
+    namespace = _occurrence_atom(raw.get("namespace"))
+    external_id = _occurrence_atom(raw.get("external_id"))
+    if namespace is not None and external_id is not None:
+        if namespace != source_id.casefold():
+            return None
+        return EventOccurrenceIdentity(
+            kind=kind, namespace=namespace, external_id=external_id,
+            occurred_at=None, time_precision=None, entity_ids=(), location_id=None,
+            object_id=None, basis="official_id",
+        )
+    if namespace is not None or external_id is not None:
+        return None
+
+    entities_raw = raw.get("entity_ids", ())
+    if not isinstance(entities_raw, (list, tuple)):
+        return None
+    normalized_entities = {_occurrence_atom(value) for value in entities_raw}
+    if None in normalized_entities:
+        return None
+    entities = tuple(sorted(value for value in normalized_entities if value is not None))
+    location = _occurrence_atom(raw.get("location_id"))
+    object_id = _occurrence_atom(raw.get("object_id"))
+    occurred_at = raw.get("occurred_at")
+    precision = raw.get("time_precision")
+    units = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
+    if (
+        type(occurred_at) is not int or occurred_at < 0 or not isinstance(precision, str)
+        or precision not in units
+        or occurred_at % units[precision] != 0 or not location
+        or not (entities or object_id)
+    ):
+        return None
+    return EventOccurrenceIdentity(
+        kind=kind, namespace="structured", external_id=None,
+        occurred_at=occurred_at, time_precision=precision,
+        entity_ids=entities, location_id=location, object_id=object_id,
+        basis="structured",
+    )
+
+
+def event_occurrences_compatible(
+    left: EventOccurrenceIdentity | None, right: EventOccurrenceIdentity | None,
+) -> bool | None:
+    """Return unknown when either report lacks a validated occurrence identity."""
+    if left is None or right is None:
+        return None
+    return left.key == right.key
 
 
 _CENTRAL_BANKS = (

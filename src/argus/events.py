@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence, runtime_checkable
 
+from .event_identity import EventOccurrenceIdentity
+
 
 EVENT_STATUSES = frozenset({"active", "quiet", "closed"})
 REPORT_TIERS = frozenset({"primary", "secondary", "social"})
@@ -115,6 +117,10 @@ class PersistedEventClaim:
     claim_id: int | None = None
     created_at: int = 0
     updated_at: int = 0
+    producer: str = "manual"
+    extractor_version: int | None = None
+    slot_key: str | None = None
+    fact: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.event_key or not self.claim_key or len(self.claim_key) > 160:
@@ -139,6 +145,7 @@ class PersistedEventClaimEvidence:
     note: str = ""
     created_at: int = 0
     evidence_id: int | None = None
+    producer: str = "manual"
 
     def __post_init__(self) -> None:
         if not self.claim_key or self.report_id < 1:
@@ -159,6 +166,8 @@ class PersistedEventTimelineItem:
     report_id: int | None = None
     timeline_id: int | None = None
     created_at: int = 0
+    producer: str = "manual"
+    timeline_key: str | None = None
 
     def __post_init__(self) -> None:
         if not self.event_key or not self.kind or len(self.kind) > 80:
@@ -201,6 +210,24 @@ class EventPage:
     window_until: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class EventEvidenceGraph:
+    """One consistent, bounded read of an event and its evidence history."""
+
+    event: PersistedEvent
+    reports: tuple[PersistedEventReport, ...]
+    claims: tuple[PersistedEventClaim, ...]
+    evidence: tuple[PersistedEventClaimEvidence, ...]
+    timeline: tuple[PersistedEventTimelineItem, ...]
+    notifications: tuple[dict[str, Any], ...]
+    truncated: dict[str, bool]
+
+
+@runtime_checkable
+class EventEvidenceRepository(Protocol):
+    def read_event_evidence(self, event_key: str) -> EventEvidenceGraph | None: ...
+
+
 @runtime_checkable
 class EventPageRepository(Protocol):
     """Read-only event browser and digest selection port."""
@@ -224,6 +251,7 @@ class EventPoolRepository(EventPageRepository, Protocol):
     def save_event_projection(
         self, event: PersistedEvent, report: PersistedEventReport,
         *, relation_updates: Sequence[PersistedEventReport] = (),
+        occurrence: EventOccurrenceIdentity | None = None,
     ) -> PersistedEventReport:
         """Atomically attach evidence and revise earlier report relationships."""
         ...
@@ -235,6 +263,10 @@ class EventPoolRepository(EventPageRepository, Protocol):
     def list_event_candidates(
         self, since: int, until: int, *, limit: int = 200
     ) -> list[PersistedEvent]: ...
+
+    def find_event_by_occurrence(self, occurrence_key: str) -> PersistedEvent | None: ...
+
+    def list_event_occurrences(self, event_key: str) -> tuple[EventOccurrenceIdentity, ...]: ...
 
 # Backward-compatible shorthand used by the repository protocol and API
 # adapters.  The persisted aggregate remains named explicitly above.

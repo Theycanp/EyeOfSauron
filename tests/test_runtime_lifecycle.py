@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import io
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -15,6 +17,7 @@ from argus.models import FeedFetchResult
 from argus.notifier import NotifyError
 from argus.rules import RuleSet
 from argus.service import AlreadyRunningError, ArgusService, ProcessLock, _sd_notify
+from argus.runtime_io import run_network_call
 from helpers import production_config
 
 
@@ -43,8 +46,107 @@ class RuntimeLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_revision_requests_restart_and_preserves_outbox(self):
         self.db.save_managed_config({"sources": [], "rules": []}, "test", "change", expected_revision=0)
         self.db.enqueue_test_alert("eos", 100)
-        self.assertTrue(await asyncio.wait_for(self.service.run_forever(), 2))
+        with patch("argus.service._sd_notify") as notify:
+            self.assertTrue(await asyncio.wait_for(self.service.run_forever(), 2))
         self.assertEqual(1, self.db.status()["outbox"]["pending"])
+        messages = [call.args[0] for call in notify.call_args_list]
+        self.assertEqual(1, sum(message.startswith("READY=1") for message in messages))
+        self.assertFalse(any("RELOADING=1" in message for message in messages))
+        self.assertTrue(any("STOPPING=1" in message for message in messages))
+
+    async def test_blocked_delivery_does_not_delay_reload_or_confirm_alert(self):
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        self.db.enqueue_test_alert("eos", int(time.time()))
+        notifier = Mock()
+
+        def publish(alert):  # type: ignore[no-untyped-def]
+            entered.set()
+            release.wait()
+            finished.set()
+
+        notifier.publish.side_effect = publish
+        self.service.notifier = notifier
+        task = asyncio.create_task(self.service.run_forever())
+        try:
+            self.assertTrue(await asyncio.wait_for(asyncio.to_thread(entered.wait, 2), 3))
+            self.db.save_managed_config({"sources": [], "rules": []}, "test", "change", expected_revision=0)
+            await asyncio.wait_for(task, 7)
+            self.assertTrue(self.service.reload_requested)
+            self.assertEqual(0, self.db.status()["outbox"].get("delivered", 0))
+            self.assertEqual(1, self.db.status()["outbox"]["sending"])
+        finally:
+            release.set()
+            if not task.done():
+                self.service.request_stop()
+                await asyncio.wait_for(task, 2)
+        self.assertTrue(await asyncio.wait_for(asyncio.to_thread(finished.wait, 2), 3))
+        self.assertEqual(0, self.db.status()["outbox"].get("delivered", 0))
+        reclaimed = self.db.claim_due_alert(int(time.time()) + 1000, 60)
+        self.assertIsNotNone(reclaimed)
+
+    async def test_cancelled_network_call_keeps_capacity_until_thread_finishes(self):
+        import argus.runtime_io as runtime_io
+
+        entered = threading.Event()
+        release = threading.Event()
+        original = runtime_io._network_slots
+        runtime_io._network_slots = threading.BoundedSemaphore(1)
+
+        def blocked() -> None:
+            entered.set()
+            release.wait()
+
+        task = asyncio.create_task(run_network_call(blocked))
+        waiting: asyncio.Task[None] | None = None
+        try:
+            self.assertTrue(await asyncio.wait_for(asyncio.to_thread(entered.wait, 2), 3))
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            waiting = asyncio.create_task(run_network_call(lambda: None))
+            await asyncio.sleep(0.15)
+            self.assertFalse(waiting.done())
+            waiting.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiting
+        finally:
+            release.set()
+            runtime_io._network_slots = original
+
+    async def test_blocked_collector_does_not_hold_process_shutdown(self):
+        entered = threading.Event()
+        release = threading.Event()
+        config = production_config(self.root)
+        source = config.sources[0]
+        config = replace(
+            config, sources=(source,),
+            service=replace(config.service, source_start_jitter_seconds=0),
+        )
+        collector = Mock()
+
+        def fetch(state):  # type: ignore[no-untyped-def]
+            entered.set()
+            release.wait()
+            return FeedFetchResult((), None, None)
+
+        collector.fetch.side_effect = fetch
+        service = ArgusService(
+            config, self.db, {source.id: collector},
+            RuleSet.from_config(config.rules, config.ntfy.default_topic), None,
+        )
+        task = asyncio.create_task(service.run_forever())
+        try:
+            self.assertTrue(await asyncio.wait_for(asyncio.to_thread(entered.wait, 2), 3))
+            service.request_stop()
+            self.assertFalse(await asyncio.wait_for(task, 2))
+            self.assertEqual(0, self.db.status()["observations"])
+        finally:
+            release.set()
+            if not task.done():
+                service.request_stop()
+                await asyncio.wait_for(task, 2)
 
     async def test_worker_failure_marks_engine_failed(self):
         async def broken():

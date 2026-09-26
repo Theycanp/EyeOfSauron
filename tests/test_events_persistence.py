@@ -16,6 +16,7 @@ from argus.events import (
 from argus.models import FeedFetchResult
 from argus.digest import DigestBuilder
 from argus.event_pool import EventPoolProjector
+from argus.event_review import event_match_evidence
 from argus.manual_events import ManualEventSpec
 from argus.rules import RuleSet
 
@@ -72,6 +73,65 @@ class EventPersistenceTests(unittest.TestCase):
         self.assertEqual([claim.claim_key], [item.claim_key for item in self.database.list_event_claims("event-1")])
         self.assertEqual([evidence.stance], [item.stance for item in self.database.list_claim_evidence("claim-1")])
         self.assertEqual([timeline.text], [item.text for item in self.database.list_event_timeline("event-1")])
+        detail = event_match_evidence(self.database, "event-1")
+        self.assertEqual("event-1", detail["event"]["event_key"])
+        self.assertEqual("claim-1", detail["claims"][0]["claim_key"])
+        self.assertEqual(report.report_id, detail["claim_evidence"][0]["report_id"])
+        self.assertEqual(timeline.timeline_id, detail["timeline"][0]["timeline_id"])
+        self.assertFalse(any(detail["history_truncated"].values()))
+        self.assertEqual([], detail["notifications"])
+
+    def test_event_evidence_read_is_one_read_transaction(self) -> None:
+        self._event_report("event-1", "source-a", 1)
+        statements = []
+        self.database.connection.set_trace_callback(statements.append)
+        graph = self.database.read_event_evidence("event-1")
+        self.database.connection.set_trace_callback(None)
+        self.assertIsNotNone(graph)
+        self.assertEqual(1, sum(statement == "BEGIN" for statement in statements))
+        self.assertEqual(1, sum(statement == "COMMIT" for statement in statements))
+        self.assertNotIn("BEGIN IMMEDIATE", statements)
+        with self.database.unit_of_work():
+            self.assertIsNotNone(self.database.read_event_evidence("event-1"))
+
+    def test_event_evidence_bounds_timeline_and_excludes_other_event(self) -> None:
+        report = self._event_report("event-1", "source-a", 1)
+        other = self._second_event_report()
+        for number in range(202):
+            self.database.save_event_timeline(PersistedEventTimelineItem(
+                event_key="event-1", occurred_at=100 + number, kind="reported",
+                text=f"Update {number}", confidence=0.8, report_id=report.report_id,
+            ))
+        self.database.save_event_timeline(PersistedEventTimelineItem(
+            event_key="event-2", occurred_at=100, kind="reported",
+            text="Other event", confidence=0.8, report_id=other.report_id,
+        ))
+        graph = self.database.read_event_evidence("event-1")
+        assert graph is not None
+        self.assertEqual(200, len(graph.timeline))
+        self.assertTrue(graph.truncated["timeline"])
+        self.assertTrue(all(item.event_key == "event-1" for item in graph.timeline))
+        self.assertIsNone(self.database.read_event_evidence("missing"))
+
+    def test_event_evidence_exposes_only_linked_notification_metadata(self) -> None:
+        self._event_report("event-1", "source-a", 1)
+        self.database.connection.execute(
+            "INSERT INTO alerts(observation_id,rule_id,dedupe_key,topic,title,message,priority,confidence,"
+            "evidence_json,incident_key,tags_json,click_url,status,attempts,next_attempt_at,created_at) "
+            "VALUES (1,'rule','test-key','eos','Notification','private body',4,0.8,'[]','incident','[]',"
+            "'https://example.test/','delivered',1,100,100)"
+        )
+        self.database.connection.commit()
+        graph = self.database.read_event_evidence("event-1")
+        assert graph is not None
+        self.assertEqual(1, len(graph.notifications))
+        self.assertEqual("Notification", graph.notifications[0]["title"])
+        self.assertNotIn("message", graph.notifications[0])
+        self.assertNotIn("last_error", graph.notifications[0])
+        self._second_event_report()
+        other = self.database.read_event_evidence("event-2")
+        assert other is not None
+        self.assertEqual((), other.notifications)
 
     def _event_report(self, event_key: str, source_id: str, observation_id: int) -> PersistedEventReport:
         self.database.save_event(PersistedEvent(
