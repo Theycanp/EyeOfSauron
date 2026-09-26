@@ -7,16 +7,17 @@ import math
 import re
 import urllib.parse
 import urllib.request
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
-from .weather import ForecastHour, WeatherForecast, WeatherSubscription
+from .weather import ForecastHour, WeatherAirQuality, WeatherForecast, WeatherSubscription
 
 
 _FORECAST_ORIGIN = "https://api.open-meteo.com"
 _GEOCODE_ORIGIN = "https://geocoding-api.open-meteo.com"
 _MAX_BODY = 512_000
-_UTC_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+_LOCAL_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 
 
 class WeatherProviderError(RuntimeError):
@@ -68,11 +69,12 @@ class OpenMeteoProvider:
     def fetch(self, subscription: WeatherSubscription) -> WeatherForecast:
         coordinates = {"latitude": f"{subscription.latitude:.6f}",
                        "longitude": f"{subscription.longitude:.6f}",
-                       "timezone": "UTC", "forecast_days": "3"}
+                       "timezone": subscription.timezone, "forecast_days": "3"}
         payload = _request_json(_FORECAST_ORIGIN, "/v1/forecast", {
             **coordinates,
-            "current": "temperature_2m,weather_code",
+            "current": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m",
             "hourly": "temperature_2m,precipitation_probability,precipitation,wind_gusts_10m",
+            "daily": "sunrise,sunset",
         })
         hourly = payload.get("hourly")
         times = hourly.get("time") if isinstance(hourly, dict) else None
@@ -85,10 +87,10 @@ class OpenMeteoProvider:
         gusts = _series(hourly, "wind_gusts_10m", count)
         hours: list[ForecastHour] = []
         for index, raw_time in enumerate(times):
-            if not isinstance(raw_time, str) or not _UTC_TIME.fullmatch(raw_time):
+            if not isinstance(raw_time, str) or not _LOCAL_TIME.fullmatch(raw_time):
                 raise WeatherProviderError("weather provider hourly time is invalid")
             try:
-                at = int(datetime.fromisoformat(raw_time).replace(tzinfo=UTC).timestamp())
+                at = int(datetime.fromisoformat(raw_time).replace(tzinfo=ZoneInfo(subscription.timezone)).timestamp())
             except ValueError as exc:
                 raise WeatherProviderError("weather provider hourly time is invalid") from exc
             hours.append(ForecastHour(
@@ -104,18 +106,61 @@ class OpenMeteoProvider:
             raise WeatherProviderError("weather provider current conditions are missing")
         code = current.get("weather_code")
         raw_current_time = current.get("time")
-        if not isinstance(raw_current_time, str) or not _UTC_TIME.fullmatch(raw_current_time):
+        if not isinstance(raw_current_time, str) or not _LOCAL_TIME.fullmatch(raw_current_time):
             raise WeatherProviderError("weather provider current time is missing")
         try:
-            observed_at = int(datetime.fromisoformat(raw_current_time).replace(tzinfo=UTC).timestamp())
+            observed_at = int(datetime.fromisoformat(raw_current_time).replace(tzinfo=ZoneInfo(subscription.timezone)).timestamp())
         except ValueError as exc:
             raise WeatherProviderError("weather provider current time is invalid") from exc
+        daily = payload.get("daily")
+        sunrise = sunset = None
+        if isinstance(daily, dict):
+            dates = daily.get("time")
+            sunrises, sunsets = daily.get("sunrise"), daily.get("sunset")
+            if isinstance(dates, list) and isinstance(sunrises, list) and isinstance(sunsets, list):
+                local_date = datetime.fromtimestamp(observed_at, ZoneInfo(subscription.timezone)).date().isoformat()
+                for index, value in enumerate(dates):
+                    if value == local_date and index < len(sunrises) and index < len(sunsets):
+                        try:
+                            sunrise = int(datetime.fromisoformat(str(sunrises[index])).replace(
+                                tzinfo=ZoneInfo(subscription.timezone)).timestamp())
+                            sunset = int(datetime.fromisoformat(str(sunsets[index])).replace(
+                                tzinfo=ZoneInfo(subscription.timezone)).timestamp())
+                        except (TypeError, ValueError):
+                            sunrise = sunset = None
+                        break
         return WeatherForecast(
             observed_at=observed_at,
             temperature=_number(current.get("temperature_2m")),
             weather_code=code if type(code) is int else None,
             hours=tuple(hours),
+            humidity=_number(current.get("relative_humidity_2m")),
+            wind_speed=_number(current.get("wind_speed_10m")),
+            wind_direction=_number(current.get("wind_direction_10m")),
+            sunrise=sunrise,
+            sunset=sunset,
         )
+
+    def fetch_air_quality(self, subscription: WeatherSubscription) -> WeatherAirQuality:
+        payload = _request_json("https://air-quality-api.open-meteo.com", "/v1/air-quality", {
+            "latitude": f"{subscription.latitude:.6f}",
+            "longitude": f"{subscription.longitude:.6f}",
+            "timezone": subscription.timezone,
+            "forecast_days": "1",
+            "current": "pm10,pm2_5,european_aqi,us_aqi",
+        })
+        current = payload.get("current")
+        if not isinstance(current, dict) or not isinstance(current.get("time"), str):
+            raise WeatherProviderError("air quality current conditions are missing")
+        try:
+            observed_at = int(datetime.fromisoformat(str(current["time"])).replace(
+                tzinfo=ZoneInfo(subscription.timezone)).timestamp())
+        except ValueError as exc:
+            raise WeatherProviderError("air quality current time is invalid") from exc
+        values = [_number(current.get(key)) for key in ("pm2_5", "pm10", "european_aqi", "us_aqi")]
+        if not any(value is not None for value in values):
+            raise WeatherProviderError("air quality values are missing")
+        return WeatherAirQuality(observed_at, values[0], values[1], values[2], values[3])
 
     def search_places(self, query: str) -> list[dict[str, Any]]:
         if not 2 <= len(query.strip()) <= 80:

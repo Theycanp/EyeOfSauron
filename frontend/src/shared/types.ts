@@ -29,7 +29,16 @@ export interface WeatherStatus {
     rain_probability: number
     wind_gust_kmh: number
     temperature_now: number | null
+    humidity?: number | null
+    wind_speed_kmh?: number | null
+    wind_direction_name?: string
+    sunrise?: number | null
+    sunset?: number | null
+    air_quality?: { observed_at: number; pm2_5: number | null; pm10: number | null; european_aqi: number | null; us_aqi: number | null } | null
+    astronomy?: { date: string; sunrise: number | null; sunset: number | null; moonrise: number | null; moonset: number | null; moon_phase: string | null; moon_illumination: number | null; solar_elevation: number | null; solar_azimuth: number | null } | null
+    calendar?: { lunar: string; festivals: string }
     observed_at: number
+    is_today: boolean
   } | null
   last_success_at: number | null
   last_daily_date: string | null

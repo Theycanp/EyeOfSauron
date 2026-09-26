@@ -57,7 +57,11 @@ For schema 23 and later, verify the local-weather subscription's coordinates,
 a fresh validated Open-Meteo poll, and the weather page's read/write permissions.
 For QWeather, provision a separate Ed25519 private key readable only by the
 service group, configure the five environment variables in `WEATHER.md` through
-`/etc/argus/qweather.env`, and verify both endpoint success timestamps. A new
+`/etc/argus/qweather.env`, and verify minute, warning and astronomy timestamps.
+For schema 24, confirm a current air-quality estimate and local-date-matched
+sun/moon data appear on the Weather page; missing optional data must not block
+the forecast or official warnings. The `lunardate` runtime dependency is pinned
+in `requirements/runtime.txt`. A new
 installation must obtain its own credentials; no provider key is bundled.
 No weather alarm needs to be sent to production for this check; the transition
 and dedupe scenarios are covered in the isolated tests documented in `WEATHER.md`.

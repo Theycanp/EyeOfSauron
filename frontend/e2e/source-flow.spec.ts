@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 
 async function mockAdminApi(page: Page) {
   let authenticated = false
+  let weatherHasForecast = true
   let weatherSubscription = {
     id: 'home', label: '北京邮电大学沙河校区', latitude: 40.1561163,
     longitude: 116.2835626, timezone: 'Asia/Shanghai', daily_time: '07:00',
@@ -42,10 +43,22 @@ async function mockAdminApi(page: Page) {
       if (route.request().method() === 'POST') {
         const submitted = route.request().postDataJSON() as Partial<typeof weatherSubscription>
         weatherSubscription = { ...weatherSubscription, ...submitted, revision: weatherSubscription.revision + 1 }
+        weatherHasForecast = false
         await route.fulfill({ json: { subscription: weatherSubscription, restart_required: false } })
       } else {
-        await route.fulfill({ json: { subscription: weatherSubscription, latest: null,
-          last_success_at: null, last_daily_date: null, last_error: null,
+        await route.fulfill({ json: { subscription: weatherSubscription, latest: weatherHasForecast ? {
+          condition: '多云', low: 16, high: 24, rain_mm: 0, rain_probability: 20,
+          wind_gust_kmh: 32, temperature_now: 20, humidity: 58,
+          wind_speed_kmh: 12, wind_direction_name: '东南',
+          sunrise: 1790373600, sunset: 1790416800,
+          air_quality: { observed_at: now, pm2_5: 12, pm10: 20, european_aqi: 27, us_aqi: 39 },
+          astronomy: { date: '20260926', sunrise: 1790373600, sunset: 1790416800,
+            moonrise: 1790413200, moonset: 1790370000, moon_phase: '盈凸月',
+            moon_illumination: 95, solar_elevation: 42.5, solar_azimuth: 230 },
+          calendar: { lunar: '农历2026年8月16日', festivals: '' },
+          observed_at: now, is_today: true,
+        } : null,
+          last_success_at: now, last_daily_date: null, last_error: null,
           consecutive_failures: 0, rain_expected: null } })
       }
       return
@@ -467,6 +480,10 @@ test('weather location and schedule are usable on desktop and mobile', async ({ 
   if (await menu.isVisible()) await menu.click()
   await page.getByRole('button', { name: '天气', exact: true }).click()
   await expect(page.getByRole('heading', { name: '本地天气' })).toBeVisible()
+  await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('欧洲 AQI 27')
+  await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('月升 / 月落')
+  await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('太阳高度角')
+  await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('农历2026年8月16日')
   await page.getByLabel('搜索城市或地区').fill('天安门')
   await page.getByRole('button', { name: '搜索地点' }).click()
   await page.getByRole('option', { name: /北京市天安门/ }).click()

@@ -87,6 +87,16 @@ revision; it is not rewritten in database-backed operation. Current settings
 are available through the management API, not that legacy file.
 Rollback creates and activates a new revision instead of mutating history.
 
+Migration cost is an implementation cost, not a reason to weaken a domain
+boundary. New durable facts belong in explicit typed repository contracts and
+versioned schema, even when adding a column or table requires migration and
+release work. Do not hide unrelated facts in a convenient JSON state blob,
+duplicate state across adapters, or make a provider-specific payload the API
+contract merely to avoid an upgrade. Evaluate data ownership, forward migration,
+old-record behavior, backup/rollback compatibility, and API readers together.
+If a correct migration cannot be safely completed in the release, defer the
+feature rather than ship a knowingly misleading data model.
+
 Argus compares its applied revision with the desired SQLite revision. A change
 causes a controlled exit with status 75; after its restart delay systemd starts a fresh
 process, which validates and applies the active revision before announcing

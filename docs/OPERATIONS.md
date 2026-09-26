@@ -36,14 +36,18 @@ require login. `POST /api/weather` needs `settings:write`, same-origin, CSRF,
 and the current weather revision. The two notification toggles can be disabled
 independently without disabling collection. The default location and exact
 alert rules and official-warning coverage limits are in
-`WEATHER.md`. After a schema-23 rollout, verify a real `weather_poll_succeeded`
+`WEATHER.md`. After a schema-24 rollout, verify a real `weather_poll_succeeded`
 log line and the Weather page's success timestamp; do not simulate a severe
 weather warning on the production ntfy topic.
-When QWeather is configured, also verify independent `minutely` and `alerts`
+When QWeather is configured, also verify independent `minutely`, `alerts` and
+astronomy
 success timestamps and zero unexplained failures. Keep JWT identifiers and the
 private-key path in `/etc/argus/qweather.env` (root:argus 0640), loaded only by
 the daemon. See `WEATHER.md` for variable names and `RELEASES.md` for selecting
 the locked, root-owned runtime using `ARGUS_PYTHON`.
+On explicit operator request, `argus weather-test` queues one labelled current
+weather snapshot through the normal outbox. It refuses missing or stale forecasts
+and does not alter the daily/rain alert state; verify delivery in outbox status.
 
 ## Management backend
 

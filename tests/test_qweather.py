@@ -100,6 +100,30 @@ class QWeatherTests(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=True):
             self.assertIsNone(QWeatherProvider.from_environment())
 
+    def test_astronomy_parses_sun_moon_phase_and_angles(self) -> None:
+        payloads = [
+            {"code": "200", "sunrise": "2026-09-26T06:06+08:00", "sunset": "2026-09-26T18:06+08:00"},
+            {"code": "200", "moonrise": "2026-09-26T17:41+08:00", "moonset": "2026-09-26T05:22+08:00",
+             "moonPhase": [{"fxTime": "2026-09-26T12:00+08:00", "name": "满月", "illumination": "99"}]},
+            {"code": "200", "solarElevationAngle": "-2.54", "solarAzimuthAngle": "270.40"},
+        ]
+        with patch.object(self.provider, "_request", side_effect=payloads) as request:
+            with patch("argus.qweather.datetime") as clock:
+                from datetime import datetime
+                from zoneinfo import ZoneInfo
+                clock.now.return_value = datetime(2026, 9, 26, 18, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+                result = self.provider.fetch_astronomy(self.subscription, "20260926")
+        self.assertEqual("满月", result.moon_phase)
+        self.assertEqual(99, result.moon_illumination)
+        self.assertEqual(-2.54, result.solar_elevation)
+        self.assertIn("time=1815", request.call_args.args[0])
+        with patch.object(self.provider, "_request", side_effect=[*payloads[:2], QWeatherError("angle unavailable")]):
+            with patch("argus.qweather.datetime") as clock:
+                clock.now.return_value = datetime(2026, 9, 26, 18, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+                without_angle = self.provider.fetch_astronomy(self.subscription, "20260926")
+        self.assertIsNone(without_angle.solar_elevation)
+        self.assertEqual("满月", without_angle.moon_phase)
+
 
 if __name__ == "__main__":
     unittest.main()

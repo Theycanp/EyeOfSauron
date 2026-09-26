@@ -9,6 +9,8 @@ from datetime import datetime
 from typing import Any, Mapping, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .calendar_zh import calendar_context
+
 
 DEFAULT_LOCATION = ("北京邮电大学沙河校区", 40.1561163, 116.2835626)
 EXAMPLE_LOCATION = ("北京市天安门", 39.905, 116.397)
@@ -48,6 +50,33 @@ class WeatherForecast:
     temperature: float | None
     weather_code: int | None
     hours: tuple[ForecastHour, ...]
+    humidity: float | None = None
+    wind_speed: float | None = None
+    wind_direction: float | None = None
+    sunrise: int | None = None
+    sunset: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WeatherAirQuality:
+    observed_at: int
+    pm2_5: float | None
+    pm10: float | None
+    european_aqi: float | None
+    us_aqi: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class WeatherAstronomy:
+    date: str
+    sunrise: int | None
+    sunset: int | None
+    moonrise: int | None
+    moonset: int | None
+    moon_phase: str | None
+    moon_illumination: float | None
+    solar_elevation: float | None = None
+    solar_azimuth: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,15 +138,21 @@ class WeatherRepository(Protocol):
     ) -> int: ...
     def record_qweather_failure(self, subscription: WeatherSubscription, kind: str,
                                 error: BaseException, now: int, *, topic: str, click_url: str) -> None: ...
+    def record_weather_air_quality(self, subscription: WeatherSubscription,
+                                   air_quality: WeatherAirQuality, *, now: int) -> None: ...
+    def record_weather_astronomy(self, subscription: WeatherSubscription,
+                                 astronomy: WeatherAstronomy, *, now: int) -> None: ...
 
 
 class WeatherProvider(Protocol):
     def fetch(self, subscription: WeatherSubscription) -> WeatherForecast: ...
+    def fetch_air_quality(self, subscription: WeatherSubscription) -> WeatherAirQuality: ...
 
 
 class LocalWeatherProvider(Protocol):
     def fetch_minutely(self, subscription: WeatherSubscription) -> WeatherNowcast: ...
     def fetch_alerts(self, subscription: WeatherSubscription) -> tuple[OfficialWeatherAlert, ...]: ...
+    def fetch_astronomy(self, subscription: WeatherSubscription, date: str) -> WeatherAstronomy: ...
 
 
 def nowcast_signal(nowcast: WeatherNowcast, now: int) -> tuple[str, int] | None:
@@ -151,6 +186,13 @@ def validate_forecast(forecast: WeatherForecast, now: int) -> None:
             or not -100 <= forecast.temperature <= 70
             or forecast.weather_code is None or not 0 <= forecast.weather_code <= 99):
         raise WeatherError("weather provider current conditions are invalid")
+    for value, low, high, label in (
+        (forecast.humidity, 0, 100, "humidity"),
+        (forecast.wind_speed, 0, 400, "wind speed"),
+        (forecast.wind_direction, 0, 360, "wind direction"),
+    ):
+        if value is not None and (not math.isfinite(value) or not low <= value <= high):
+            raise WeatherError(f"weather provider current {label} is invalid")
     future = [hour for hour in forecast.hours if hour.at >= now]
     if not future or future[0].at > now + 3600 or future[-1].at < now + 24 * 3600:
         raise WeatherError("weather provider forecast does not cover the next day")
@@ -236,14 +278,71 @@ def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForeca
     low = min(temperatures) if temperatures else None
     high = max(temperatures) if temperatures else None
     temp_range = f"{low:.0f}~{high:.0f}℃" if low is not None and high is not None else "温度暂无数据"
-    message = (f"{subscription.label}：{weather_description(forecast.weather_code)}，{temp_range}。"
+    calendar = calendar_context(local_now.date())
+    humidity = f"相对湿度 {forecast.humidity:.0f}%" if forecast.humidity is not None else "相对湿度暂无数据"
+    wind = (f"风速 {forecast.wind_speed:.0f} km/h、风向 {wind_direction_name(forecast.wind_direction)}"
+            if forecast.wind_speed is not None and forecast.wind_direction is not None else "风况暂无数据")
+    sun = (f"日出 {format_clock(forecast.sunrise, subscription.timezone)}、日落 "
+           f"{format_clock(forecast.sunset, subscription.timezone)}"
+           if forecast.sunrise and forecast.sunset else "日出日落暂无数据")
+    message = (f"{subscription.label}：{weather_description(forecast.weather_code)}，当前 {forecast.temperature:.0f}℃，{temp_range}。"
                f"今日剩余时段预计降水 {rain:.1f} mm，最高降雨概率 {probability:.0f}%，"
-               f"阵风最高 {gust:.0f} km/h。\n数据：Open-Meteo 预报，非官方气象预警。")
+               f"阵风最高 {gust:.0f} km/h；{humidity}；{wind}。\n"
+               f"{sun}。\n"
+               f"阳历 {local_now.date().isoformat()}，{calendar['lunar']}。{calendar['festivals']}"
+               "\n数据：Open-Meteo 预报，非官方气象预警。")
     return message, {"condition": weather_description(forecast.weather_code),
                      "low": low, "high": high, "rain_mm": round(rain, 1),
                      "rain_probability": round(probability), "wind_gust_kmh": round(gust),
                      "temperature_now": forecast.temperature,
+                     "humidity": forecast.humidity,
+                     "wind_speed_kmh": forecast.wind_speed,
+                     "wind_direction": forecast.wind_direction,
+                     "wind_direction_name": wind_direction_name(forecast.wind_direction),
+                     "sunrise": forecast.sunrise,
+                     "sunset": forecast.sunset,
+                     "calendar": calendar,
                      "observed_at": forecast.observed_at}
+
+
+def format_clock(timestamp: int | None, timezone: str) -> str:
+    if timestamp is None:
+        return "—"
+    return datetime.fromtimestamp(timestamp, ZoneInfo(timezone)).strftime("%H:%M")
+
+
+def wind_direction_name(direction: float | None) -> str:
+    if direction is None or not math.isfinite(direction):
+        return "—"
+    labels = ("北", "东北", "东", "东南", "南", "西南", "西", "西北")
+    return labels[int((direction % 360 + 22.5) // 45) % 8]
+
+
+def air_quality_text(value: WeatherAirQuality | None) -> str:
+    if value is None:
+        return "空气质量暂无数据"
+    parts = ["空气质量（模型估计，非站点实测）"]
+    if value.european_aqi is not None:
+        parts.append(f"欧洲 AQI {value.european_aqi:.0f}")
+    if value.us_aqi is not None:
+        parts.append(f"美国 AQI {value.us_aqi:.0f}")
+    if value.pm2_5 is not None:
+        parts.append(f"PM2.5 {value.pm2_5:.1f} μg/m³")
+    if value.pm10 is not None:
+        parts.append(f"PM10 {value.pm10:.1f} μg/m³")
+    return "，".join(parts) + "（Open-Meteo Air Quality）"
+
+
+def astronomy_text(value: Mapping[str, Any] | None, timezone: str) -> str:
+    if not isinstance(value, Mapping):
+        return "月升月落暂无数据"
+    phase = value.get("moon_phase") or "月相暂无数据"
+    illumination = value.get("moon_illumination")
+    light = f"，照明 {float(illumination):.0f}%" if isinstance(illumination, (int, float)) else ""
+    angle = value.get("solar_elevation")
+    solar = f"，太阳高度角 {float(angle):.1f}°" if isinstance(angle, (int, float)) else ""
+    return (f"月升 {format_clock(value.get('moonrise'), timezone)}、月落 "
+            f"{format_clock(value.get('moonset'), timezone)}，月相 {phase}{light}{solar}")
 
 
 def weather_signals(forecast: WeatherForecast, now: int) -> tuple[WeatherSignal, ...]:
