@@ -224,13 +224,16 @@ class QWeatherProvider:
                 illumination = None
         local_now = datetime.now(ZoneInfo(subscription.timezone))
         offset = local_now.utcoffset() or UTC.utcoffset(local_now)
-        tz = f"{int(offset.total_seconds() // 3600):+03d}00"
+        offset_minutes = int(offset.total_seconds() // 60)
+        tz = f"{abs(offset_minutes) // 60:02d}{abs(offset_minutes) % 60:02d}"
+        if offset_minutes < 0:
+            tz = "-" + tz
         angle_payload: dict[str, Any] = {}
         if local_now.strftime("%Y%m%d") == date:
             try:
                 angle_payload = self._request(
                     f"/v7/astronomy/solar-elevation-angle?location={location}&date={date}"
-                    f"&time={local_now:%H%M}&tz={tz}"
+                    f"&time={local_now:%H%M}&tz={tz}&alt=0"
                 )
             except QWeatherError:
                 pass  # Optional angle data must not hide valid sun/moon times.

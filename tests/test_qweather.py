@@ -117,6 +117,7 @@ class QWeatherTests(unittest.TestCase):
         self.assertEqual(99, result.moon_illumination)
         self.assertEqual(-2.54, result.solar_elevation)
         self.assertIn("time=1815", request.call_args.args[0])
+        self.assertIn("tz=0800&alt=0", request.call_args.args[0])
         with patch.object(self.provider, "_request", side_effect=[*payloads[:2], QWeatherError("angle unavailable")]):
             with patch("argus.qweather.datetime") as clock:
                 clock.now.return_value = datetime(2026, 9, 26, 18, 15, tzinfo=ZoneInfo("Asia/Shanghai"))

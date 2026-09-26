@@ -5,6 +5,14 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.24.2] - 2026-09-26
+
+### Fixed
+
+- Supply the required altitude parameter and correctly formatted timezone
+  offset to QWeather's solar-angle endpoint. `alt=0` is an explicit sea-level
+  reference, not a measured elevation for the subscribed location.
+
 ## [0.24.1] - 2026-09-26
 
 ### Added

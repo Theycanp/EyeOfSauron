@@ -148,7 +148,7 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
       <div><span>空气（模型估计）</span><strong>{latest.air_quality?.european_aqi != null ? `欧洲 AQI ${Math.round(latest.air_quality.european_aqi)}` : latest.air_quality?.us_aqi != null ? `美国 AQI ${Math.round(latest.air_quality.us_aqi)}` : '—'}<br />PM2.5 {latest.air_quality?.pm2_5 ?? '—'} · PM10 {latest.air_quality?.pm10 ?? '—'} μg/m³</strong></div>
       <div><Moon size={16} /><span>月升 / 月落</span><strong>{localClock(latest.astronomy?.moonrise, draft.timezone)} / {localClock(latest.astronomy?.moonset, draft.timezone)}</strong></div>
       <div><Moon size={16} /><span>月相</span><strong>{latest.astronomy?.moon_phase || '—'}{latest.astronomy?.moon_illumination != null ? ` · 照明 ${latest.astronomy.moon_illumination}%` : ''}</strong></div>
-      <div><Sun size={16} /><span>太阳高度角</span><strong>{latest.astronomy?.solar_elevation != null ? `${latest.astronomy.solar_elevation.toFixed(1)}°` : '—'}</strong></div>
+      <div><Sun size={16} /><span>太阳角度</span><strong>{latest.astronomy?.solar_elevation != null ? `高度 ${latest.astronomy.solar_elevation.toFixed(1)}° · 方位 ${latest.astronomy.solar_azimuth != null ? `${latest.astronomy.solar_azimuth.toFixed(1)}°` : '—'} · ${localClock(latest.astronomy.updated_at, draft.timezone)} 查询` : '—'}</strong></div>
       <div><span>日期</span><strong>{localDate(latest.observed_at, draft.timezone)} · {latest.calendar?.lunar || '—'} {latest.calendar?.festivals || ''}</strong></div>
     </section>}
 
