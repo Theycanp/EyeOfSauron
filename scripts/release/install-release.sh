@@ -176,10 +176,7 @@ current_link="$install_root/.current.${release_id}.$$"
 rm -f "$current_link"
 ln -s "$target" "$current_link"
 mv -Tf "$current_link" "$install_root/current"
-for unit in "$target"/deploy/*.service "$target"/deploy/*.timer; do
-  [[ -f "$unit" ]] || continue
-  install -m 0644 -o root -g root "$unit" "$release_unit_root/"
-done
+install_release_units "$target"
 release_systemctl daemon-reload
 release_systemctl start argus argus-admin
 

@@ -21,6 +21,7 @@ from .manual_events import ManualEventSpec
 from .reminders import ReminderSpec
 from .rules import RuleSet
 from .source_health import SourceHealthRepository
+from .weather import WeatherRepository
 
 
 class RevisionConflictError(RuntimeError):
@@ -65,7 +66,7 @@ class SQLiteUnitOfWork:
 class RuntimeRepository(
     AnalysisRepository, DigestInputRepository, DigestRepository, DigestNotificationRepository,
     DigestRetryRepository, DigestRunRepository, EventRepository, EventPoolRepository,
-    EventWorkspaceRepository, EventFactWorkRepository, Protocol
+    EventWorkspaceRepository, EventFactWorkRepository, WeatherRepository, Protocol
 ):
     """Persistence port used by the always-on application service."""
 
@@ -235,7 +236,8 @@ class PromptRepository(Protocol):
 class ControlPlaneRepository(
     ManagedConfigRepository, PromptRepository, DigestReaderRepository,
     EventPageRepository, DigestRunRepository,
-    EventRepository, EventEvidenceRepository, EventWorkspaceRepository, SourceHealthRepository, Protocol
+    EventRepository, EventEvidenceRepository, EventWorkspaceRepository, SourceHealthRepository,
+    WeatherRepository, Protocol
 ):
     """Narrow persistence port used by the local administration API."""
 

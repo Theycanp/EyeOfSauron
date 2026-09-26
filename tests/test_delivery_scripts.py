@@ -214,7 +214,7 @@ class ArchiveSafetyTests(unittest.TestCase):
     def test_preflight_does_not_mutate_prepared_release(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for directory in ("src/argus", "scripts", "deploy"):
+            for directory in ("src/argus", "scripts", "deploy", "requirements"):
                 shutil.copytree(
                     ROOT / directory, root / directory,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
@@ -243,6 +243,16 @@ class ArchiveSafetyTests(unittest.TestCase):
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             after = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
             self.assertEqual(before, after)
+            requirements = root / "requirements/runtime.txt"
+            original_requirements = requirements.read_text()
+            requirements.write_text("cryptography==0.0.0\n")
+            result = subprocess.run(
+                ["bash", str(root / "scripts/release/preflight.sh"), str(root), str(config)],
+                text=True, capture_output=True, timeout=30, env=preflight_env,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("runtime dependency cryptography", result.stderr)
+            requirements.write_text(original_requirements)
             manifest_path = root / "RELEASE.json"
             manifest = json.loads(manifest_path.read_text())
             manifest["license"] = "MIT"

@@ -2,6 +2,11 @@ import { expect, test, type Page } from '@playwright/test'
 
 async function mockAdminApi(page: Page) {
   let authenticated = false
+  let weatherSubscription = {
+    id: 'home', label: '北京邮电大学沙河校区', latitude: 40.1561163,
+    longitude: 116.2835626, timezone: 'Asia/Shanghai', daily_time: '07:00',
+    daily_enabled: true, alerts_enabled: true, revision: 1,
+  }
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     const now = Math.floor(Date.now() / 1000)
@@ -27,6 +32,22 @@ async function mockAdminApi(page: Page) {
     if (path === '/api/auth/logout') {
       authenticated = false
       await route.fulfill({ json: { logged_out: true } })
+      return
+    }
+    if (path === '/api/weather/places') {
+      await route.fulfill({ json: { places: [{ label: '北京市天安门', latitude: 39.905, longitude: 116.397, timezone: 'Asia/Shanghai' }] } })
+      return
+    }
+    if (path === '/api/weather') {
+      if (route.request().method() === 'POST') {
+        const submitted = route.request().postDataJSON() as Partial<typeof weatherSubscription>
+        weatherSubscription = { ...weatherSubscription, ...submitted, revision: weatherSubscription.revision + 1 }
+        await route.fulfill({ json: { subscription: weatherSubscription, restart_required: false } })
+      } else {
+        await route.fulfill({ json: { subscription: weatherSubscription, latest: null,
+          last_success_at: null, last_daily_date: null, last_error: null,
+          consecutive_failures: 0, rain_expected: null } })
+      }
       return
     }
     if (path === '/api/alerts/17') {
@@ -437,4 +458,23 @@ test('dead letters can be retried and pending delivery can be cancelled', async 
   await page.getByRole('button', { name: '取消发送', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '取消发送', exact: true }).click()
   await expect(page.getByText('当前没有等待发送的通知')).toBeVisible()
+})
+
+test('weather location and schedule are usable on desktop and mobile', async ({ page }, testInfo) => {
+  await mockAdminApi(page)
+  await login(page)
+  const menu = page.getByRole('button', { name: '打开导航' })
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('button', { name: '天气', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '本地天气' })).toBeVisible()
+  await page.getByLabel('搜索城市或地区').fill('天安门')
+  await page.getByRole('button', { name: '搜索地点' }).click()
+  await page.getByRole('option', { name: /北京市天安门/ }).click()
+  await expect(page.getByLabel('地点名称')).toHaveValue('北京市天安门')
+  await page.getByLabel('每天推送时间').fill('08:00')
+  await page.getByRole('button', { name: '保存天气订阅' }).click()
+  await expect(page.getByText('天气订阅已更新，下次查询自动使用新设置。')).toBeVisible()
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', await page.locator('body').evaluate((node) => node.clientWidth))
+  await page.evaluate(() => window.scrollTo(0, 0))
+  await page.screenshot({ path: testInfo.outputPath('weather.png'), fullPage: true })
 })

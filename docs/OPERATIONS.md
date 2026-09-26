@@ -29,6 +29,22 @@ The ntfy topic is `eos`. Subscribe to it on the existing ntfy server as
 the existing `joker` account. The service uses a separate write-only ntfy user;
 its token cannot subscribe or access other topics.
 
+Local weather is managed at `/#/weather` on the same public admin origin.
+`GET /api/weather` returns the subscription, last good forecast, last success,
+and failure count. `GET /api/weather/places?q=...` searches locations; both
+require login. `POST /api/weather` needs `settings:write`, same-origin, CSRF,
+and the current weather revision. The two notification toggles can be disabled
+independently without disabling collection. The default location and exact
+alert rules and official-warning coverage limits are in
+`WEATHER.md`. After a schema-23 rollout, verify a real `weather_poll_succeeded`
+log line and the Weather page's success timestamp; do not simulate a severe
+weather warning on the production ntfy topic.
+When QWeather is configured, also verify independent `minutely` and `alerts`
+success timestamps and zero unexplained failures. Keep JWT identifiers and the
+private-key path in `/etc/argus/qweather.env` (root:argus 0640), loaded only by
+the daemon. See `WEATHER.md` for variable names and `RELEASES.md` for selecting
+the locked, root-owned runtime using `ARGUS_PYTHON`.
+
 ## Management backend
 
 Install the unit from `deploy/argus-admin.service`, then check that `[admin]` is

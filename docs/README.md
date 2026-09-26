@@ -23,6 +23,8 @@ Start here:
    and production-acceptance checklist for every substantive update.
 11. `ROADMAP.md` — current production findings, staged improvements, ownership
     boundaries, and acceptance criteria.
+12. `WEATHER.md` — local-weather source research, forecast validation, polling,
+    notification state, operational limits, and official-warning gaps.
 
 Reference documents:
 

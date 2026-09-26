@@ -32,6 +32,8 @@ from .digest_operations import digest_run_state
 from .event_identity import EventOccurrenceIdentity, identify_semantic_event
 from .event_fact_projection import EventFactWorkItem, SQLiteEventFacts
 from .event_facts import EventFactCandidate
+from .sqlite_weather import SQLiteWeather
+from .weather import OfficialWeatherAlert, WeatherForecast, WeatherNowcast, WeatherSubscription
 from .events import (
     EventEvidenceGraph,
     EventListItem,
@@ -60,7 +62,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 
 _DIGEST_PROVIDER_TRACE_FIELDS = frozenset({
@@ -1468,6 +1470,87 @@ class Database:
                     )
                 """)
                 self.connection.execute("PRAGMA user_version=22")
+            version = 22
+        if version < 23:
+            with self.unit_of_work():
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS weather_subscriptions (
+                        id TEXT PRIMARY KEY,
+                        label TEXT NOT NULL,
+                        latitude REAL NOT NULL,
+                        longitude REAL NOT NULL,
+                        timezone TEXT NOT NULL,
+                        daily_time TEXT NOT NULL,
+                        daily_enabled INTEGER NOT NULL CHECK(daily_enabled IN (0,1)),
+                        alerts_enabled INTEGER NOT NULL CHECK(alerts_enabled IN (0,1)),
+                        revision INTEGER NOT NULL CHECK(revision > 0),
+                        updated_at INTEGER NOT NULL,
+                        updated_by TEXT NOT NULL
+                    )
+                """)
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS weather_state (
+                        subscription_id TEXT PRIMARY KEY REFERENCES weather_subscriptions(id) ON DELETE CASCADE,
+                        last_daily_date TEXT,
+                        hazard_state_json TEXT NOT NULL DEFAULT '{}',
+                        latest_json TEXT,
+                        last_success_at INTEGER,
+                        last_error TEXT,
+                        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                        outage_alerted INTEGER NOT NULL DEFAULT 0 CHECK(outage_alerted IN (0,1)),
+                        rain_state_date TEXT,
+                        rain_expected INTEGER CHECK(rain_expected IN (0,1))
+                    )
+                """)
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS weather_provider_state (
+                        subscription_id TEXT NOT NULL REFERENCES weather_subscriptions(id) ON DELETE CASCADE,
+                        kind TEXT NOT NULL CHECK(kind IN ('minutely','alerts')),
+                        state_json TEXT NOT NULL DEFAULT '{}',
+                        last_success_at INTEGER,
+                        last_error TEXT,
+                        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                        outage_alerted INTEGER NOT NULL DEFAULT 0 CHECK(outage_alerted IN (0,1)),
+                        PRIMARY KEY(subscription_id,kind)
+                    )
+                """)
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS weather_warning_messages (
+                        subscription_id TEXT NOT NULL REFERENCES weather_subscriptions(id) ON DELETE CASCADE,
+                        warning_id TEXT NOT NULL,
+                        root_id TEXT NOT NULL,
+                        priority INTEGER NOT NULL,
+                        level INTEGER NOT NULL,
+                        announced INTEGER NOT NULL CHECK(announced IN (0,1)),
+                        message_type TEXT NOT NULL,
+                        seen_at INTEGER NOT NULL,
+                        expires_at INTEGER NOT NULL,
+                        PRIMARY KEY(subscription_id,warning_id)
+                    )
+                """)
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS weather_subscription_audit (
+                        id INTEGER PRIMARY KEY,
+                        revision INTEGER NOT NULL,
+                        actor TEXT NOT NULL,
+                        settings_json TEXT NOT NULL,
+                        created_at INTEGER NOT NULL
+                    )
+                """)
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO weather_subscriptions(id,label,latitude,longitude,timezone,"
+                    "daily_time,daily_enabled,alerts_enabled,revision,updated_at,updated_by) "
+                    "VALUES('home','北京邮电大学沙河校区',40.1561163,116.2835626,"
+                    "'Asia/Shanghai','07:00',1,1,1,0,'system')"
+                )
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO weather_state(subscription_id) VALUES('home')"
+                )
+                self.connection.executemany(
+                    "INSERT OR IGNORE INTO weather_provider_state(subscription_id,kind) VALUES('home',?)",
+                    (("minutely",), ("alerts",)),
+                )
+                self.connection.execute("PRAGMA user_version=23")
 
     def record_digest_preparation_failure(
         self, digest_key: str, *, stage: str, error: BaseException | str, now: int,
@@ -4750,6 +4833,57 @@ class Database:
         self, now: int, *, version: int, lease_seconds: int = 60,
     ) -> EventFactWorkItem | None:
         return SQLiteEventFacts(self).claim_event_fact_job(now, version=version, lease_seconds=lease_seconds)
+
+    def get_weather_subscription(self) -> WeatherSubscription:
+        return SQLiteWeather(self).get_weather_subscription()
+
+    def get_weather_status(self) -> dict[str, Any]:
+        return SQLiteWeather(self).get_weather_status()
+
+    def update_weather_subscription(
+        self, data: Mapping[str, Any], *, actor: str, now: int,
+    ) -> WeatherSubscription:
+        return SQLiteWeather(self).update_weather_subscription(data, actor=actor, now=now)
+
+    def record_weather_forecast(
+        self, subscription: WeatherSubscription, forecast: WeatherForecast,
+        *, now: int, topic: str, click_url: str,
+    ) -> int:
+        return SQLiteWeather(self).record_weather_forecast(
+            subscription, forecast, now=now, topic=topic, click_url=click_url,
+        )
+
+    def record_weather_failure(
+        self, subscription: WeatherSubscription, error: BaseException, now: int,
+        *, topic: str, click_url: str,
+    ) -> None:
+        SQLiteWeather(self).record_weather_failure(
+            subscription, error, now, topic=topic, click_url=click_url,
+        )
+
+    def record_weather_nowcast(
+        self, subscription: WeatherSubscription, nowcast: WeatherNowcast,
+        *, now: int, topic: str, click_url: str,
+    ) -> int:
+        return SQLiteWeather(self).record_weather_nowcast(
+            subscription, nowcast, now=now, topic=topic, click_url=click_url,
+        )
+
+    def record_official_weather_alerts(
+        self, subscription: WeatherSubscription, alerts: tuple[OfficialWeatherAlert, ...],
+        *, now: int, topic: str, click_url: str,
+    ) -> int:
+        return SQLiteWeather(self).record_official_weather_alerts(
+            subscription, alerts, now=now, topic=topic, click_url=click_url,
+        )
+
+    def record_qweather_failure(
+        self, subscription: WeatherSubscription, kind: str, error: BaseException, now: int,
+        *, topic: str, click_url: str,
+    ) -> None:
+        SQLiteWeather(self).record_qweather_failure(
+            subscription, kind, error, now, topic=topic, click_url=click_url,
+        )
 
     def complete_event_fact_job(
         self, work: EventFactWorkItem, facts: Sequence[EventFactCandidate], now: int,

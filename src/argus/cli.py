@@ -23,6 +23,8 @@ from .model_analyzers import (
     OpenAICompatibleAnalyzer,
 )
 from .notifier import DEFAULT_NOTIFIER_REGISTRY, NotifyError
+from .open_meteo import OpenMeteoProvider
+from .qweather import QWeatherProvider
 from .prompts import PromptTemplate
 from .rules import RuleSet
 from .service import AlreadyRunningError, ProcessLock, ArgusService
@@ -181,6 +183,8 @@ def _build_service(
         analysis_orchestrator=analysis_orchestrator,
         digest_scheduler=digest_scheduler,
         content_fetcher=PublicDocumentFetcher(),
+        weather_provider=OpenMeteoProvider(),
+        local_weather_provider=QWeatherProvider.from_environment(),
     )
 
 

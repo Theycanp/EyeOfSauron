@@ -27,6 +27,7 @@ Major table groups include:
   and consecutive failure state;
 - stable events, parallel source reports, claims, claim evidence, and timeline
   items.
+- local weather subscription, durable forecast/alert state, and settings audit.
 
 Eligible `digest` and `immediate` observations are continuously projected into
 the event tables. The projector works in small batches and compares each new
@@ -48,7 +49,10 @@ history and provider diagnostics. Release metadata records the required schema.
 
 A code rollback that cannot read the current schema must restore the matching
 pre-release backup; changing only the `current` symlink is unsafe in that case.
-Migration tests construct older schemas and verify upgrade behavior.
+Schema 23 adds the local weather tables and seeds the Shahe campus subscription;
+it does not add a weather feed to the news-source catalog. Migration tests
+construct older schemas and verify upgrade behavior. See `WEATHER.md` for the
+weather state machine and source limitations.
 
 ## Retention and backup
 

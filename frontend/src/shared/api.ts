@@ -29,6 +29,9 @@ import type {
   EventRepairRequest,
   EventRepairPreview,
   EventQuality,
+  WeatherPlace,
+  WeatherStatus,
+  WeatherSubscription,
 } from './types'
 
 type ApiErrorPayload = {
@@ -172,6 +175,13 @@ export class AdminApi {
     return this.request(`/api/users/${id}/revoke-sessions`, { method: 'POST', body: '{}' })
   }
   reminders(): Promise<ReminderResponse> { return this.request('/api/reminders') }
+  weather(): Promise<WeatherStatus> { return this.request('/api/weather') }
+  weatherPlaces(query: string): Promise<{ places: WeatherPlace[] }> {
+    return this.request(`/api/weather/places?q=${encodeURIComponent(query)}`, {}, 20_000)
+  }
+  saveWeather(subscription: Omit<WeatherSubscription, 'id'>): Promise<{ subscription: WeatherSubscription }> {
+    return this.request('/api/weather', { method: 'POST', body: JSON.stringify(subscription) })
+  }
   revisions(): Promise<RevisionResponse> { return this.request('/api/revisions') }
   incidents(): Promise<IncidentResponse> { return this.request('/api/incidents') }
   alert(id: number): Promise<AlertDetailResponse> { return this.request(`/api/alerts/${id}`) }

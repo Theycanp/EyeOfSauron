@@ -5,6 +5,7 @@ release_units=(argus.service argus-admin.service argus-heartbeat.service argus-h
 
 release_unit_root=/etc/systemd/system
 release_service_user=argus
+release_python=${ARGUS_PYTHON:-/usr/bin/python3}
 release_drill_root=${EOS_RELEASE_DRILL_ROOT:-}
 
 configure_release_environment() {
@@ -52,6 +53,26 @@ release_health_gate() {
   else
     "$target/scripts/operations/health-gate.sh" --wait-seconds 120
   fi
+}
+
+install_release_units() {
+  local target=$1 unit
+  [[ "$release_python" =~ ^/[A-Za-z0-9_./-]+$ && -x "$release_python" ]] || {
+    echo "release Python must be an executable absolute path without shell metacharacters" >&2
+    return 1
+  }
+  for unit in "$target"/deploy/*.service "$target"/deploy/*.timer; do
+    [[ -f "$unit" ]] || continue
+    if [[ "$unit" == *.service ]]; then
+      sed -e "s#/usr/bin/python3#$release_python#g" \
+          -e "/^\[Service\]$/a Environment=ARGUS_PYTHON=$release_python" \
+          "$unit" >"$release_unit_root/$(basename "$unit")"
+      chown root:root "$release_unit_root/$(basename "$unit")"
+      chmod 0644 "$release_unit_root/$(basename "$unit")"
+    else
+      install -m 0644 -o root -g root "$unit" "$release_unit_root/"
+    fi
+  done
 }
 
 snapshot_units() {

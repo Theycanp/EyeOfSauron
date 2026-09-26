@@ -4,6 +4,7 @@ set -euo pipefail
 install_root=${EOS_INSTALL_ROOT:-/opt/eyeofsauron}
 config_path=${ARGUS_CONFIG:-/etc/argus/config.toml}
 service_user=${ARGUS_SERVICE_USER:-argus}
+python_bin=${ARGUS_PYTHON:-/usr/bin/python3}
 wait_seconds=0
 source_age_multiplier=4
 minimum_source_age=300
@@ -47,10 +48,10 @@ while :; do
     last_error="argus.service is not active"
   elif ! timeout --kill-after=5 20 setpriv --reuid="$service_user" --regid="$service_user" --init-groups env \
       PYTHONPATH="$current_root/src" PYTHONDONTWRITEBYTECODE=1 \
-      /usr/bin/python3 -m argus --config "$config_path" status --json >"$status_file"; then
+      "$python_bin" -m argus --config "$config_path" status --json >"$status_file"; then
     last_error="argus status command failed"
   elif ! timeout --kill-after=5 20 setpriv --reuid="$service_user" --regid="$service_user" --init-groups env \
-      PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$current_root/src" /usr/bin/python3 \
+      PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$current_root/src" "$python_bin" \
       "$current_root/scripts/operations/check_status.py" \
       --status-file - \
       --config "$config_path" \

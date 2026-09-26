@@ -31,6 +31,11 @@ creates another revision; it never edits history.
 - `analysis.shadow_mode`: retain model advice without changing deterministic fields.
 - individual source `enabled`: collector activation.
 - reminders, host checks, heartbeat, and MQTT/device integrations are independent.
+- local weather settings live in schema-23 `weather_subscriptions`, outside the
+  managed source revision. The default Shahe campus subscription starts with
+  daily forecast and change alerts enabled; the Weather page can independently
+  disable either. Forecast polling continues for the status page. Settings use
+  their own compare-and-swap revision and audit trail; see `WEATHER.md`.
 
 New credential-free source features should default on only after a real fetch and
 parser probe succeeds. Credential-dependent and device-control features remain

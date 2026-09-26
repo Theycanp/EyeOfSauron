@@ -11,7 +11,8 @@
 - Production frontend runtime: a modern browser; Node is not installed or run as
   part of the service.
 
-Argus keeps its runtime dependency set small; `argon2-cffi` is pinned in
+Argus keeps its runtime dependency set small; `argon2-cffi` and the Ed25519
+signing library `cryptography` are pinned in
 `requirements/runtime.txt`. CI and release tools in `requirements/ci.txt` are
 development dependencies only. The backend gate uses Python's built-in
 `unittest` runner; `pytest` is not required or pinned.

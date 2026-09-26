@@ -10,7 +10,7 @@ if [[ -z "$release_root" ]]; then
   exit 2
 fi
 release_root=$(realpath "$release_root")
-if [[ "$python_bin" != /* || ! -x "$python_bin" ]]; then
+if [[ ! "$python_bin" =~ ^/[A-Za-z0-9_./-]+$ || ! -x "$python_bin" ]]; then
   echo "preflight: ARGUS_PYTHON must be an absolute path to an executable" >&2
   exit 2
 fi
@@ -56,9 +56,17 @@ import json
 import re
 import sys
 import tomllib
+from importlib.metadata import version
 from pathlib import Path
 
 root = Path(sys.argv[1])
+for requirement in (root / "requirements/runtime.txt").read_text().splitlines():
+    requirement = requirement.strip()
+    if not requirement or requirement.startswith("#"):
+        continue
+    name, expected_version = requirement.split("==", 1)
+    if version(name) != expected_version:
+        raise SystemExit(f"preflight: runtime dependency {name} must be {expected_version}")
 manifest = json.loads((root / "RELEASE.json").read_text(encoding="utf-8"))
 project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 sys.path.insert(0, str(root / "src"))
@@ -94,7 +102,8 @@ unit_stage=$(mktemp -d)
 trap 'rm -rf -- "$unit_stage"' EXIT
 for unit in "$release_root"/deploy/*.service "$release_root"/deploy/*.timer; do
   [[ -f "$unit" ]] || continue
-  sed "s#/opt/eyeofsauron/current#$release_root#g" "$unit" >"$unit_stage/$(basename "$unit")"
+  sed -e "s#/opt/eyeofsauron/current#$release_root#g" \
+      -e "s#/usr/bin/python3#$python_bin#g" "$unit" >"$unit_stage/$(basename "$unit")"
 done
 systemd-analyze verify "$unit_stage"/*.service "$unit_stage"/*.timer
 rm -rf -- "$unit_stage"
