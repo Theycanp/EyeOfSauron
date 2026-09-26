@@ -39,8 +39,8 @@ or embassy security alerts. A source being primary does not mean every item is
 urgent.
 
 The JMA nationwide feed is a deliberately stricter exception. It is sampled
-every six hours at importance 1, routine local advisories are discarded before storage,
-and retained exceptional-hazard evidence is never directly notification-eligible.
+every twelve hours at importance 1, local advisories are discarded before storage,
+and retained globally significant evidence is never directly notification-eligible.
 USGS significant earthquakes and independently reviewed global reporting decide
 whether a disaster has enough international impact to interrupt the user.
 

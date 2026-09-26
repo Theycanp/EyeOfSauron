@@ -67,7 +67,7 @@ def plan_event_metadata(current: Mapping[str, Any]) -> tuple[dict[str, Any], lis
 def plan_disaster_signal_policy(
     current: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Retain only exceptional JMA evidence without weakening global alerts."""
+    """Retain only globally significant JMA evidence without weakening global alerts."""
     result = deepcopy(dict(current))
     source_id = "japan_meteorological_agency_high_frequency"
     probes: list[dict[str, Any]] = []
@@ -75,10 +75,10 @@ def plan_disaster_signal_policy(
         if source.get("id") != source_id:
             continue
         before = deepcopy(source)
-        source["poll_interval_seconds"] = 21600
+        source["poll_interval_seconds"] = 43200
         source["default_importance"] = 1
         settings = source.setdefault("settings", {})
-        settings["entry_filter_profile"] = "jma_exceptional_hazards"
+        settings["entry_filter_profile"] = "jma_global_significance"
         settings["notification_eligible"] = False
         if source != before and source.get("enabled", True):
             probes.append(source)
@@ -109,7 +109,7 @@ def plan_official_news(
             entry_id, feed_id, source_id, enabled=True, user_confirmed=True,
             poll_interval_seconds=(
                 300 if entry_id == "usgs_earthquakes"
-                else 21600 if entry_id == "japan_meteorological_agency"
+                else 43200 if entry_id == "japan_meteorological_agency"
                 else 900
             ),
         )

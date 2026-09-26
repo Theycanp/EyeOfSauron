@@ -5,6 +5,19 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.22.6] - 2026-09-26
+
+### Changed
+
+- Reduce Japan Meteorological Agency sampling from every six hours to every
+  twelve hours and retain only signals with plausible international impact:
+  major-tsunami warnings, maximum intensity 6-upper/7 earthquakes, magnitude-8+
+  earthquakes, and Nankai Trough megaquake warnings. Routine Japanese emergency
+  weather, volcano, early-earthquake, and ordinary tsunami bulletins are no
+  longer stored. All retained JMA evidence remains importance 1 and ineligible
+  for direct notification; five-minute USGS and global-news disaster alerts are
+  unchanged.
+
 ## [0.22.5] - 2026-09-25
 
 ### Changed

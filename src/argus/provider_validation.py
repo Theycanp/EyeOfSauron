@@ -301,7 +301,7 @@ def validate_provider_configuration(
             settings, "content_timeout_seconds", 20, location, 1, 120
         )
         profile = settings.get("entry_filter_profile", "")
-        if profile not in {"", "jma_exceptional_hazards"}:
+        if profile not in {"", "jma_exceptional_hazards", "jma_global_significance"}:
             raise ProviderConfigError(f"{location}.entry_filter_profile is unsupported")
         normalized["entry_filter_profile"] = profile
         notification_eligible = settings.get("notification_eligible", True)

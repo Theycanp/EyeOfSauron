@@ -37,13 +37,14 @@ _XML_ENCODING_RE = re.compile(
     re.IGNORECASE,
 )
 
-# JMA's extra feed emits a nationwide stream of municipal advisories. It is
-# useful here only as supporting evidence for exceptional disasters; global
-# notification decisions come from USGS and international news sources.
-_JMA_EXCEPTIONAL_HAZARDS = re.compile(
-    r"(?:大津波警報|津波警報|大雨特別警報|大雪特別警報|暴風特別警報|"
-    r"暴風雪特別警報|高潮特別警報|波浪特別警報|噴火警報（居住地域）|"
-    r"噴火速報|緊急地震速報（警報）|南海トラフ地震臨時情報)"
+# JMA's extra feed emits a nationwide stream of local advisories. Keep only
+# signals that can plausibly matter beyond Japan; global notification decisions
+# still come from USGS and reviewed international news sources.
+_JMA_GLOBAL_SIGNIFICANCE = re.compile(
+    r"(?:大津波警報|最大震度\s*[７7]|最大震度\s*[６6]強|"
+    r"(?:マグニチュード(?:は)?|(?:地震の)?規模(?:は)?[ＭM]?|[ＭM])\s*"
+    r"[８９89](?:[\.．][０-９0-9]+)?|"
+    r"南海トラフ地震臨時情報[^\n]{0,40}巨大地震警戒)"
 )
 
 
@@ -151,10 +152,10 @@ def _apply_entry_policy(
     observations: list[Observation], source: RssSourceConfig
 ) -> list[Observation]:
     profile = source.settings.get("entry_filter_profile", "")
-    if profile == "jma_exceptional_hazards":
+    if profile in {"jma_exceptional_hazards", "jma_global_significance"}:
         observations = [
             item for item in observations
-            if _JMA_EXCEPTIONAL_HAZARDS.search(f"{item.title}\n{item.summary}")
+            if _JMA_GLOBAL_SIGNIFICANCE.search(f"{item.title}\n{item.summary}")
         ]
     if source.settings.get("notification_eligible", True) is False:
         observations = [

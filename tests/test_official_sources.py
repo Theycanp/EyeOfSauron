@@ -106,16 +106,16 @@ class OfficialSourcesTests(unittest.TestCase):
                 self.assertEqual(4, source.default_importance)
             if source.id == "japan_meteorological_agency_high_frequency":
                 self.assertEqual(1, source.default_importance)
-                self.assertEqual(21600, source.poll_interval_seconds)
+                self.assertEqual(43200, source.poll_interval_seconds)
                 self.assertEqual(
-                    "jma_exceptional_hazards",
+                    "jma_global_significance",
                     source.settings["entry_filter_profile"],
                 )
                 self.assertFalse(source.settings["notification_eligible"])
         catalog_jma = NEWS_SOURCE_CATALOG.source_template(
             "japan_meteorological_agency", "high_frequency", "jma_catalog"
         )
-        self.assertEqual(21600, catalog_jma["poll_interval_seconds"])
+        self.assertEqual(43200, catalog_jma["poll_interval_seconds"])
         self.assertFalse(catalog_jma["settings"]["notification_eligible"])
         primary_additions = {
             row["id"] for row in additions

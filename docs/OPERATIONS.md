@@ -167,7 +167,7 @@ The reviewed JMA retention policy is previewed with
 `activate_news_sources.py --disaster-signal-policy --expect-revision N`. The
 preview fetches and parses the live feed without writing configuration; `--apply`
 creates the next managed revision. Verify the applied revision, one successful
-six-hour JMA poll, zero direct JMA alerts, and continued five-minute USGS coverage after restart.
+twelve-hour JMA poll, zero direct JMA alerts, and continued five-minute USGS coverage after restart.
 An empty retained JMA batch is healthy when the unfiltered Feed is current.
 
 `scripts/operations/check_status.py` reports dead-letter outbox rows as warnings.

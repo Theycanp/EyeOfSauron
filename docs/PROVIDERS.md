@@ -147,12 +147,12 @@ entry content to the headline before rule evaluation; the category label alone
 must never trigger a severe-weather alert.
 
 JMA is intentionally a bounded evidence source, not an interrupt source. It
-polls hourly with default importance 1. A reviewed retention profile drops
-routine municipal advisories before persistence and keeps only exceptional
-hazard categories such as major tsunami warnings, emergency weather warnings,
-residential-area volcanic warnings, warning-level earthquake early warnings,
-and Nankai Trough advisories. Every retained item is explicitly ineligible for
-direct notification even if an operator later adds the source to a text rule.
+polls every twelve hours with default importance 1. A reviewed retention profile
+drops local advisories before persistence and keeps only signals with plausible
+international impact: major-tsunami warnings, maximum intensity 6-upper/7
+earthquakes, magnitude-8+ earthquakes, and Nankai Trough megaquake warnings.
+Every retained item is explicitly ineligible for direct notification even if an
+operator later adds the source to a text rule.
 Feed freshness is checked before filtering, so a healthy hour with no retained
 item is not reported as a source outage. Internationally significant disasters
 are alerted through the five-minute USGS significant-earthquake feed and reviewed
