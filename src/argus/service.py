@@ -590,22 +590,25 @@ class ArgusService:
                         astronomy = await run_network_call(
                             self.local_weather_provider.fetch_astronomy, subscription, local_date
                         )
-                        self.database.record_weather_astronomy(subscription, astronomy, now=now_epoch())
-                        queued = 0
+                        now = now_epoch()
+                        self.database.record_weather_astronomy(subscription, astronomy, now=now)
+                        queued = self.database.record_qweather_success(
+                            subscription, "astronomy", now, topic=self.config.ntfy.default_topic,
+                            click_url=click_url,
+                        )
                     LOGGER.info("qweather_poll_succeeded kind=%s queued=%d", kind, queued)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     interval = 300 if kind != "astronomy" else 3600
-                    if kind != "astronomy":
-                        try:
-                            self.database.record_qweather_failure(
-                                subscription, kind, exc, now_epoch(), topic=self.config.ntfy.default_topic,
-                                click_url=click_url,
-                            )
-                        except Exception as persistence_exc:
-                            LOGGER.error("qweather_failure_record_failed kind=%s error=%s",
-                                         kind, sanitize_error(persistence_exc))
+                    try:
+                        self.database.record_qweather_failure(
+                            subscription, kind, exc, now_epoch(), topic=self.config.ntfy.default_topic,
+                            click_url=click_url,
+                        )
+                    except Exception as persistence_exc:
+                        LOGGER.error("qweather_failure_record_failed kind=%s error=%s",
+                                     kind, sanitize_error(persistence_exc))
                     LOGGER.warning("qweather_poll_failed kind=%s error=%s", kind, sanitize_error(exc))
                 due[kind] = now_epoch() + interval
             try:

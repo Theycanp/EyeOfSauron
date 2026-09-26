@@ -7,8 +7,9 @@ Shahe campus (`40.1561163, 116.2835626`, `Asia/Shanghai`). Tiananmen is only a
 suggested example for future manual setup. A browser may supply coordinates, or
 an operator may search for a place and edit coordinates in the admin Weather page.
 There is one subscription; this is not a multi-user weather service. Schema 23
-introduced the subscription, schema 24 adds typed optional observations, and
-schema 25 adds the distinct approximate solar-noon angle and sample time.
+introduced the subscription, schema 24 adds typed optional observations, schema
+25 adds the distinct approximate solar-noon angle and sample time, and schema
+26 permits an independently tracked QWeather astronomy channel.
 
 Source review on 2026-09-26:
 
@@ -52,7 +53,10 @@ lunar dates, and a small verified set of fixed-date festivals. Fresh optional
 air quality and matching-date QWeather moon data are appended when available;
 missing optional data is labelled missing, not invented. Qingming and other
 solar-term or movable festivals are not yet calculated. The daily-date key is durable; retries and
-restarts do not duplicate it. The daily notification can be disabled separately
+restarts do not duplicate it. If the scheduled time is missed, the first
+successful forecast later on the same local calendar day still publishes that
+day's report; it is not silently discarded after a nominal six-hour window. The
+daily notification can be disabled separately
 from change alerts.
 
 Remaining-day rain is `expected` when the model predicts at least 1 mm and a
@@ -102,7 +106,7 @@ baseline for old moderate warnings; severe/extreme alerts issued within six
 hours may notify during baseline. Later new moderate-or-higher warnings,
 severity upgrades, and explicit cancellation of previously announced warnings
 notify. IDs and supersedes chains provide durable dedupe. Disappearance is not
-an official cancellation. Both QWeather channels retry failures in 5 minutes;
+an official cancellation. All three QWeather channels retry failures in 5 minutes;
 three consecutive failures notify once and recovery once. The change-alert
 toggle suppresses weather-condition notifications while polls maintain state.
 Provider outage/recovery notices remain enabled independently of that toggle.
@@ -153,7 +157,9 @@ poll-time angle.
 
 ## Operations and limitations
 
-The Weather page shows last success, last error and consecutive failures. Both
+The Weather page shows last success, last error and consecutive failures. The
+minute, official-alert and astronomy channels each have independent health
+state; an astronomy failure no longer disappears from diagnostics. Both
 notification toggles can be turned off in the admin; collection continues so
 the page can show fresh data and failures. A direct provider outage or bad data
 does not replace the last good forecast. The page's timestamp distinguishes it
@@ -161,17 +167,47 @@ from current data. For safety decisions, use official local alerts in addition
 to EOS. This version has no alternate daily-forecast provider, no observed rain
 gauge, no calibrated model voting, and no multi-location delivery routing.
 
-Tests: `tests/test_weather.py` covers schema migration, validation, daily
-idempotency, rain oscillation across restart, hazards, outage recovery, official
+Tests: `tests/test_weather.py` covers schema migration, validation, late daily
+delivery, independent astronomy failure/recovery, rain oscillation across restart, hazards, outage recovery, official
 warning color upgrades, explicit cancellation and atomic failure rollback.
 `tests/test_qweather.py` covers JWT signature/claims, bounded gzip, stale data,
 typed warning chains, fixed provider hosts and incomplete configuration.
 `tests/test_admin_auth_http.py` covers weather read/write authentication,
 CSRF and viewer RBAC. Frontend tests and desktop/mobile E2E cover saving and
 responsive controls. Production acceptance must check one real forecast poll,
-correct local coordinates, schema 24, no duplicate outbox rows, and the public
+correct local coordinates, schema 26, no duplicate outbox rows, and the public
 admin entry. `argus weather-test` creates a labelled snapshot through the normal
 outbox without changing rain or daily state; use only on explicit operator request.
+
+## Upgrade plan and boundaries
+
+The following order favors accuracy and timeliness per unit of cost. The first
+two items are intentionally small and are now implemented; the remaining items
+stay disabled until their acceptance evidence exists.
+
+1. **Schedule and observability (implemented):** publish a missed same-day
+   report on the next successful forecast and expose astronomy outage/recovery
+   independently. No extra provider requests or model calls are introduced.
+2. **Bounded provider cross-check (next):** optionally query QWeather hourly
+   only when Open-Meteo is stale/invalid or when a configurable material rain or
+   temperature disagreement is detected. Persist issue time, horizon and source
+   provenance; never average probabilities and never allow disagreement to
+   create duplicate alerts. Default remains off until quota and replay tests
+   demonstrate a meaningful gain.
+3. **Alert completeness (later):** add typed AQI, heat, UV, visibility and
+   official-warning detail detectors only with explicit thresholds, hysteresis,
+   source timestamps and independent dedupe. Model AQI alone must not be called
+   an official pollution warning.
+4. **Measured accuracy (later):** require an independent station or sensor,
+   seasonal/horizon buckets and months of shadow evaluation before changing
+   provider weights. Forecast agreement is not ground truth.
+5. **Multiple locations (later):** add location-scoped routing and per-location
+   schedules only after the single-location state machine and notification
+   contracts are stable; do not duplicate the weather worker per location.
+
+The module deliberately does not add a message broker, local ML model, or a
+second always-on forecast provider for the current single subscription. Those
+would increase requests and failure surfaces without demonstrated benefit.
 
 ## Follow-up Work (Not Implemented)
 

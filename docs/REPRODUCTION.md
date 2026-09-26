@@ -63,10 +63,13 @@ sun/moon data appear on the Weather page; missing optional data must not block
 the forecast or official warnings. The `lunardate` runtime dependency is pinned
 in `requirements/runtime.txt`. A new
 installation must obtain its own credentials; no provider key is bundled.
-For schema 25, confirm the distinct approximate solar-noon angle and timestamp
+For schema 25/26, confirm the distinct approximate solar-noon angle and timestamp
 are present after a successful QWeather astronomy poll, while the admin also
 shows the independently sampled current angle. Missing noon data must not block
-sun/moon details or the weather forecast.
+sun/moon details or the weather forecast. Also verify that a forecast first
+succeeding after the configured daily time still creates that local day's single
+daily alert, and that astronomy provider failure/recovery counters are visible
+independently from minute precipitation and official-warning counters.
 No weather alarm needs to be sent to production for this check; the transition
 and dedupe scenarios are covered in the isolated tests documented in `WEATHER.md`.
 

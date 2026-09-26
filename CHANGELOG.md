@@ -5,6 +5,21 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+### Changed
+
+- Preserve the same-day weather report when the daemon's configured time was
+  missed; the first successful forecast later that local day publishes it once.
+- Track QWeather astronomy failures and recovery independently, alongside
+  minute precipitation and official-warning channels.
+
+## [0.25.0] - 2026-09-26
+
+### Changed
+
+- Preserve same-day daily weather delivery after a missed schedule window.
+- Track QWeather astronomy health and recovery as a first-class channel;
+  migrate the provider-state constraint to schema 26.
+
 ## [0.24.3] - 2026-09-26
 
 ### Changed

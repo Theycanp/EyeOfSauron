@@ -62,7 +62,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 
 _DIGEST_PROVIDER_TRACE_FIELDS = frozenset({
@@ -1589,6 +1589,29 @@ class Database:
                 if "solar_noon_at" not in columns:
                     self.connection.execute("ALTER TABLE weather_astronomy ADD COLUMN solar_noon_at INTEGER")
                 self.connection.execute("PRAGMA user_version=25")
+            version = 25
+        if version < 26:
+            with self.unit_of_work():
+                self.connection.execute("""
+                    CREATE TABLE weather_provider_state_v26 (
+                        subscription_id TEXT NOT NULL REFERENCES weather_subscriptions(id) ON DELETE CASCADE,
+                        kind TEXT NOT NULL CHECK(kind IN ('minutely','alerts','astronomy')),
+                        state_json TEXT NOT NULL DEFAULT '{}',
+                        last_success_at INTEGER,
+                        last_error TEXT,
+                        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                        outage_alerted INTEGER NOT NULL DEFAULT 0 CHECK(outage_alerted IN (0,1)),
+                        PRIMARY KEY(subscription_id,kind)
+                    )
+                """)
+                self.connection.execute(
+                    "INSERT INTO weather_provider_state_v26 "
+                    "SELECT subscription_id,kind,state_json,last_success_at,last_error,"
+                    "consecutive_failures,outage_alerted FROM weather_provider_state"
+                )
+                self.connection.execute("DROP TABLE weather_provider_state")
+                self.connection.execute("ALTER TABLE weather_provider_state_v26 RENAME TO weather_provider_state")
+                self.connection.execute("PRAGMA user_version=26")
 
     def record_digest_preparation_failure(
         self, digest_key: str, *, stage: str, error: BaseException | str, now: int,
@@ -4921,6 +4944,14 @@ class Database:
     ) -> None:
         SQLiteWeather(self).record_qweather_failure(
             subscription, kind, error, now, topic=topic, click_url=click_url,
+        )
+
+    def record_qweather_success(
+        self, subscription: WeatherSubscription, kind: str, now: int,
+        *, topic: str, click_url: str,
+    ) -> int:
+        return SQLiteWeather(self).record_qweather_success(
+            subscription, kind, now, topic=topic, click_url=click_url,
         )
 
     def record_weather_air_quality(self, subscription: WeatherSubscription,
