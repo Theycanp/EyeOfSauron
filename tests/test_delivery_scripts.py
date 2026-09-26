@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import fcntl
 import json
 import os
 import shutil
@@ -150,6 +151,71 @@ class ReleaseDrillSafetyTests(unittest.TestCase):
 
 
 class DailyBackupTests(unittest.TestCase):
+    def test_watchdog_skips_maintenance_and_preserves_failures(self):
+        prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
+        if prefix and (not shutil.which("sudo") or subprocess.run(
+            ["sudo", "-n", "true"], capture_output=True, timeout=5,
+        ).returncode):
+            self.skipTest("watchdog fixture requires root or passwordless sudo")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime"
+            lock = root / ".release.lock"
+            lock.touch()
+            health = root / "health.sh"
+            marker = root / "health-called"
+            health.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit "${{TEST_HEALTH_CODE:-0}}"\n')
+            health.chmod(0o755)
+
+            def run(code=0):
+                return subprocess.run(
+                    [*prefix, "env", f"EOS_INSTALL_ROOT={root}",
+                     f"ARGUS_WATCHDOG_RUNTIME_DIR={runtime}", f"ARGUS_HEALTH_GATE={health}",
+                     f"TEST_HEALTH_CODE={code}", "bash", str(ROOT / "scripts/operations/watchdog.sh")],
+                    capture_output=True, text=True, timeout=10,
+                )
+
+            def failure_count():
+                return subprocess.run(
+                    [*prefix, "cat", str(runtime / "failures")],
+                    check=True, capture_output=True, text=True, timeout=5,
+                ).stdout.strip()
+
+            try:
+                with lock.open() as descriptor:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    result = run()
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertFalse(marker.exists())
+                result = run()
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("", result.stdout)
+                self.assertEqual("0", failure_count())
+                result = run(1)
+                self.assertEqual(1, result.returncode)
+                self.assertIn("failure 1/3", result.stderr)
+                self.assertEqual("1", failure_count())
+                result = run()
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("0", failure_count())
+            finally:
+                if prefix and runtime.exists():
+                    subprocess.run([*prefix, "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(runtime)],
+                                   check=True, capture_output=True, timeout=5)
+
+    def test_quiet_health_check_preserves_warning_and_failure_evidence(self):
+        for result, expected_output in (
+            ({"ok": True, "errors": [], "warnings": []}, False),
+            ({"ok": True, "errors": [], "warnings": ["source delayed"]}, True),
+            ({"ok": False, "errors": ["heartbeat stale"], "warnings": []}, True),
+        ):
+            with self.subTest(result=result), patch("sys.stdin", io.StringIO('{}')), \
+                    patch("sys.stdout", new_callable=io.StringIO) as output, \
+                    patch.object(check_status, "evaluate_status", return_value=result):
+                code = check_status.main(["--status-file", "-", "--config", "unused.toml", "--quiet-success"])
+                self.assertEqual(0 if result["ok"] else 1, code)
+                self.assertEqual(expected_output, bool(output.getvalue()))
+
     def test_watchdog_start_limit_allows_its_normal_timer_cadence(self):
         import configparser
         unit = configparser.ConfigParser(interpolation=None)

@@ -539,6 +539,8 @@ def _static_file(request_path: str) -> Path | None:
     relative = (
         "index.html" if path in {"/", "/index.html"} or is_spa_route else path.lstrip("/")
     )
+    if relative == "favicon.ico":
+        relative = "favicon.svg"
     if not relative or relative.startswith("."):
         return None
     candidate = (_WEB_ROOT / relative).resolve()
@@ -802,7 +804,8 @@ def make_handler(
             for name, value in headers:
                 self.send_header(name, value)
             self.end_headers()
-            self.wfile.write(encoded)
+            if self.command != "HEAD":
+                self.wfile.write(encoded)
 
         def _static(self, path: Path) -> None:
             encoded = path.read_bytes()
@@ -828,7 +831,8 @@ def make_handler(
                 "base-uri 'none'; manifest-src 'self'",
             )
             self.end_headers()
-            self.wfile.write(encoded)
+            if self.command != "HEAD":
+                self.wfile.write(encoded)
 
         def _health(self) -> dict[str, Any]:
             status = database.status()
@@ -867,6 +871,9 @@ def make_handler(
                 "stale_sources": stale_sources,
                 "status": status,
             }
+
+        def do_HEAD(self) -> None:  # noqa: N802
+            self.do_GET()
 
         def do_GET(self) -> None:  # noqa: N802
             static = _static_file(self.path)

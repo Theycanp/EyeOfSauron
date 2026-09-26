@@ -191,6 +191,17 @@ twelve-hour JMA poll, zero direct JMA alerts, and continued five-minute USGS cov
 An empty retained JMA batch is healthy when the unfiltered Feed is current.
 
 `scripts/operations/check_status.py` reports dead-letter outbox rows as warnings.
+Recurring watchdog calls use `--quiet-success`: only a healthy result without
+warnings suppresses the JSON payload. Release gates and manual diagnostics keep
+their detailed output by default. The watchdog holds a shared lock on the
+existing install root `.release.lock` through checking and recovery; release,
+rollback and backups hold an exclusive lock. During maintenance it skips the
+poll without increasing its failure counter or restarting the engine. A missing
+or unreadable release lock is an error, not a silently successful health check.
+
+The admin supports HEAD with the same status, headers and authentication as GET,
+without a response body. The browser icon is served locally; `/favicon.ico`
+aliases `/favicon.svg` for older clients, not an anonymous business API.
 A warning is not cleared by restarting the daemon; inspect the sanitized delivery
 error, correct the provider or payload issue, and retry through the repository or
 authenticated operations API.

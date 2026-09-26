@@ -10,9 +10,10 @@ source_age_multiplier=4
 minimum_source_age=300
 max_pending=1000
 check_admin=1
+status_options=()
 
 usage() {
-  echo "usage: $0 [--wait-seconds N] [--source-age-multiplier N] [--minimum-source-age N] [--max-pending N] [--skip-admin]" >&2
+  echo "usage: $0 [--wait-seconds N] [--source-age-multiplier N] [--minimum-source-age N] [--max-pending N] [--skip-admin] [--quiet-success]" >&2
 }
 
 while (($#)); do
@@ -22,6 +23,7 @@ while (($#)); do
     --minimum-source-age) minimum_source_age=$2; shift 2 ;;
     --max-pending) max_pending=$2; shift 2 ;;
     --skip-admin) check_admin=0; shift ;;
+    --quiet-success) status_options+=(--quiet-success); shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
@@ -57,7 +59,7 @@ while :; do
       --config "$config_path" \
       --source-age-multiplier "$source_age_multiplier" \
       --minimum-source-age "$minimum_source_age" \
-      --max-pending "$max_pending" <"$status_file"; then
+      --max-pending "$max_pending" "${status_options[@]}" <"$status_file"; then
     last_error="persisted status failed the reliability gate"
   elif ((check_admin)) && ! systemctl is-active --quiet argus-admin; then
     last_error="argus-admin.service is not active"

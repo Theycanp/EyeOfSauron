@@ -2,8 +2,10 @@
 
 ## Scope and source decision
 
-The first subscription is Beijing University of Posts and Telecommunications,
-Shahe campus (`40.1561163, 116.2835626`, `Asia/Shanghai`). Tiananmen is only a
+The initial default subscription was Beijing University of Posts and Telecommunications,
+Shahe campus (`40.1561163, 116.2835626`, `Asia/Shanghai`). The operator can change
+the active location; use the admin page and deployment handover for its current
+value rather than treating these initial coordinates as production state. Tiananmen is only a
 suggested example for future manual setup. A browser may supply coordinates, or
 an operator may search for a place and edit coordinates in the admin Weather page.
 There is one subscription; this is not a multi-user weather service. Schema 23
@@ -48,8 +50,8 @@ hours. Invalid or stale data counts as failure; it never updates the dry/rainy
 baseline. Three consecutive failures send one provider-outage alert, and the
 first successful fetch after that sends one recovery alert.
 
-At the configured local time (default 07:00), the first successful fetch in the
-next six hours queues one daily forecast per local date. It reports current
+At or after the configured local time (default 07:00), the first successful fetch
+on that same local calendar day queues one daily forecast per date. It reports current
 condition, today's temperature range, remaining-day predicted precipitation,
 maximum rain probability, gusts, humidity, wind, sunrise/sunset, the day's
 maximum UV index when Open-Meteo supplies it, Gregorian and lunar dates, and a

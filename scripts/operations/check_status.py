@@ -164,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-age-multiplier", type=float, default=4.0)
     parser.add_argument("--minimum-source-age", type=int, default=300)
     parser.add_argument("--max-pending", type=int, default=1000)
+    parser.add_argument("--quiet-success", action="store_true")
     args = parser.parse_args(argv)
     try:
         status = (json.load(sys.stdin) if str(args.status_file) == "-" else
@@ -180,7 +181,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
         result = {"ok": False, "errors": [f"cannot evaluate status: {exc}"], "warnings": []}
-    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    if not args.quiet_success or not result["ok"] or result.get("warnings"):
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result["ok"] else 1
 
 

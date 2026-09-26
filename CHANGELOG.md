@@ -5,6 +5,17 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-09-26
+
+### Fixed
+
+- Keep successful watchdog checks quiet while preserving warnings and failures;
+  hold the shared release lock to avoid self-healing during planned activation.
+- Support authenticated HEAD requests with GET-equivalent headers and no body;
+  provide the existing eye brand as a browser favicon.
+- Refresh roadmap facts and document safe cleanup of development worktrees,
+  branches and reproducible artifacts separately from production recovery data.
+
 ## [0.26.0] - 2026-09-26
 
 ### Added

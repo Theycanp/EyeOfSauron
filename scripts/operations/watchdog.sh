@@ -4,6 +4,7 @@ set -euo pipefail
 failure_limit=${ARGUS_WATCHDOG_FAILURE_LIMIT:-3}
 runtime_directory=${ARGUS_WATCHDOG_RUNTIME_DIR:-/run/argus-watchdog}
 health_gate=${ARGUS_HEALTH_GATE:-/opt/eyeofsauron/current/scripts/operations/health-gate.sh}
+install_root=${EOS_INSTALL_ROOT:-/opt/eyeofsauron}
 
 if ((EUID != 0)); then
   echo "watchdog must run as root" >&2
@@ -20,7 +21,12 @@ lock_file="$runtime_directory/lock"
 exec 9>"$lock_file"
 flock -n 9 || exit 0
 
-if "$health_gate" --wait-seconds 0 --source-age-multiplier 5 --skip-admin; then
+# Hold a shared release lock through the check/restart so planned activation
+# cannot race a self-healing restart. Read-only open works under ProtectSystem.
+exec 8<"$install_root/.release.lock"
+flock -s -n 8 || exit 0
+
+if "$health_gate" --wait-seconds 0 --source-age-multiplier 5 --skip-admin --quiet-success; then
   printf '0\n' >"$counter_file"
   exit 0
 fi
@@ -40,7 +46,7 @@ fi
 
 printf '0\n' >"$counter_file"
 systemctl restart argus
-if ! "$health_gate" --wait-seconds 90 --source-age-multiplier 5 --skip-admin; then
+if ! "$health_gate" --wait-seconds 90 --source-age-multiplier 5 --skip-admin --quiet-success; then
   echo "argus watchdog restart did not restore health" >&2
   exit 1
 fi

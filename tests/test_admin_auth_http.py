@@ -72,6 +72,18 @@ class AdminAuthHttpTests(unittest.TestCase):
                     self.assertIn("https://b.tile.openstreetmap.org", csp)
                     self.assertIn("https://c.tile.openstreetmap.org", csp)
                     self.assertNotIn("img-src *", csp)
+                    content_length = response.headers["Content-Length"]
+                with urllib.request.urlopen(urllib.request.Request(base_url, method="HEAD")) as response:
+                    self.assertEqual(content_length, response.headers["Content-Length"])
+                    self.assertEqual(b"", response.read())
+                for icon_path in ("favicon.svg", "favicon.ico"):
+                    with urllib.request.urlopen(f"{base_url}/{icon_path}") as response:
+                        self.assertEqual("image/svg+xml", response.headers["Content-Type"])
+                        self.assertIn(b"<svg", response.read())
+                with self.assertRaises(urllib.error.HTTPError) as head_failure:
+                    urllib.request.urlopen(urllib.request.Request(f"{base_url}/api/weather", method="HEAD"))
+                self.assertEqual(401, head_failure.exception.code)
+                self.assertEqual(b"", head_failure.exception.read())
                 occurrence_url = f"{base_url}/api/reminders/occurrences/{occurrence_id}"
                 with self.assertRaises(urllib.error.HTTPError) as failure:
                     urllib.request.urlopen(occurrence_url)
