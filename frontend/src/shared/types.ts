@@ -7,6 +7,45 @@ export type AdminJobStatus = 'queued' | 'running' | 'succeeded' | 'completed' | 
 export type OutboxStatus = 'pending' | 'sending' | 'delivered' | 'dead' | 'cancelled'
 export type AdminRole = 'admin' | 'operator' | 'viewer'
 
+export interface WeatherSubscription {
+  id: string
+  label: string
+  latitude: number
+  longitude: number
+  timezone: string
+  daily_time: string
+  daily_enabled: boolean
+  alerts_enabled: boolean
+  revision: number
+}
+
+export interface WeatherStatus {
+  subscription: WeatherSubscription
+  latest: {
+    condition: string
+    low: number | null
+    high: number | null
+    rain_mm: number
+    rain_probability: number
+    wind_gust_kmh: number
+    temperature_now: number | null
+    observed_at: number
+  } | null
+  last_success_at: number | null
+  last_daily_date: string | null
+  last_error: string | null
+  consecutive_failures: number
+  rain_expected: boolean | null
+  qweather?: Record<string, { last_success_at: number | null; last_error: string | null; consecutive_failures: number }>
+}
+
+export interface WeatherPlace {
+  label: string
+  latitude: number
+  longitude: number
+  timezone: string
+}
+
 export interface AdminIdentity extends JsonRecord {
   id: number | null
   username: string

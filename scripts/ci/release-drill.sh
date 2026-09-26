@@ -83,11 +83,14 @@ printf '%s\n' '{"revision": 1, "sources": [], "rules": []}' >"$ARGUS_MANAGED_CON
 [[ "$(readlink -f "$EOS_INSTALL_ROOT/current")" == "$DRILL_CANDIDATE_PATH" ]]
 [[ -d "$EOS_BACKUP_ROOT" ]]
 [[ "$(tail -n 1 "$drill_root/health.log")" == "$DRILL_CANDIDATE_PATH" ]]
+grep -Fq "ExecStart=$ARGUS_PYTHON -m argus" "$drill_root/systemd/argus.service"
+grep -Fq "Environment=ARGUS_PYTHON=$ARGUS_PYTHON" "$drill_root/systemd/argus-watchdog.service"
 
 "$script_root/scripts/release/rollback-release.sh" "$previous_id"
 [[ "$(readlink -f "$EOS_INSTALL_ROOT/current")" == "$previous" ]]
 [[ "$(tail -n 1 "$drill_root/health.log")" == "$previous" ]]
-cmp "$previous/deploy/argus.service" "$drill_root/systemd/argus.service"
+grep -Fq "ExecStart=$ARGUS_PYTHON -m argus" "$drill_root/systemd/argus.service"
+cp "$drill_root/systemd/argus.service" "$drill_root/prior-unit.service"
 
 sleep 1
 export DRILL_FAIL_HEALTH=1 DRILL_MUTATE_ON_START=1
@@ -97,7 +100,7 @@ if "$script_root/scripts/release/install-release.sh" \
   exit 1
 fi
 [[ "$(readlink -f "$EOS_INSTALL_ROOT/current")" == "$previous" ]]
-cmp "$previous/deploy/argus.service" "$drill_root/systemd/argus.service"
+cmp "$drill_root/prior-unit.service" "$drill_root/systemd/argus.service"
 /usr/bin/python3 - "$ARGUS_DATABASE" <<'PY'
 import sqlite3
 import sys

@@ -8,6 +8,7 @@ import re
 import secrets
 import time
 import urllib.parse
+from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -21,6 +22,7 @@ from .events import EventListItem, EventWorkspaceConflict, event_lifecycle
 from .event_review import event_match_evidence, event_quality
 from .manual_events import ManualEventError, parse_manual_event
 from .news_catalog import NEWS_SOURCE_CATALOG
+from .open_meteo import OpenMeteoProvider, WeatherProviderError
 from .persistence import ControlPlaneRepository, ManagedConfigRepository, RevisionConflictError
 from .providers import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
 from .reminders import ReminderError, parse_reminder
@@ -1151,6 +1153,18 @@ def make_handler(
                     "pagination": {"total": len(rows)},
                 })
                 return
+            if path == "/api/weather/places":
+                name = query.get("q", [""])[0]
+                try:
+                    places = OpenMeteoProvider().search_places(name)
+                except WeatherProviderError as exc:
+                    self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc), "code": "place_search_failed"})
+                    return
+                self._json(HTTPStatus.OK, {"places": places})
+                return
+            if path == "/api/weather":
+                self._json(HTTPStatus.OK, database.get_weather_status())
+                return
             if path.startswith("/api/reminders/"):
                 identifier = urllib.parse.unquote(path[len("/api/reminders/"):].strip())
                 item = database.get_reminder(identifier)
@@ -1341,6 +1355,10 @@ def make_handler(
                     reminder = parse_reminder(data, now)
                     saved = database.upsert_reminder(reminder, actor, now)
                     self._json(HTTPStatus.OK, {"saved": saved, "restart_required": False})
+                    return
+                if path == "/api/weather":
+                    saved = database.update_weather_subscription(data, actor=actor, now=int(time.time()))
+                    self._json(HTTPStatus.OK, {"subscription": asdict(saved), "restart_required": False})
                     return
                 if path == "/api/events":
                     now = int(time.time())

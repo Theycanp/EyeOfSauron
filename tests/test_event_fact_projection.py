@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from argus.database import Database
+from argus.database import Database, SCHEMA_VERSION
 from argus.event_fact_projection import EventFactProjector, SQLiteEventFacts
 from argus.event_facts import FACT_EXTRACTOR_VERSION, FACT_PRODUCER, extract_event_facts
 
@@ -97,7 +97,7 @@ class EventFactProjectionTests(unittest.TestCase):
         connection.commit()
         connection.close()
         self.database = Database(path)
-        self.assertEqual(22, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(SCHEMA_VERSION, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         for table in ("event_fact_jobs", "event_occurrences", "event_report_occurrences"):
             self.assertIsNotNone(self.database.connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)

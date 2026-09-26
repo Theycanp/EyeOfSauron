@@ -5,6 +5,19 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-09-26
+
+### Added
+
+- Add local weather subscription for the BUPT Shahe campus, an authenticated
+  responsive management page, hourly validated Open-Meteo forecasts, one daily
+  forecast, and durable rain-change / significant-weather alerts. Model forecasts
+  are explicitly distinguished from official warnings.
+- Add QWeather Ed25519 JWT integration for minute precipitation and relayed
+  official alerts, independent outage tracking, durable episode dedupe and
+  warning upgrade/cancellation handling. Hourly cross-check/fallback is deferred.
+- Add schema 23 weather state and settings audit with repository/provider ports.
+
 ## [0.23.0] - 2026-09-26
 
 ### Added

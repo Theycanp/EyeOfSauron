@@ -120,10 +120,11 @@ rollback_link="$install_root/.current.rollback.$$"
 rm -f "$rollback_link"
 ln -s "$target" "$rollback_link"
 mv -Tf "$rollback_link" "$install_root/current"
-for unit in "$target"/deploy/*.service "$target"/deploy/*.timer; do
-  [[ -f "$unit" ]] || continue
-  install -m 0644 -o root -g root "$unit" "$release_unit_root/"
-done
+if [[ -n "$restore_bundle" && -d "$restore_bundle/units" ]]; then
+  restore_units "$restore_bundle/units"
+else
+  install_release_units "$target"
+fi
 release_systemctl daemon-reload
 release_systemctl start argus argus-admin
 release_health_gate "$target"

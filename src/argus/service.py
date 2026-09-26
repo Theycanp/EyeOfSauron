@@ -26,6 +26,7 @@ from .notifier import Notifier, delivery_error_details
 from .rules import RuleSet
 from .runtime_io import run_network_call
 from .util import now_epoch, sanitize_error
+from .weather import LocalWeatherProvider, WeatherProvider, nowcast_signal, validate_forecast
 
 
 LOGGER = logging.getLogger("argus")
@@ -98,6 +99,8 @@ class ArgusService:
         analysis_orchestrator: AnalysisOrchestrator | None = None,
         digest_scheduler: DigestScheduler | None = None,
         content_fetcher: PublicDocumentFetcher | None = None,
+        weather_provider: WeatherProvider | None = None,
+        local_weather_provider: LocalWeatherProvider | None = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -111,6 +114,8 @@ class ArgusService:
         self.event_pool = EventPoolProjector(database)
         self.event_facts = EventFactProjector(database)
         self.content_fetcher = content_fetcher
+        self.weather_provider = weather_provider
+        self.local_weather_provider = local_weather_provider
         self.instance_id = uuid.uuid4().hex
         self._source_slots = asyncio.Semaphore(config.service.max_source_concurrency)
         self._jitter = random.SystemRandom()
@@ -488,6 +493,105 @@ class ArgusService:
             except TimeoutError:
                 pass
 
+    async def process_weather_once(self) -> bool:
+        if self.weather_provider is None:
+            return False
+        subscription = self.database.get_weather_subscription()
+        now = now_epoch()
+        base_url = self.config.admin.public_base_url or self.config.digest.public_base_url
+        click_url = f"{base_url}/#/weather" if base_url else ""
+        try:
+            forecast = await run_network_call(self.weather_provider.fetch, subscription)
+            validate_forecast(forecast, now_epoch())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.database.record_weather_failure(
+                subscription, exc, now_epoch(), topic=self.config.ntfy.default_topic,
+                click_url=click_url,
+            )
+            LOGGER.warning("weather_poll_failed error=%s", sanitize_error(exc))
+            return False
+        queued = self.database.record_weather_forecast(
+            subscription, forecast, now=now, topic=self.config.ntfy.default_topic,
+            click_url=click_url,
+        )
+        LOGGER.info("weather_poll_succeeded location=%s queued=%d", subscription.id, queued)
+        return True
+
+    async def _weather_loop(self) -> None:
+        revision: int | None = None
+        next_at = 0
+        while not self.stop_event.is_set():
+            current_revision = self.database.get_weather_subscription().revision
+            if current_revision != revision:
+                revision = current_revision
+                next_at = 0
+            if now_epoch() >= next_at:
+                try:
+                    healthy = await self.process_weather_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    LOGGER.error("weather_worker_failed error=%s", sanitize_error(exc))
+                    healthy = False
+                next_at = now_epoch() + (3600 if healthy else 1200)
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=min(60, max(1, next_at - now_epoch())))
+            except TimeoutError:
+                pass
+
+    async def _local_weather_loop(self) -> None:
+        assert self.local_weather_provider is not None
+        revision: int | None = None
+        due = {"minutely": 0, "alerts": 0}
+        while not self.stop_event.is_set():
+            subscription = self.database.get_weather_subscription()
+            if subscription.revision != revision:
+                revision = subscription.revision
+                due = {"minutely": 0, "alerts": 0}
+            base_url = self.config.admin.public_base_url or self.config.digest.public_base_url
+            click_url = f"{base_url}/#/weather" if base_url else ""
+            for kind in ("minutely", "alerts"):
+                if now_epoch() < due[kind]:
+                    continue
+                interval = 600
+                try:
+                    if kind == "minutely":
+                        nowcast = await run_network_call(self.local_weather_provider.fetch_minutely, subscription)
+                        now = now_epoch()
+                        queued = self.database.record_weather_nowcast(
+                            subscription, nowcast, now=now, topic=self.config.ntfy.default_topic,
+                            click_url=click_url,
+                        )
+                        if nowcast_signal(nowcast, now) is not None:
+                            interval = 300
+                    else:
+                        alerts = await run_network_call(self.local_weather_provider.fetch_alerts, subscription)
+                        queued = self.database.record_official_weather_alerts(
+                            subscription, alerts, now=now_epoch(), topic=self.config.ntfy.default_topic,
+                            click_url=click_url,
+                        )
+                    LOGGER.info("qweather_poll_succeeded kind=%s queued=%d", kind, queued)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    interval = 300
+                    try:
+                        self.database.record_qweather_failure(
+                            subscription, kind, exc, now_epoch(), topic=self.config.ntfy.default_topic,
+                            click_url=click_url,
+                        )
+                    except Exception as persistence_exc:
+                        LOGGER.error("qweather_failure_record_failed kind=%s error=%s",
+                                     kind, sanitize_error(persistence_exc))
+                    LOGGER.warning("qweather_poll_failed kind=%s error=%s", kind, sanitize_error(exc))
+                due[kind] = now_epoch() + interval
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=min(60, max(1, min(due.values()) - now_epoch())))
+            except TimeoutError:
+                pass
+
     def process_event_pool_once(self, *, limit: int = 50) -> int:
         """Project one deliberately small batch to protect daemon heartbeats."""
         return self.event_pool.project_pending(now=now_epoch(), limit=limit)
@@ -627,6 +731,10 @@ class ArgusService:
                 group.create_task(self._maintenance_loop(), name="maintenance")
                 group.create_task(self._event_pool_loop(), name="event-pool")
                 group.create_task(self._event_fact_loop(), name="event-facts")
+                if self.weather_provider is not None:
+                    group.create_task(self._weather_loop(), name="weather")
+                if self.local_weather_provider is not None:
+                    group.create_task(self._local_weather_loop(), name="local-weather")
                 group.create_task(self._heartbeat_loop(), name="heartbeat")
                 group.create_task(self._admin_job_loop(), name="admin-jobs")
                 group.create_task(self._config_revision_loop(), name="config-revision")

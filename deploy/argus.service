@@ -16,6 +16,7 @@ Environment=PYTHONPATH=/opt/eyeofsauron/current/src
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=/etc/argus/ntfy.env
 EnvironmentFile=-/etc/argus/providers.env
+EnvironmentFile=-/etc/argus/qweather.env
 ExecStart=/usr/bin/python3 -m argus --config /etc/argus/config.toml run
 Restart=on-failure
 RestartForceExitStatus=75

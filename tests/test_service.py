@@ -96,6 +96,17 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             notifier,
         )
 
+    async def test_weather_invalid_forecast_records_failure_without_setting_baseline(self) -> None:
+        from unittest.mock import Mock
+        from argus.weather import WeatherForecast
+        service = self._service(None, None)
+        service.weather_provider = Mock()
+        service.weather_provider.fetch.return_value = WeatherForecast(0, 20, 2, ())
+        self.assertFalse(await service.process_weather_once())
+        status = self.database.get_weather_status()
+        self.assertEqual(1, status["consecutive_failures"])
+        self.assertIsNone(status["rain_expected"])
+
     def _queue_content_fetch(self) -> int:
         baseline = FeedFetchResult((), None, None)
         self.database.record_source_success(

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BellRing, CircleAlert, FileText, Gauge, Inbox, LayoutDashboard, LockKeyhole, LogOut, Menu, Moon, Newspaper, Radar, RefreshCw, Settings2, ShieldCheck, Sun, UserRoundCog, X } from 'lucide-react'
+import { BellRing, CircleAlert, CloudSun, FileText, Gauge, Inbox, LayoutDashboard, LockKeyhole, LogOut, Menu, Moon, Newspaper, Radar, RefreshCw, Settings2, ShieldCheck, Sun, UserRoundCog, X } from 'lucide-react'
 import { AdminApi, ApiError } from '../shared/api'
 import type { AdminIdentity, AdminResourceName, AnalysisConfig, ConfigRevision, DigestConfig, ManagedSource, NewsCatalogEntry, NewsCatalogFeed, OutboxAlert, Reminder, SourceKind, SourceQualityProfile } from '../shared/types'
 import { deriveHealth, formatDate } from '../shared/utils'
@@ -18,10 +18,12 @@ import { OutboxPanel } from '../features/settings/OutboxPanel'
 import { SettingsPage } from '../features/settings/SettingsPage'
 import { SourceQualityPage } from '../features/source-quality/SourceQualityPage'
 import { UsersPage } from '../features/users/UsersPage'
+import { WeatherPage } from '../features/weather/WeatherPage'
 
 const pages = [
   { id: 'overview', label: '概览', subtitle: '重要的事情，一眼就能看到', icon: LayoutDashboard },
   { id: 'reminders', label: '提醒', subtitle: '安排未来要发送的消息', icon: BellRing },
+  { id: 'weather', label: '天气', subtitle: '本地预报与天气变化', icon: CloudSun },
   { id: 'sources', label: '监测来源', subtitle: '决定 EyeOfSauron 要观察什么', icon: Radar },
   { id: 'events', label: '事件', subtitle: '异常、恢复和重要动态', icon: Inbox },
   { id: 'daily-events', label: '日常事件', subtitle: '浏览聚合事件和原始报道', icon: Newspaper },
@@ -500,6 +502,7 @@ export default function AdminApp() {
       <main className="page-content">{!hasAnyData ? <div className="loading-state"><RefreshCw className="spin" size={24} />正在读取管理数据…</div> : <>
         {page === 'overview' && <OverviewPage health={health} pending={pending} observations={Number(status.observations || 0)} sourceStates={sourceStates} managedSources={managedSources} incidents={incidents} reminders={reminders} go={(value) => go(value as PageId)} onCreateReminder={() => openReminder()} />}
         {page === 'reminders' && <RemindersPage reminders={reminders} total={resources.reminders.data?.pagination?.total} busy={busy || !can('reminders:write')} onOpen={openReminder} onToggle={(item) => { void toggleReminder(item) }} onDelete={deleteReminder} />}
+        {page === 'weather' && <WeatherPage api={api} canWrite={can('settings:write')} onUnauthorized={logout} />}
         {page === 'sources' && <SourcesPage api={api} sources={managedSources} sourceStates={sourceStates} busy={busy || !can('sources:write')} query={sourceQuery} onQuery={setSourceQuery} onCreate={openSource} catalog={newsCatalog} catalogError={resources.newsCatalog.error} onCatalogFeed={prepareCatalogFeed} onEdit={editSource} onToggle={(source) => { void toggleSource(source) }} onDelete={deleteSource} />}
         {page === 'events' && <EventsPage api={api} onUnauthorized={logout} initialAlertId={/^\/events\/([1-9]\d*)$/.exec(window.location.pathname)?.[1]} incidents={incidents} managedSources={managedSources} total={resources.incidents.data?.pagination?.total} health={health} openCount={openIncidents} canCreate={can('events:write')} onCreated={() => { void refresh(true) }} notify={notify} />}
         {page === 'daily-events' && <DailyEventsPage api={api} onUnauthorized={logout} canWrite={can('events:write')} />}

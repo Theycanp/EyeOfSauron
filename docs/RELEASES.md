@@ -40,7 +40,24 @@ production data are never release artifacts.
 9. Create an annotated `vMAJOR.MINOR.PATCH` tag only after the production result
    is accepted.
 
-## Rollback policy
+## Isolated Python runtime
+
+Production may use a root-owned virtual environment outside the immutable code
+release, with exactly `requirements/runtime.txt` installed. Pass its absolute
+Python path as `ARGUS_PYTHON` to both prepare and activation commands. Preflight
+rejects mismatched direct dependency versions. The installer writes that path
+into service ExecStart and ARGUS_PYTHON environment, including the watchdog's
+health gate, rather than installing untracked systemd drop-ins. Never overwrite
+the distribution's Python packages or reuse a writable developer environment.
+
+Create a new versioned runtime when dependencies change; keep the old runtime
+until the matching release and rollback point are retired. Automatic activation
+failure restores the exact saved unit files. Explicit rollback with a pre-release
+bundle also restores its units (and therefore its original interpreter); code-only
+rollback uses the interpreter passed to the command. Local `.service.d` overrides
+are not managed or backed up by these tools and must be inspected separately.
+
+## Rollback procedure
 
 Code rollback is an atomic symlink change. If the target release supports the
 live database schema, the live state may be retained. A schema downgrade must

@@ -87,6 +87,21 @@ class AdminAuthHttpTests(unittest.TestCase):
                 )
                 with urllib.request.urlopen(users) as response:
                     self.assertEqual(2, len(json.loads(response.read())["users"]))
+                weather_request = urllib.request.Request(
+                    f"{base_url}/api/weather", headers={"Cookie": cookie_values}
+                )
+                with urllib.request.urlopen(weather_request) as response:
+                    weather = json.loads(response.read())
+                self.assertEqual("北京邮电大学沙河校区", weather["subscription"]["label"])
+                weather_payload = {key: value for key, value in weather["subscription"].items() if key != "id"}
+                weather_payload["daily_time"] = "08:00"
+                weather_write = urllib.request.Request(
+                    f"{base_url}/api/weather", data=json.dumps(weather_payload).encode(),
+                    headers={"Cookie": cookie_values, "Content-Type": "application/json",
+                             "Origin": base_url, "X-CSRF-Token": csrf}, method="POST",
+                )
+                with urllib.request.urlopen(weather_write) as response:
+                    self.assertEqual("08:00", json.loads(response.read())["subscription"]["daily_time"])
                 diagnostics = urllib.request.Request(
                     f"{base_url}/api/source-health/diagnostic_feed", headers={"Cookie": cookie_values}
                 )
@@ -117,6 +132,14 @@ class AdminAuthHttpTests(unittest.TestCase):
                 )
                 with self.assertRaises(urllib.error.HTTPError) as failure:
                     urllib.request.urlopen(missing_csrf)
+                self.assertEqual(403, failure.exception.code)
+                weather_missing_csrf = urllib.request.Request(
+                    f"{base_url}/api/weather", data=json.dumps(weather_payload).encode(),
+                    headers={"Cookie": cookie_values, "Content-Type": "application/json", "Origin": base_url},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as failure:
+                    urllib.request.urlopen(weather_missing_csrf)
                 self.assertEqual(403, failure.exception.code)
                 valid_write = urllib.request.Request(
                     f"{base_url}/api/users",
@@ -195,6 +218,18 @@ class AdminAuthHttpTests(unittest.TestCase):
                     f"{base_url}/api/source-health/diagnostic_feed", headers={"Cookie": reader_cookies}
                 )) as response:
                     self.assertEqual(200, response.status)
+                with urllib.request.urlopen(urllib.request.Request(
+                    f"{base_url}/api/weather", headers={"Cookie": reader_cookies}
+                )) as response:
+                    self.assertEqual(200, response.status)
+                reader_weather_write = urllib.request.Request(
+                    f"{base_url}/api/weather", data=json.dumps(weather_payload).encode(),
+                    headers={"Cookie": reader_cookies, "Content-Type": "application/json", "Origin": base_url},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as failure:
+                    urllib.request.urlopen(reader_weather_write)
+                self.assertEqual(403, failure.exception.code)
                 with self.assertRaises(urllib.error.HTTPError) as failure:
                     urllib.request.urlopen(urllib.request.Request(
                         f"{base_url}/api/users", headers={"Cookie": reader_cookies}
