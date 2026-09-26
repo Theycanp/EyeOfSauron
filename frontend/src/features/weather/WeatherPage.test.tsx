@@ -16,6 +16,22 @@ const status: WeatherStatus = {
 }
 
 describe('WeatherPage', () => {
+  it('distinguishes the approximate noon angle from the current angle', async () => {
+    const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
+      condition: '晴', low: 12, high: 25, rain_mm: 0, rain_probability: 0,
+      wind_gust_kmh: 12, temperature_now: 20, observed_at: 1790395200, is_today: true,
+      astronomy: { date: '20260926', sunrise: null, sunset: null, moonrise: null,
+        moonset: null, moon_phase: null, moon_illumination: null,
+        solar_elevation: 22, solar_azimuth: 90, solar_noon_elevation: 48.6,
+        solar_noon_at: 1790395560, updated_at: 1790395200 },
+    } }) } as unknown as AdminApi
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    expect(await screen.findByText('近似正午太阳高度')).toBeInTheDocument()
+    expect(screen.getByText(/48\.6°.*海平面基准/)).toBeInTheDocument()
+    expect(screen.getByText('查询时太阳角度')).toBeInTheDocument()
+    expect(screen.getByText(/高度 22\.0°/)).toBeInTheDocument()
+  })
+
   it('selects a searched place and saves a revisioned subscription', async () => {
     const saveWeather = vi.fn().mockResolvedValue({ subscription: { ...status.subscription, revision: 2 } })
     const api = {

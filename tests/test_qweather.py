@@ -106,23 +106,33 @@ class QWeatherTests(unittest.TestCase):
             {"code": "200", "moonrise": "2026-09-26T17:41+08:00", "moonset": "2026-09-26T05:22+08:00",
              "moonPhase": [{"fxTime": "2026-09-26T12:00+08:00", "name": "满月", "illumination": "99"}]},
             {"code": "200", "solarElevationAngle": "-2.54", "solarAzimuthAngle": "270.40"},
+            {"code": "200", "solarElevationAngle": "48.61", "solarAzimuthAngle": "180.02"},
         ]
         with patch.object(self.provider, "_request", side_effect=payloads) as request:
             with patch("argus.qweather.datetime") as clock:
                 from datetime import datetime
                 from zoneinfo import ZoneInfo
                 clock.now.return_value = datetime(2026, 9, 26, 18, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+                clock.fromisoformat.side_effect = datetime.fromisoformat
+                clock.fromtimestamp.side_effect = datetime.fromtimestamp
                 result = self.provider.fetch_astronomy(self.subscription, "20260926")
         self.assertEqual("满月", result.moon_phase)
         self.assertEqual(99, result.moon_illumination)
         self.assertEqual(-2.54, result.solar_elevation)
-        self.assertIn("time=1815", request.call_args.args[0])
+        self.assertEqual(48.61, result.solar_noon_elevation)
+        self.assertEqual("12:06", datetime.fromtimestamp(result.solar_noon_at, ZoneInfo("Asia/Shanghai")).strftime("%H:%M"))
+        self.assertIn("time=1815", request.call_args_list[2].args[0])
+        self.assertIn("time=1206", request.call_args.args[0])
         self.assertIn("tz=0800&alt=0", request.call_args.args[0])
-        with patch.object(self.provider, "_request", side_effect=[*payloads[:2], QWeatherError("angle unavailable")]):
+        with patch.object(self.provider, "_request", side_effect=[*payloads[:2], QWeatherError("angle unavailable"), QWeatherError("noon unavailable")]):
             with patch("argus.qweather.datetime") as clock:
                 clock.now.return_value = datetime(2026, 9, 26, 18, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+                clock.fromisoformat.side_effect = datetime.fromisoformat
+                clock.fromtimestamp.side_effect = datetime.fromtimestamp
                 without_angle = self.provider.fetch_astronomy(self.subscription, "20260926")
         self.assertIsNone(without_angle.solar_elevation)
+        self.assertIsNone(without_angle.solar_noon_elevation)
+        self.assertIsNone(without_angle.solar_noon_at)
         self.assertEqual("满月", without_angle.moon_phase)
 
 

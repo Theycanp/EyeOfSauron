@@ -237,20 +237,41 @@ class QWeatherProvider:
                 )
             except QWeatherError:
                 pass  # Optional angle data must not hide valid sun/moon times.
+        sunrise = _optional_timestamp(sun.get("sunrise"))
+        sunset = _optional_timestamp(sun.get("sunset"))
+        noon_at: int | None = None
+        noon_payload: dict[str, Any] = {}
+        if sunrise is not None and sunset is not None and 4 * 3600 <= sunset - sunrise <= 20 * 3600:
+            noon_at = (sunrise + sunset) // 2
+            local_noon = datetime.fromtimestamp(noon_at, ZoneInfo(subscription.timezone))
+            noon_offset_minutes = int((local_noon.utcoffset() or UTC.utcoffset(local_noon)).total_seconds() // 60)
+            noon_tz = f"{abs(noon_offset_minutes) // 60:02d}{abs(noon_offset_minutes) % 60:02d}"
+            if noon_offset_minutes < 0:
+                noon_tz = "-" + noon_tz
+            try:
+                noon_payload = self._request(
+                    f"/v7/astronomy/solar-elevation-angle?location={location}&date={date}"
+                    f"&time={local_noon:%H%M}&tz={noon_tz}&alt=0"
+                )
+            except QWeatherError:
+                pass
         def optional_number(value: Any, low: float, high: float) -> float | None:
             try:
                 number = float(value)
             except (TypeError, ValueError):
                 return None
             return number if math.isfinite(number) and low <= number <= high else None
+        noon_elevation = optional_number(noon_payload.get("solarElevationAngle"), -90, 90)
         return WeatherAstronomy(
             date=date,
-            sunrise=_optional_timestamp(sun.get("sunrise")),
-            sunset=_optional_timestamp(sun.get("sunset")),
+            sunrise=sunrise,
+            sunset=sunset,
             moonrise=_optional_timestamp(moon.get("moonrise")),
             moonset=_optional_timestamp(moon.get("moonset")),
             moon_phase=str(phase["name"])[:80] if isinstance(phase, dict) else None,
             moon_illumination=illumination,
             solar_elevation=optional_number(angle_payload.get("solarElevationAngle"), -90, 90),
             solar_azimuth=optional_number(angle_payload.get("solarAzimuthAngle"), 0, 360),
+            solar_noon_elevation=noon_elevation,
+            solar_noon_at=noon_at if noon_elevation is not None else None,
         )

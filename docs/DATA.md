@@ -59,6 +59,10 @@ Their source timestamps and local dates govern freshness; changing location
 clears both records. Upgrade from schema 23 is additive and must preserve the
 existing subscription, forecast baseline, and alert history. A rollback to
 schema-23 code requires its matching pre-release backup, not only a code switch.
+Schema 25 adds nullable `solar_noon_elevation` and `solar_noon_at` columns to
+the typed astronomy table. Existing records retain their poll-time angle and
+read as noon-unavailable until a fresh sample; the forecast state is unchanged.
+Rollback to code that supports only schema 24 requires its matching backup.
 
 ## Retention and backup
 

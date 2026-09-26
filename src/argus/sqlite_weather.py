@@ -56,7 +56,8 @@ class SQLiteWeather:
         ).fetchone()
         sky_row = self.connection.execute(
             "SELECT local_date,sunrise,sunset,moonrise,moonset,moon_phase,moon_illumination,"
-            "solar_elevation,solar_azimuth,updated_at FROM weather_astronomy WHERE subscription_id=?",
+            "solar_elevation,solar_azimuth,solar_noon_elevation,solar_noon_at,updated_at "
+            "FROM weather_astronomy WHERE subscription_id=?",
             (subscription.id,),
         ).fetchone()
         latest = json.loads(row["latest_json"]) if row["latest_json"] else None
@@ -150,7 +151,7 @@ class SQLiteWeather:
             day = daily_due(subscription, state["last_daily_date"], now)
             if day is not None:
                 sky_row = self.connection.execute(
-                    "SELECT moonrise,moonset,moon_phase,moon_illumination,solar_elevation,solar_azimuth,updated_at "
+                    "SELECT moonrise,moonset,moon_phase,moon_illumination,solar_noon_elevation,solar_noon_at "
                     "FROM weather_astronomy WHERE subscription_id=? AND local_date=?",
                     (subscription.id, day.replace("-", "")),
                 ).fetchone()
@@ -263,16 +264,17 @@ class SQLiteWeather:
                 return
             self.connection.execute(
                 "INSERT INTO weather_astronomy(subscription_id,local_date,sunrise,sunset,moonrise,moonset,"
-                "moon_phase,moon_illumination,solar_elevation,solar_azimuth,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(subscription_id) DO UPDATE SET "
+                "moon_phase,moon_illumination,solar_elevation,solar_azimuth,solar_noon_elevation,solar_noon_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(subscription_id) DO UPDATE SET "
                 "local_date=excluded.local_date,sunrise=excluded.sunrise,sunset=excluded.sunset,"
                 "moonrise=excluded.moonrise,moonset=excluded.moonset,moon_phase=excluded.moon_phase,"
                 "moon_illumination=excluded.moon_illumination,solar_elevation=excluded.solar_elevation,"
-                "solar_azimuth=excluded.solar_azimuth,updated_at=excluded.updated_at",
+                "solar_azimuth=excluded.solar_azimuth,solar_noon_elevation=excluded.solar_noon_elevation,"
+                "solar_noon_at=excluded.solar_noon_at,updated_at=excluded.updated_at",
                 (subscription.id, astronomy.date, astronomy.sunrise, astronomy.sunset,
                  astronomy.moonrise, astronomy.moonset, astronomy.moon_phase,
                  astronomy.moon_illumination, astronomy.solar_elevation,
-                 astronomy.solar_azimuth, now),
+                 astronomy.solar_azimuth, astronomy.solar_noon_elevation, astronomy.solar_noon_at, now),
             )
 
     def enqueue_weather_test(self, *, topic: str, click_url: str, now: int) -> bool:

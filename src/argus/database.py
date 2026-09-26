@@ -62,7 +62,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 
 _DIGEST_PROVIDER_TRACE_FIELDS = frozenset({
@@ -1580,6 +1580,15 @@ class Database:
                     )
                 """)
                 self.connection.execute("PRAGMA user_version=24")
+            version = 24
+        if version < 25:
+            with self.unit_of_work():
+                columns = {row[1] for row in self.connection.execute("PRAGMA table_info(weather_astronomy)")}
+                if "solar_noon_elevation" not in columns:
+                    self.connection.execute("ALTER TABLE weather_astronomy ADD COLUMN solar_noon_elevation REAL")
+                if "solar_noon_at" not in columns:
+                    self.connection.execute("ALTER TABLE weather_astronomy ADD COLUMN solar_noon_at INTEGER")
+                self.connection.execute("PRAGMA user_version=25")
 
     def record_digest_preparation_failure(
         self, digest_key: str, *, stage: str, error: BaseException | str, now: int,
