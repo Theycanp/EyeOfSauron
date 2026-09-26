@@ -107,6 +107,32 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, status["consecutive_failures"])
         self.assertIsNone(status["rain_expected"])
 
+    async def test_weather_location_revision_wakes_hourly_worker(self) -> None:
+        from dataclasses import asdict
+        from unittest.mock import AsyncMock, Mock
+
+        service = self._service(None, None)
+        service.weather_provider = Mock()
+        current = self.database.get_weather_subscription()
+        calls = 0
+
+        async def poll() -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                editable = {key: value for key, value in asdict(current).items() if key != "id"}
+                self.database.update_weather_subscription(
+                    {**editable, "label": "new location", "latitude": 39.9},
+                    actor="tester", now=int(time.time()),
+                )
+            else:
+                service.stop_event.set()
+            return True
+
+        service.process_weather_once = AsyncMock(side_effect=poll)
+        await asyncio.wait_for(service._weather_loop(), timeout=3)
+        self.assertEqual(2, calls)
+
     async def test_local_weather_revision_starts_all_three_channels(self) -> None:
         from unittest.mock import Mock
         from argus.weather import WeatherAstronomy

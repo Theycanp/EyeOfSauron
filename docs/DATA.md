@@ -67,6 +67,14 @@ schema-24 code also requires the matching schema-24 backup.
 QWeather provider health rows are created lazily for optional channels, including
 astronomy; schema 26 expands the provider-kind constraint without fabricating a
 success before the first real response.
+Schema 27 adds reminder acknowledgement settings, one row per scheduled reminder
+occurrence, and an optional outbox-to-occurrence reference. Only the reminder
+repository reads or writes these tables. Existing reminders retain their prior
+single-send behavior because acknowledgement defaults off. The migration is
+additive and does not rewrite historical alerts. Occurrences carry their own
+message snapshot and survive parent deletion so delivered links stay readable;
+unreferenced old occurrences are removed by normal retention cleanup. Code supporting only schema 26
+requires the matching pre-release backup for rollback.
 
 ## Retention and backup
 

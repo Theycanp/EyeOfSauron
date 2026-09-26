@@ -36,7 +36,7 @@ require login. `POST /api/weather` needs `settings:write`, same-origin, CSRF,
 and the current weather revision. The two notification toggles can be disabled
 independently without disabling collection. The default location and exact
 alert rules and official-warning coverage limits are in
-`WEATHER.md`. After a schema-24 rollout, verify a real `weather_poll_succeeded`
+`WEATHER.md`. After a weather schema rollout, verify a real `weather_poll_succeeded`
 log line and the Weather page's success timestamp; do not simulate a severe
 weather warning on the production ntfy topic.
 When QWeather is configured, also verify independent `minutely`, `alerts` and
@@ -207,6 +207,23 @@ to the configured `eos` ntfy topic. API routes are `GET/POST
 /api/reminders/<id>/enable|disable`. One-time reminders missed while the host is
 offline are sent after recovery; daily downtime is coalesced to one missed
 notification rather than replaying every elapsed day.
+
+In the reminder editor, enable **require acknowledgement** to make the ntfy
+notification open its occurrence in the EOS admin page. Set the interval in
+minutes (1 to 43,200) and the number of additional sends (0 means unlimited,
+up to 100). Repeats start after actual delivery, never while the previous copy
+is still queued or retrying. Click **已收到** on the linked page to stop repeats
+for that occurrence; for daily reminders, tomorrow's occurrence remains
+independent. The read endpoint is `GET /api/reminders/occurrences/<id>` and the
+CSRF-protected write endpoint is `POST
+/api/reminders/occurrences/<id>/acknowledge`. Editing or disabling the parent
+reminder ends outstanding repeat schedules; an in-flight notification cannot
+be recalled. Deleting a reminder also stops future sends, while delivered
+occurrence details remain accessible from earlier ntfy links until normal
+retention cleanup. A dead-letter delivery does not start another repeat timer:
+inspect and retry it from the outbox; do not treat an undelivered reminder as
+already received. Unlimited repeats are per occurrence, so a daily reminder
+left unconfirmed across several days can have several independent schedules.
 
 The emergency bearer credential is for local recovery only. Retrieve it only
 when performing a direct loopback API repair; do not send it through chat or

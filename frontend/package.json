@@ -1,7 +1,7 @@
 {
   "name": "eyeofsauron-admin-web",
   "private": true,
-  "version": "0.21.0",
+  "version": "0.26.0",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
@@ -14,6 +14,7 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
+    "leaflet": "^1.9.4",
     "lucide-react": "^1.44.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
@@ -24,6 +25,7 @@
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.0.0",
     "@testing-library/user-event": "^14.0.0",
+    "@types/leaflet": "^1.9.22",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

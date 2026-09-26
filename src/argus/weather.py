@@ -42,6 +42,7 @@ class ForecastHour:
     precipitation: float | None
     rain_probability: float | None
     wind_gust: float | None
+    weather_code: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,10 @@ class WeatherForecast:
     wind_direction: float | None = None
     sunrise: int | None = None
     sunset: int | None = None
+    # Open-Meteo's daily maximum UV index for the local forecast date.  It is
+    # optional so providers and historical fixtures without UV data remain
+    # valid; callers must render the missing value explicitly.
+    uv_index_max: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +199,7 @@ def validate_forecast(forecast: WeatherForecast, now: int) -> None:
         (forecast.humidity, 0, 100, "humidity"),
         (forecast.wind_speed, 0, 400, "wind speed"),
         (forecast.wind_direction, 0, 360, "wind direction"),
+        (forecast.uv_index_max, 0, 30, "UV index"),
     ):
         if value is not None and (not math.isfinite(value) or not low <= value <= high):
             raise WeatherError(f"weather provider current {label} is invalid")
@@ -210,10 +216,17 @@ def validate_forecast(forecast: WeatherForecast, now: int) -> None:
             (hour.precipitation, 0, 500),
             (hour.rain_probability, 0, 100),
             (hour.wind_gust, 0, 400),
+            (hour.weather_code, 0, 99),
         )
+        # weather_code is optional for old/provider fixtures.  Numeric weather
+        # fields remain mandatory for every hourly point.
+        required = values[:-1]
         if any(value is None or not math.isfinite(value) or not low <= value <= high
-               for value, low, high in values):
+               for value, low, high in required):
             raise WeatherError("weather provider hourly forecast is incomplete or invalid")
+        code = values[-1][0]
+        if code is not None and (type(code) is not int or not 0 <= code <= 99):
+            raise WeatherError("weather provider hourly weather code is invalid")
 
 
 def parse_weather_subscription(data: Mapping[str, Any], previous: WeatherSubscription) -> WeatherSubscription:
@@ -289,10 +302,12 @@ def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForeca
     sun = (f"日出 {format_clock(forecast.sunrise, subscription.timezone)}、日落 "
            f"{format_clock(forecast.sunset, subscription.timezone)}"
            if forecast.sunrise and forecast.sunset else "日出日落暂无数据")
+    uv = (f"今日最高紫外线指数 {forecast.uv_index_max:.1f}"
+          if forecast.uv_index_max is not None else "今日最高紫外线指数暂无数据")
     message = (f"{subscription.label}：{weather_description(forecast.weather_code)}，当前 {forecast.temperature:.0f}℃，{temp_range}。"
                f"今日剩余时段预计降水 {rain:.1f} mm，最高降雨概率 {probability:.0f}%，"
                f"阵风最高 {gust:.0f} km/h；{humidity}；{wind}。\n"
-               f"{sun}。\n"
+               f"{sun}；{uv}。\n"
                f"阳历 {local_now.date().isoformat()}，{calendar['lunar']}。{calendar['festivals']}"
                "\n数据：Open-Meteo 预报，非官方气象预警。")
     return message, {"condition": weather_description(forecast.weather_code),
@@ -305,6 +320,16 @@ def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForeca
                      "wind_direction_name": wind_direction_name(forecast.wind_direction),
                      "sunrise": forecast.sunrise,
                      "sunset": forecast.sunset,
+                     "uv_index_max": forecast.uv_index_max,
+                     "forecast_hours": [
+                         {"at": hour.at, "temperature": hour.temperature,
+                          "precipitation": hour.precipitation,
+                          "rain_probability": hour.rain_probability,
+                          "wind_gust": hour.wind_gust,
+                          "weather_code": hour.weather_code}
+                         for hour in forecast.hours
+                         if now <= hour.at <= now + 48 * 3600
+                     ][:48],
                      "calendar": calendar,
                      "observed_at": forecast.observed_at}
 

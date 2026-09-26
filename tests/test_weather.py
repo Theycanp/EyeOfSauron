@@ -65,11 +65,70 @@ class WeatherTests(unittest.TestCase):
         )]
 
     def test_schema_seed_uses_verified_campus_location(self) -> None:
-        self.assertEqual(26, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(27, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("北京邮电大学沙河校区", self.subscription.label)
         self.assertAlmostEqual(40.1561163, self.subscription.latitude)
         self.assertAlmostEqual(116.2835626, self.subscription.longitude)
         self.assertEqual("07:00", self.subscription.daily_time)
+
+    def test_uv_index_is_kept_in_forecast_summary_and_daily_message(self) -> None:
+        current = DAY + 7 * 3600 + 60
+        value = forecast(current)
+        # WeatherForecast uses slots, so construct the compatible value without
+        # relying on provider-specific positional arguments.
+        value = WeatherForecast(
+            observed_at=value.observed_at, temperature=value.temperature,
+            weather_code=value.weather_code, hours=value.hours,
+            humidity=value.humidity, wind_speed=value.wind_speed,
+            wind_direction=value.wind_direction, sunrise=value.sunrise,
+            sunset=value.sunset, uv_index_max=6.8,
+        )
+        message, summary = summarize_weather(self.subscription, value, current)
+        self.assertIn("今日最高紫外线指数 6.8", message)
+        self.assertEqual(6.8, summary["uv_index_max"])
+        self.assertGreaterEqual(len(summary["forecast_hours"]), 24)
+        self.assertLessEqual(len(summary["forecast_hours"]), 48)
+
+    def test_open_meteo_parses_daily_uv_and_hourly_weather_codes(self) -> None:
+        times = [f"2026-09-26T{hour:02d}:00" for hour in range(24)] + [
+            f"2026-09-{27 + index // 24:02d}T{index % 24:02d}:00" for index in range(48)
+        ]
+        payload = {
+            "current": {
+                "time": "2026-09-26T07:00", "temperature_2m": 20,
+                "relative_humidity_2m": 55, "weather_code": 2,
+                "wind_speed_10m": 10, "wind_direction_10m": 180,
+                "wind_gusts_10m": 20,
+            },
+            "hourly": {
+                "time": times, "temperature_2m": [20] * 72,
+                "precipitation_probability": [0] * 72,
+                "precipitation": [0] * 72, "wind_gusts_10m": [20] * 72,
+                "weather_code": [2] * 72,
+            },
+            "daily": {
+                "time": ["2026-09-26", "2026-09-27"],
+                "sunrise": ["2026-09-26T06:00", "2026-09-27T06:01"],
+                "sunset": ["2026-09-26T18:00", "2026-09-27T18:00"],
+                "uv_index_max": [6.8, 5.1],
+            },
+        }
+        with patch("argus.open_meteo._request_json", return_value=payload):
+            parsed = OpenMeteoProvider().fetch(self.subscription)
+        self.assertEqual(6.8, parsed.uv_index_max)
+        self.assertEqual(2, parsed.hours[0].weather_code)
+
+    def test_open_meteo_resolves_timezone_with_bounded_forecast_request(self) -> None:
+        with patch("argus.open_meteo._request_json", return_value={"timezone": "Asia/Tokyo"}) as request:
+            self.assertEqual("Asia/Tokyo", OpenMeteoProvider().resolve_timezone(35.68, 139.76))
+        self.assertEqual("https://api.open-meteo.com", request.call_args.args[0])
+        self.assertEqual("auto", request.call_args.args[2]["timezone"])
+        self.assertEqual("1", request.call_args.args[2]["forecast_days"])
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            OpenMeteoProvider().resolve_timezone(float("nan"), 116)
+        with patch("argus.open_meteo._request_json", return_value={"timezone": "../../etc/passwd"}):
+            with self.assertRaisesRegex(WeatherProviderError, "timezone is invalid"):
+                OpenMeteoProvider().resolve_timezone(40, 116)
 
     def test_daily_is_once_per_local_day_and_late_run_does_not_send_old_report(self) -> None:
         seven = DAY + 7 * 3600 + 60
@@ -148,7 +207,7 @@ class WeatherTests(unittest.TestCase):
         connection.commit()
         connection.close()
         self.database = Database(self.path)
-        self.assertEqual(26, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(27, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("北京邮电大学沙河校区", self.database.get_weather_subscription().label)
 
     def test_schema_twenty_three_migration_preserves_existing_weather_state(self) -> None:
@@ -164,7 +223,7 @@ class WeatherTests(unittest.TestCase):
         connection.close()
         self.database = Database(self.path)
         after = self.database.get_weather_status()
-        self.assertEqual(26, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(27, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual(before["subscription"], after["subscription"])
         self.assertEqual(before["rain_expected"], after["rain_expected"])
         self.assertEqual(before["latest"]["observed_at"], after["latest"]["observed_at"])
@@ -183,7 +242,7 @@ class WeatherTests(unittest.TestCase):
         connection.commit()
         connection.close()
         self.database = Database(self.path)
-        self.assertEqual(26, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(27, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         row = self.database.connection.execute(
             "SELECT moon_phase,solar_elevation,solar_noon_elevation,solar_noon_at "
             "FROM weather_astronomy WHERE subscription_id='home'"

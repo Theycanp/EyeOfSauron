@@ -30,6 +30,9 @@ class ReminderSpec:
     enabled: bool
     priority: int
     tags: tuple[str, ...]
+    ack_enabled: bool = False
+    repeat_interval_seconds: int | None = None
+    repeat_max_attempts: int = 0
 
 
 def new_reminder_id() -> str:
@@ -63,6 +66,7 @@ def parse_reminder(data: Mapping[str, Any], now: int) -> ReminderSpec:
     allowed = {
         "id", "title", "message", "schedule_kind", "run_at", "delay_seconds",
         "daily_time", "timezone", "enabled", "priority", "tags",
+        "ack_enabled", "repeat_interval_seconds", "repeat_max_attempts",
     }
     unknown = sorted(set(data) - allowed)
     if unknown:
@@ -90,6 +94,25 @@ def parse_reminder(data: Mapping[str, Any], now: int) -> ReminderSpec:
     ):
         raise ReminderError("tags must contain one to five valid ntfy tags")
     timezone = _timezone(data.get("timezone", "UTC"))
+
+    ack_enabled = data.get("ack_enabled", False)
+    if not isinstance(ack_enabled, bool):
+        raise ReminderError("ack_enabled must be boolean")
+    raw_interval = data.get("repeat_interval_seconds")
+    if raw_interval is not None and (
+        not isinstance(raw_interval, int) or isinstance(raw_interval, bool)
+        or not 60 <= raw_interval <= 30 * 86400
+    ):
+        raise ReminderError("repeat_interval_seconds must be between 60 seconds and 30 days")
+    repeat_max_attempts = data.get("repeat_max_attempts", 0)
+    if (
+        not isinstance(repeat_max_attempts, int)
+        or isinstance(repeat_max_attempts, bool)
+        or not 0 <= repeat_max_attempts <= 100
+    ):
+        raise ReminderError("repeat_max_attempts must be between 0 (unlimited) and 100")
+    if ack_enabled and raw_interval is None:
+        raise ReminderError("repeat_interval_seconds is required when acknowledgement is enabled")
 
     run_at: int | None = None
     daily_time: str | None = None
@@ -125,6 +148,9 @@ def parse_reminder(data: Mapping[str, Any], now: int) -> ReminderSpec:
         enabled=enabled,
         priority=priority,
         tags=tuple(raw_tags),
+        ack_enabled=ack_enabled,
+        repeat_interval_seconds=raw_interval,
+        repeat_max_attempts=repeat_max_attempts,
     )
 
 

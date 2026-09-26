@@ -144,6 +144,131 @@ class ReminderTests(unittest.TestCase):
         self.assertIsNotNone(restored)
         self.assertEqual(NOW + 60, restored["next_run_at"])
 
+    def test_acknowledged_reminder_repeats_only_after_delivery_and_stops(self) -> None:
+        spec = parse_reminder(reminder_payload(
+            ack_enabled=True, repeat_interval_seconds=120, repeat_max_attempts=2,
+        ), NOW)
+        self.database.upsert_reminder(spec, "tester", NOW)
+        self.assertEqual(1, self.database.enqueue_due_reminders(
+            NOW + 60, "eos", click_base_url="https://eos.example.test"
+        ))
+        first = self.database.claim_due_alert(NOW + 60, 30)
+        assert first is not None
+        self.assertIn("/#/reminders?occurrence=", first.click_url)
+        self.assertEqual(0, self.database.enqueue_due_reminders(NOW + 500, "eos"))
+        self.database.mark_delivered(first.id, NOW + 500)
+        self.assertEqual(0, self.database.enqueue_due_reminders(NOW + 619, "eos"))
+        self.assertEqual(1, self.database.enqueue_due_reminders(NOW + 620, "eos"))
+        repeated = self.database.claim_due_alert(NOW + 620, 30)
+        assert repeated is not None
+        self.database.mark_delivered(repeated.id, NOW + 621)
+        occurrence = self.database.connection.execute(
+            "SELECT id FROM reminder_occurrences WHERE reminder_id = ?", (spec.id,)
+        ).fetchone()
+        assert occurrence is not None
+        self.assertIsNotNone(self.database.acknowledge_reminder_occurrence(
+            int(occurrence["id"]), "tester", NOW + 622
+        ))
+        self.assertEqual(0, self.database.enqueue_due_reminders(NOW + 10000, "eos"))
+        self.assertEqual(2, self.database.connection.execute(
+            "SELECT COUNT(*) FROM alerts WHERE reminder_id = ?", (spec.id,)
+        ).fetchone()[0])
+
+    def test_repeat_state_survives_restart_and_maximum_counts_repeats(self) -> None:
+        spec = parse_reminder(reminder_payload(
+            ack_enabled=True, repeat_interval_seconds=60, repeat_max_attempts=1,
+        ), NOW)
+        self.database.upsert_reminder(spec, "tester", NOW)
+        self.database.enqueue_due_reminders(NOW + 60, "eos")
+        first = self.database.claim_due_alert(NOW + 60, 30)
+        assert first is not None
+        self.database.mark_delivered(first.id, NOW + 61)
+        path = self.database.path
+        self.database.close()
+        self.database = Database(path)
+        self.assertEqual(1, self.database.enqueue_due_reminders(NOW + 121, "eos"))
+        repeated = self.database.claim_due_alert(NOW + 121, 30)
+        assert repeated is not None
+        self.database.mark_delivered(repeated.id, NOW + 122)
+        self.assertEqual(0, self.database.enqueue_due_reminders(NOW + 10000, "eos"))
+
+    def test_reminder_repeat_configuration_validation(self) -> None:
+        with self.assertRaises(ReminderError):
+            parse_reminder(reminder_payload(ack_enabled=True), NOW)
+        with self.assertRaises(ReminderError):
+            parse_reminder(reminder_payload(ack_enabled=True, repeat_interval_seconds=59), NOW)
+        with self.assertRaises(ReminderError):
+            parse_reminder(reminder_payload(ack_enabled=True, repeat_interval_seconds=60, repeat_max_attempts=-1), NOW)
+
+    def test_daily_acknowledgement_is_scoped_to_one_occurrence(self) -> None:
+        spec = parse_reminder(reminder_payload(
+            schedule_kind="daily", daily_time="09:00", run_at=None,
+            ack_enabled=True, repeat_interval_seconds=3600, repeat_max_attempts=1,
+        ), NOW)
+        saved = self.database.upsert_reminder(spec, "tester", NOW)
+        first_due = int(saved["next_run_at"])
+        self.database.enqueue_due_reminders(first_due, "eos")
+        first_alert = self.database.claim_due_alert(first_due, 30)
+        assert first_alert is not None
+        self.database.mark_delivered(first_alert.id, first_due + 1)
+        first_occurrence = self.database.connection.execute(
+            "SELECT id FROM reminder_occurrences WHERE reminder_id = ?", (spec.id,)
+        ).fetchone()
+        assert first_occurrence is not None
+        self.database.acknowledge_reminder_occurrence(int(first_occurrence["id"]), "tester", first_due + 2)
+        next_due = int(self.database.get_reminder(spec.id)["next_run_at"])
+        self.assertEqual(1, self.database.enqueue_due_reminders(next_due, "eos"))
+        occurrences = list(self.database.connection.execute(
+            "SELECT acknowledged_at, scheduled_for FROM reminder_occurrences WHERE reminder_id = ? ORDER BY scheduled_for",
+            (spec.id,),
+        ))
+        self.assertEqual(2, len(occurrences))
+        self.assertIsNotNone(occurrences[0]["acknowledged_at"])
+        self.assertIsNone(occurrences[1]["acknowledged_at"])
+
+    def test_occurrence_detail_preserves_delivered_message_after_edit(self) -> None:
+        spec = parse_reminder(reminder_payload(
+            ack_enabled=True, repeat_interval_seconds=60,
+        ), NOW)
+        self.database.upsert_reminder(spec, "tester", NOW)
+        self.database.enqueue_due_reminders(NOW + 60, "eos")
+        alert = self.database.claim_due_alert(NOW + 60, 30)
+        assert alert is not None
+        self.database.mark_delivered(alert.id, NOW + 61)
+        occurrence_id = int(self.database.connection.execute(
+            "SELECT id FROM reminder_occurrences WHERE reminder_id = ?", (spec.id,),
+        ).fetchone()[0])
+        replacement = parse_reminder(reminder_payload(
+            id=spec.id, run_at=NOW + 3600, title="新标题", message="新正文",
+            ack_enabled=True, repeat_interval_seconds=60,
+        ), NOW + 62)
+        self.database.upsert_reminder(replacement, "tester", NOW + 62)
+        detail = self.database.get_reminder_occurrence(occurrence_id)
+        assert detail is not None
+        self.assertEqual("喝水", detail["title"])
+        self.assertEqual("起来活动一下并喝杯水。", detail["message"])
+        self.assertIsNotNone(detail["acknowledged_at"])
+
+    def test_deleting_reminder_preserves_delivered_occurrence_link(self) -> None:
+        spec = parse_reminder(reminder_payload(
+            ack_enabled=True, repeat_interval_seconds=60,
+        ), NOW)
+        self.database.upsert_reminder(spec, "tester", NOW)
+        self.database.enqueue_due_reminders(NOW + 60, "eos")
+        alert = self.database.claim_due_alert(NOW + 60, 30)
+        assert alert is not None
+        self.database.mark_delivered(alert.id, NOW + 61)
+        occurrence_id = int(self.database.connection.execute(
+            "SELECT id FROM reminder_occurrences WHERE reminder_id = ?", (spec.id,),
+        ).fetchone()[0])
+        self.assertTrue(self.database.delete_reminder(spec.id, "tester", NOW + 62))
+        detail = self.database.get_reminder_occurrence(occurrence_id)
+        assert detail is not None
+        self.assertEqual("喝水", detail["title"])
+        self.assertEqual("起来活动一下并喝杯水。", detail["message"])
+        self.assertIsNotNone(detail["acknowledged_at"])
+        self.assertIsNotNone(self.database.get_alert_detail(alert.id))
+
 
 if __name__ == "__main__":
     unittest.main()

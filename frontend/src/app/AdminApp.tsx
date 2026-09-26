@@ -40,7 +40,7 @@ function pageFromLocation(): PageId {
   if (window.location.pathname.startsWith('/daily-events')) return 'daily-events'
   if (window.location.pathname.startsWith('/events')) return 'events'
   if (window.location.pathname.startsWith('/digests')) return 'digests'
-  const value = window.location.hash.replace('#/', '')
+  const value = window.location.hash.replace('#/', '').split('?')[0]
   return pages.some((item) => item.id === value) ? value as PageId : 'overview'
 }
 
@@ -115,7 +115,7 @@ export default function AdminApp() {
 
   useEffect(() => {
     const handleHash = () => {
-      const next = window.location.hash.replace('#/', '')
+      const next = window.location.hash.replace('#/', '').split('?')[0]
       if (pages.some((item) => item.id === next)) setPage(next as PageId)
     }
     window.addEventListener('hashchange', handleHash)
@@ -277,6 +277,16 @@ export default function AdminApp() {
       await refresh(true)
       notify(item.enabled ? '提醒已暂停' : '提醒已启用')
     } catch (error) { notify(error instanceof Error ? error.message : '无法更新提醒', 'error') } finally { setBusy(false) }
+  }
+
+  const acknowledgeReminder = async (occurrenceId: number) => {
+    setBusy(true)
+    try {
+      await api.mutate(`/api/reminders/occurrences/${occurrenceId}/acknowledge`, 'POST', {})
+      window.history.replaceState(null, '', '/#/reminders')
+      await refresh(true)
+      notify('已确认收到，后续重复通知已停止')
+    } catch (error) { await reportMutationError(error, '无法确认提醒') } finally { setBusy(false) }
   }
 
   const openSource = (kind: SourceKind | null, mode: 'generic' | 'typed') => {
@@ -501,7 +511,7 @@ export default function AdminApp() {
       {partialErrors.length > 0 && <div className="partial-error" role="status"><CircleAlert size={17} /><span>部分数据暂时无法刷新，已保留上次成功结果：{partialErrors.join('；')}</span></div>}
       <main className="page-content">{!hasAnyData ? <div className="loading-state"><RefreshCw className="spin" size={24} />正在读取管理数据…</div> : <>
         {page === 'overview' && <OverviewPage health={health} pending={pending} observations={Number(status.observations || 0)} sourceStates={sourceStates} managedSources={managedSources} incidents={incidents} reminders={reminders} go={(value) => go(value as PageId)} onCreateReminder={() => openReminder()} />}
-        {page === 'reminders' && <RemindersPage reminders={reminders} total={resources.reminders.data?.pagination?.total} busy={busy || !can('reminders:write')} onOpen={openReminder} onToggle={(item) => { void toggleReminder(item) }} onDelete={deleteReminder} />}
+        {page === 'reminders' && <RemindersPage api={api} reminders={reminders} total={resources.reminders.data?.pagination?.total} busy={busy || !can('reminders:write')} onOpen={openReminder} onToggle={(item) => { void toggleReminder(item) }} onDelete={deleteReminder} acknowledgementId={Number(new URLSearchParams(window.location.hash.split('?')[1] || '').get('occurrence')) || null} acknowledgementBusy={busy || !can('reminders:write')} onAcknowledge={(id) => { void acknowledgeReminder(id) }} />}
         {page === 'weather' && <WeatherPage api={api} canWrite={can('settings:write')} onUnauthorized={logout} />}
         {page === 'sources' && <SourcesPage api={api} sources={managedSources} sourceStates={sourceStates} busy={busy || !can('sources:write')} query={sourceQuery} onQuery={setSourceQuery} onCreate={openSource} catalog={newsCatalog} catalogError={resources.newsCatalog.error} onCatalogFeed={prepareCatalogFeed} onEdit={editSource} onToggle={(source) => { void toggleSource(source) }} onDelete={deleteSource} />}
         {page === 'events' && <EventsPage api={api} onUnauthorized={logout} initialAlertId={/^\/events\/([1-9]\d*)$/.exec(window.location.pathname)?.[1]} incidents={incidents} managedSources={managedSources} total={resources.incidents.data?.pagination?.total} health={health} openCount={openIncidents} canCreate={can('events:write')} onCreated={() => { void refresh(true) }} notify={notify} />}

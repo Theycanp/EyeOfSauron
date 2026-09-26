@@ -27,6 +27,7 @@ export interface WeatherStatus {
     high: number | null
     rain_mm: number
     rain_probability: number
+    uv_index_max?: number | null
     wind_gust_kmh: number
     temperature_now: number | null
     humidity?: number | null
@@ -37,6 +38,8 @@ export interface WeatherStatus {
     air_quality?: { observed_at: number; pm2_5: number | null; pm10: number | null; european_aqi: number | null; us_aqi: number | null } | null
     astronomy?: { date: string; sunrise: number | null; sunset: number | null; moonrise: number | null; moonset: number | null; moon_phase: string | null; moon_illumination: number | null; solar_elevation: number | null; solar_azimuth: number | null; solar_noon_elevation: number | null; solar_noon_at: number | null; updated_at: number } | null
     calendar?: { lunar: string; festivals: string }
+    hourly?: WeatherHour[]
+    forecast_hours?: WeatherHour[]
     observed_at: number
     is_today: boolean
   } | null
@@ -46,6 +49,16 @@ export interface WeatherStatus {
   consecutive_failures: number
   rain_expected: boolean | null
   qweather?: Record<string, { last_success_at: number | null; last_error: string | null; consecutive_failures: number }>
+}
+
+export interface WeatherHour {
+  at: number
+  temperature: number | null
+  precipitation: number | null
+  rain_probability: number | null
+  wind_gust?: number | null
+  weather_code?: number | null
+  precipitation_type?: 'rain' | 'snow' | 'sleet' | 'none' | null
 }
 
 export interface WeatherPlace {
@@ -192,6 +205,21 @@ export interface Reminder extends JsonRecord {
   completed_at?: number | null
   last_delivery_status?: string | null
   last_delivery_error?: string | null
+  ack_enabled?: boolean
+  repeat_interval_seconds?: number | null
+  repeat_max_attempts?: number
+}
+
+export interface ReminderOccurrence {
+  id: number
+  reminder_id: string
+  title: string
+  message: string
+  scheduled_for: number
+  acknowledged_at: number | null
+  repeat_count: number
+  next_repeat_at: number | null
+  ack_enabled: boolean
 }
 
 export interface Incident extends JsonRecord {
@@ -738,6 +766,14 @@ export interface DigestCoverage extends JsonRecord {
   last_attempt_at?: number | null
   last_success_at?: number | null
   consecutive_failures?: number
+  reminder_id?: string | null
+  reminder_occurrence_id?: number | null
+  reminder_occurrence?: {
+    acknowledged_at?: number | null
+    repeat_count?: number
+    next_repeat_at?: number | null
+    scheduled_for?: number
+  } | null
 }
 
 export interface DigestDetail extends DigestSummary {

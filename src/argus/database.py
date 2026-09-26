@@ -62,7 +62,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 
 _DIGEST_PROVIDER_TRACE_FIELDS = frozenset({
@@ -229,6 +229,9 @@ class Database:
                     last_enqueued_at INTEGER,
                     last_delivered_at INTEGER,
                     completed_at INTEGER,
+                    ack_enabled INTEGER NOT NULL DEFAULT 0 CHECK (ack_enabled IN (0, 1)),
+                    repeat_interval_seconds INTEGER,
+                    repeat_max_attempts INTEGER NOT NULL DEFAULT 0,
                     CHECK (
                         (schedule_kind = 'once' AND run_at IS NOT NULL AND daily_time IS NULL)
                         OR (schedule_kind = 'daily' AND run_at IS NULL AND daily_time IS NOT NULL)
@@ -248,11 +251,28 @@ class Database:
 
                 CREATE INDEX reminder_audit_time_idx ON reminder_audit(created_at, id);
 
+                CREATE TABLE reminder_occurrences (
+                    id INTEGER PRIMARY KEY,
+                    reminder_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    ack_enabled INTEGER NOT NULL CHECK (ack_enabled IN (0, 1)),
+                    scheduled_for INTEGER NOT NULL,
+                    acknowledged_at INTEGER,
+                    repeat_count INTEGER NOT NULL DEFAULT 0,
+                    next_repeat_at INTEGER,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(reminder_id, scheduled_for)
+                );
+                CREATE INDEX reminder_occurrences_due_idx
+                    ON reminder_occurrences(acknowledged_at, next_repeat_at);
+
                 CREATE TABLE alerts (
                     id INTEGER PRIMARY KEY,
                     observation_id INTEGER REFERENCES observations(id),
                     incident_id INTEGER REFERENCES incidents(id),
                     reminder_id TEXT REFERENCES reminders(id) ON DELETE SET NULL,
+                    reminder_occurrence_id INTEGER REFERENCES reminder_occurrences(id) ON DELETE SET NULL,
                     rule_id TEXT NOT NULL,
                     dedupe_key TEXT NOT NULL UNIQUE,
                     topic TEXT NOT NULL,
@@ -1613,6 +1633,52 @@ class Database:
                 self.connection.execute("ALTER TABLE weather_provider_state_v26 RENAME TO weather_provider_state")
                 self.connection.execute("PRAGMA user_version=26")
 
+        if version < 27:
+            with self.unit_of_work():
+                reminder_columns = {
+                    str(row[1]) for row in self.connection.execute("PRAGMA table_info(reminders)")
+                }
+                for name, definition in (
+                    ("ack_enabled", "INTEGER NOT NULL DEFAULT 0 CHECK (ack_enabled IN (0,1))"),
+                    ("repeat_interval_seconds", "INTEGER"),
+                    ("repeat_max_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                ):
+                    if name not in reminder_columns:
+                        self.connection.execute(f"ALTER TABLE reminders ADD COLUMN {name} {definition}")
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS reminder_occurrences (
+                        id INTEGER PRIMARY KEY,
+                        reminder_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        ack_enabled INTEGER NOT NULL CHECK (ack_enabled IN (0, 1)),
+                        scheduled_for INTEGER NOT NULL,
+                        acknowledged_at INTEGER,
+                        repeat_count INTEGER NOT NULL DEFAULT 0,
+                        next_repeat_at INTEGER,
+                        created_at INTEGER NOT NULL,
+                        UNIQUE(reminder_id, scheduled_for)
+                    )
+                """)
+                self.connection.execute(
+                    "CREATE INDEX IF NOT EXISTS reminder_occurrences_due_idx "
+                    "ON reminder_occurrences(acknowledged_at, next_repeat_at)"
+                )
+                alert_columns = {
+                    str(row[1]) for row in self.connection.execute("PRAGMA table_info(alerts)")
+                }
+                if "reminder_occurrence_id" not in alert_columns:
+                    self.connection.execute(
+                        "ALTER TABLE alerts ADD COLUMN reminder_occurrence_id INTEGER "
+                        "REFERENCES reminder_occurrences(id) ON DELETE SET NULL"
+                    )
+                self.connection.execute(
+                    "CREATE INDEX IF NOT EXISTS alerts_reminder_occurrence_idx "
+                    "ON alerts(reminder_occurrence_id)"
+                )
+                self.connection.execute("PRAGMA user_version=27")
+            version = 27
+
     def record_digest_preparation_failure(
         self, digest_key: str, *, stage: str, error: BaseException | str, now: int,
     ) -> None:
@@ -2337,6 +2403,7 @@ class Database:
         observation_id: int | None,
         now: int,
         reminder_id: str | None = None,
+        reminder_occurrence_id: int | None = None,
     ) -> bool:
         incident_id: int | None = None
         if candidate.incident_key:
@@ -2380,15 +2447,16 @@ class Database:
         cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO alerts(
-                observation_id, incident_id, reminder_id, rule_id, dedupe_key, topic, title, message,
+                observation_id, incident_id, reminder_id, reminder_occurrence_id, rule_id, dedupe_key, topic, title, message,
                 priority, confidence, evidence_json, incident_key, tags_json, click_url,
                 status, next_attempt_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
             (
                 observation_id,
                 incident_id,
                 reminder_id,
+                reminder_occurrence_id,
                 candidate.rule_id,
                 candidate.dedupe_key,
                 candidate.topic,
@@ -2736,6 +2804,12 @@ class Database:
         except (TypeError, ValueError):
             item["tags"] = []
         item["enabled"] = bool(item["enabled"])
+        item["ack_enabled"] = bool(item.get("ack_enabled", 0))
+        item["repeat_interval_seconds"] = (
+            int(item["repeat_interval_seconds"])
+            if item.get("repeat_interval_seconds") is not None else None
+        )
+        item["repeat_max_attempts"] = int(item.get("repeat_max_attempts", 0) or 0)
         return item
 
     def get_reminder(self, reminder_id: str) -> dict[str, Any] | None:
@@ -2789,10 +2863,16 @@ class Database:
                     (reminder.id,),
                 ).rowcount
                 self.connection.execute(
+                    "UPDATE reminder_occurrences SET acknowledged_at = COALESCE(acknowledged_at, ?), next_repeat_at = NULL "
+                    "WHERE reminder_id = ? AND acknowledged_at IS NULL",
+                    (now, reminder.id),
+                )
+                self.connection.execute(
                     """
                     UPDATE reminders SET title = ?, message = ?, schedule_kind = ?,
                         run_at = ?, daily_time = ?, timezone = ?, next_run_at = ?, enabled = ?,
-                        priority = ?, tags_json = ?, updated_at = ?, completed_at = NULL
+                        priority = ?, tags_json = ?, ack_enabled = ?, repeat_interval_seconds = ?,
+                        repeat_max_attempts = ?, updated_at = ?, completed_at = NULL
                     WHERE id = ?
                     """,
                     (
@@ -2806,6 +2886,9 @@ class Database:
                         int(reminder.enabled),
                         reminder.priority,
                         json.dumps(reminder.tags, ensure_ascii=False),
+                        int(reminder.ack_enabled),
+                        reminder.repeat_interval_seconds,
+                        reminder.repeat_max_attempts,
                         now,
                         reminder.id,
                     ),
@@ -2817,7 +2900,8 @@ class Database:
                     INSERT INTO reminders(
                         id, title, message, schedule_kind, run_at, daily_time, timezone,
                         next_run_at, enabled, priority, tags_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        , ack_enabled, repeat_interval_seconds, repeat_max_attempts
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         reminder.id,
@@ -2833,6 +2917,9 @@ class Database:
                         json.dumps(reminder.tags, ensure_ascii=False),
                         now,
                         now,
+                        int(reminder.ack_enabled),
+                        reminder.repeat_interval_seconds,
+                        reminder.repeat_max_attempts,
                     ),
                 )
                 action = "create"
@@ -2881,6 +2968,11 @@ class Database:
                     "DELETE FROM alerts WHERE reminder_id = ? AND status = 'pending'",
                     (reminder_id,),
                 ).rowcount
+                self.connection.execute(
+                    "UPDATE reminder_occurrences SET acknowledged_at = COALESCE(acknowledged_at, ?), next_repeat_at = NULL "
+                    "WHERE reminder_id = ? AND acknowledged_at IS NULL",
+                    (now, reminder_id),
+                )
             self.connection.execute(
                 """
                 UPDATE reminders SET enabled = ?, next_run_at = ?, updated_at = ?,
@@ -2917,6 +3009,11 @@ class Database:
                 "DELETE FROM alerts WHERE reminder_id = ? AND status = 'pending'",
                 (reminder_id,),
             ).rowcount
+            self.connection.execute(
+                "UPDATE reminder_occurrences SET acknowledged_at = COALESCE(acknowledged_at, ?), "
+                "next_repeat_at = NULL WHERE reminder_id = ?",
+                (now, reminder_id),
+            )
             self._record_reminder_audit(
                 reminder_id,
                 "delete",
@@ -2931,7 +3028,64 @@ class Database:
             self.connection.rollback()
             raise
 
-    def enqueue_due_reminders(self, now: int, topic: str, limit: int = 100) -> int:
+    def acknowledge_reminder_occurrence(
+        self, occurrence_id: int, actor: str, now: int
+    ) -> dict[str, Any] | None:
+        """Stop durable repeats for one reminder occurrence and audit the action."""
+        if occurrence_id < 1:
+            return None
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT * FROM reminder_occurrences WHERE id = ?", (occurrence_id,)
+            ).fetchone()
+            if row is None:
+                self.connection.commit()
+                return None
+            if row["acknowledged_at"] is None:
+                self.connection.execute(
+                    "UPDATE reminder_occurrences SET acknowledged_at = ?, next_repeat_at = NULL WHERE id = ?",
+                    (now, occurrence_id),
+                )
+                self.connection.execute(
+                    "DELETE FROM alerts WHERE reminder_occurrence_id = ? AND status = 'pending'",
+                    (occurrence_id,),
+                )
+                self._record_reminder_audit(
+                    str(row["reminder_id"]), "acknowledge", actor, now,
+                    {"occurrence_id": occurrence_id},
+                )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        result = self.connection.execute(
+            "SELECT * FROM reminder_occurrences WHERE id = ?", (occurrence_id,)
+        ).fetchone()
+        return dict(result) if result is not None else None
+
+    def get_reminder_occurrence(self, occurrence_id: int) -> dict[str, Any] | None:
+        if occurrence_id < 1:
+            return None
+        row = self.connection.execute(
+            """
+            SELECT o.id, o.reminder_id, o.scheduled_for, o.acknowledged_at,
+                   o.repeat_count, o.next_repeat_at,
+                   o.title, o.message, o.ack_enabled
+            FROM reminder_occurrences AS o
+            WHERE o.id = ?
+            """,
+            (occurrence_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["ack_enabled"] = bool(item["ack_enabled"])
+        return item
+
+    def enqueue_due_reminders(
+        self, now: int, topic: str, limit: int = 100, click_base_url: str = ""
+    ) -> int:
         limit = max(1, min(int(limit), 1000))
         queued = 0
         self.connection.execute("BEGIN IMMEDIATE")
@@ -2947,6 +3101,29 @@ class Database:
             ))
             for row in rows:
                 scheduled_for = int(row["next_run_at"])
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO reminder_occurrences(
+                        reminder_id, title, message, ack_enabled,
+                        scheduled_for, next_repeat_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["id"],
+                        row["title"],
+                        row["message"],
+                        row["ack_enabled"],
+                        scheduled_for,
+                        None,
+                        now,
+                    ),
+                )
+                occurrence = self.connection.execute(
+                    "SELECT id FROM reminder_occurrences WHERE reminder_id = ? AND scheduled_for = ?",
+                    (row["id"], scheduled_for),
+                ).fetchone()
+                assert occurrence is not None
+                occurrence_id = int(occurrence["id"])
                 candidate = AlertCandidate(
                     rule_id="reminder.manual",
                     dedupe_key=f"reminder:{row['id']}:{scheduled_for}",
@@ -2954,12 +3131,18 @@ class Database:
                     message=str(row["message"]),
                     priority=int(row["priority"]),
                     tags=tuple(json.loads(row["tags_json"])),
-                    click_url="",
+                    click_url=(
+                        f"{click_base_url.rstrip('/')}/#/reminders?occurrence={occurrence_id}"
+                        if click_base_url else ""
+                    ),
                     topic=topic,
                     confidence=1.0,
                     evidence=(f"scheduled_for:{scheduled_for}",),
                 )
-                queued += int(self._insert_alert(candidate, None, now, reminder_id=str(row["id"])))
+                queued += int(self._insert_alert(
+                    candidate, None, now, reminder_id=str(row["id"]),
+                    reminder_occurrence_id=occurrence_id,
+                ))
                 if row["schedule_kind"] == "once":
                     self.connection.execute(
                         """
@@ -2980,6 +3163,58 @@ class Database:
                         """,
                         (next_run_at, now, now, row["id"]),
                     )
+            repeat_rows = list(self.connection.execute(
+                """
+                SELECT o.*, r.title, r.message, r.priority, r.tags_json,
+                       r.repeat_interval_seconds, r.repeat_max_attempts, r.ack_enabled
+                FROM reminder_occurrences AS o
+                JOIN reminders AS r ON r.id = o.reminder_id
+                WHERE r.ack_enabled = 1 AND o.acknowledged_at IS NULL
+                  AND o.next_repeat_at IS NOT NULL AND o.next_repeat_at <= ?
+                ORDER BY o.next_repeat_at, o.id
+                LIMIT ?
+                """,
+                (now, limit),
+            ))
+            for occurrence in repeat_rows:
+                repeat_count = int(occurrence["repeat_count"]) + 1
+                maximum = int(occurrence["repeat_max_attempts"] or 0)
+                if maximum and repeat_count > maximum:
+                    self.connection.execute(
+                        "UPDATE reminder_occurrences SET next_repeat_at = NULL WHERE id = ?",
+                        (occurrence["id"],),
+                    )
+                    continue
+                scheduled_for = int(occurrence["scheduled_for"])
+                candidate = AlertCandidate(
+                    rule_id="reminder.manual.repeat",
+                    dedupe_key=f"reminder:{occurrence['reminder_id']}:{scheduled_for}:r{repeat_count}",
+                    title=str(occurrence["title"]),
+                    message=str(occurrence["message"]),
+                    priority=int(occurrence["priority"]),
+                    tags=tuple(json.loads(occurrence["tags_json"])),
+                    click_url=(
+                        f"{click_base_url.rstrip('/')}/#/reminders?occurrence={occurrence['id']}"
+                        if click_base_url else ""
+                    ),
+                    topic=topic,
+                    confidence=1.0,
+                    evidence=(f"scheduled_for:{scheduled_for}", f"repeat:{repeat_count}"),
+                )
+                inserted = self._insert_alert(
+                    candidate, None, now,
+                    reminder_id=str(occurrence["reminder_id"]),
+                    reminder_occurrence_id=int(occurrence["id"]),
+                )
+                queued += int(inserted)
+                self.connection.execute(
+                    """
+                    UPDATE reminder_occurrences
+                    SET repeat_count = ?, next_repeat_at = NULL
+                    WHERE id = ? AND acknowledged_at IS NULL
+                    """,
+                    (repeat_count, occurrence["id"]),
+                )
             self.connection.commit()
         except Exception:
             self.connection.rollback()
@@ -3044,7 +3279,7 @@ class Database:
     def mark_delivered(self, alert_id: int, now: int) -> None:
         with self.connection:
             row = self.connection.execute(
-                "SELECT reminder_id FROM alerts WHERE id = ? AND status = 'sending'",
+                "SELECT reminder_id, reminder_occurrence_id FROM alerts WHERE id = ? AND status = 'sending'",
                 (alert_id,),
             ).fetchone()
             updated = self.connection.execute(
@@ -3061,6 +3296,25 @@ class Database:
                     "UPDATE reminders SET last_delivered_at = ? WHERE id = ?",
                     (now, row["reminder_id"]),
                 )
+                if row["reminder_occurrence_id"] is not None:
+                    self.connection.execute(
+                        """
+                        UPDATE reminder_occurrences
+                        SET next_repeat_at = ? + (
+                            SELECT repeat_interval_seconds FROM reminders
+                            WHERE id = reminder_occurrences.reminder_id
+                        )
+                        WHERE id = ? AND acknowledged_at IS NULL
+                          AND EXISTS (
+                            SELECT 1 FROM reminders r
+                            WHERE r.id = reminder_occurrences.reminder_id
+                              AND r.ack_enabled = 1 AND r.repeat_interval_seconds IS NOT NULL
+                              AND (r.repeat_max_attempts = 0 OR
+                                   reminder_occurrences.repeat_count < r.repeat_max_attempts)
+                          )
+                        """,
+                        (now, row["reminder_occurrence_id"]),
+                    )
 
     def mark_retry(self, alert_id: int, next_attempt_at: int, error: BaseException | str) -> None:
         with self.connection:
@@ -3226,7 +3480,8 @@ class Database:
             return None
         row = self.connection.execute(
             """
-            SELECT id, observation_id, incident_id, title, message, priority,
+            SELECT id, observation_id, incident_id, reminder_id, reminder_occurrence_id,
+                   title, message, priority,
                    confidence, evidence_json, tags_json, click_url, status,
                    created_at, delivered_at
             FROM alerts WHERE id = ?
@@ -3242,6 +3497,15 @@ class Database:
             except (TypeError, ValueError):
                 alert[field[:-5]] = []
         alert["source_url"] = alert.pop("click_url")
+        if alert.get("reminder_occurrence_id") is not None:
+            occurrence = self.connection.execute(
+                """
+                SELECT acknowledged_at, repeat_count, next_repeat_at, scheduled_for
+                FROM reminder_occurrences WHERE id = ?
+                """,
+                (alert["reminder_occurrence_id"],),
+            ).fetchone()
+            alert["reminder_occurrence"] = dict(occurrence) if occurrence is not None else None
 
         observation = None
         if row["observation_id"] is not None:
@@ -5884,6 +6148,17 @@ class Database:
                     """,
                     (dead_cutoff,),
                 ).rowcount
+            self.connection.execute(
+                """
+                DELETE FROM reminder_occurrences
+                WHERE scheduled_for < ? AND next_repeat_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM alerts
+                      WHERE alerts.reminder_occurrence_id = reminder_occurrences.id
+                  )
+                """,
+                (cutoff,),
+            )
             deleted_observations = self.connection.execute(
                 """
                 DELETE FROM observations

@@ -30,3 +30,4 @@ class LicensingTests(unittest.TestCase):
         notices = (ROOT / "THIRD_PARTY_NOTICES").read_text()
         self.assertIn("Meta Platforms, Inc. and affiliates.", notices)
         self.assertIn("Lucide Contributors 2022.", notices)
+        self.assertIn("Copyright (c) 2010-2023, Volodymyr Agafonkin", notices)

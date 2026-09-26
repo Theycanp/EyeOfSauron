@@ -268,7 +268,12 @@ class ArgusService:
 
     def process_reminders_once(self) -> int:
         now = now_epoch()
-        queued = self.database.enqueue_due_reminders(now, self.config.ntfy.default_topic)
+        click_base_url = self.config.admin.public_base_url or self.config.digest.public_base_url
+        queued = self.database.enqueue_due_reminders(
+            now,
+            self.config.ntfy.default_topic,
+            click_base_url=click_base_url,
+        )
         if queued:
             LOGGER.info("reminders_queued count=%d", queued)
         return queued
@@ -550,7 +555,11 @@ class ArgusService:
                     healthy = False
                 next_at = now_epoch() + (3600 if healthy else 1200)
             try:
-                await asyncio.wait_for(self.stop_event.wait(), timeout=min(60, max(1, next_at - now_epoch())))
+                # The admin process updates the subscription in SQLite.  A
+                # one-second revision check makes a location change trigger a
+                # fresh fetch promptly across processes without a fragile
+                # in-memory signal or a schema-only wake column.
+                await asyncio.wait_for(self.stop_event.wait(), timeout=min(1, max(1, next_at - now_epoch())))
             except TimeoutError:
                 pass
 
@@ -612,7 +621,7 @@ class ArgusService:
                     LOGGER.warning("qweather_poll_failed kind=%s error=%s", kind, sanitize_error(exc))
                 due[kind] = now_epoch() + interval
             try:
-                await asyncio.wait_for(self.stop_event.wait(), timeout=min(60, max(1, min(due.values()) - now_epoch())))
+                await asyncio.wait_for(self.stop_event.wait(), timeout=min(1, max(1, min(due.values()) - now_epoch())))
             except TimeoutError:
                 pass
 
