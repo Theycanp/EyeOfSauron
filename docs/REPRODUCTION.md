@@ -58,7 +58,7 @@ a fresh validated Open-Meteo poll, and the weather page's read/write permissions
 For QWeather, provision a separate Ed25519 private key readable only by the
 service group, configure the five environment variables in `WEATHER.md` through
 `/etc/argus/qweather.env`, and verify minute, warning and astronomy timestamps.
-For schema 24, confirm a current air-quality estimate and local-date-matched
+For schema 26, confirm a current air-quality estimate and local-date-matched
 sun/moon data appear on the Weather page; missing optional data must not block
 the forecast or official warnings. The `lunardate` runtime dependency is pinned
 in `requirements/runtime.txt`. A new
