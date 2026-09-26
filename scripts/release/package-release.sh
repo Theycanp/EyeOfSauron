@@ -5,9 +5,14 @@ export PYTHONDONTWRITEBYTECODE=1
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 output=${1:-}
 release_id=${2:-}
+release_python=${ARGUS_PYTHON:-python3}
 
 if [[ -z "$output" ]]; then
   echo "usage: $0 OUTPUT.tar.gz [RELEASE_ID]" >&2
+  exit 2
+fi
+if ! command -v "$release_python" >/dev/null 2>&1; then
+  echo "release Python interpreter is unavailable: $release_python" >&2
   exit 2
 fi
 if [[ -n "$(git -C "$repo_root" status --porcelain)" ]]; then
@@ -35,7 +40,7 @@ stage="$temporary/eyeofsauron"
 mkdir -p "$stage"
 git -C "$repo_root" archive HEAD | tar -x -C "$stage"
 
-PYTHONPATH="$stage/src" /usr/bin/python3 - "$stage" "$release_id" "$commit" "$commit_epoch" <<'PY'
+PYTHONPATH="$stage/src" "$release_python" - "$stage" "$release_id" "$commit" "$commit_epoch" <<'PY'
 import json
 import sys
 import tomllib

@@ -36,7 +36,7 @@ must match the frontend source.
    configuration.
 4. Create a root-owned versioned Python virtual environment, install
    `requirements/runtime.txt`, and pass its interpreter as `ARGUS_PYTHON` to
-   release prepare and activation. Package the exact tested commit using
+   release packaging, prepare and activation. Package the exact tested commit using
    `scripts/release/package-release.sh`. See `RELEASES.md` for runtime rollback.
 5. Install the verified archive using `scripts/release/install-release.sh`; do
    not copy a dirty working tree into `/opt`.
