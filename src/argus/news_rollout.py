@@ -75,7 +75,7 @@ def plan_disaster_signal_policy(
         if source.get("id") != source_id:
             continue
         before = deepcopy(source)
-        source["poll_interval_seconds"] = 3600
+        source["poll_interval_seconds"] = 21600
         source["default_importance"] = 1
         settings = source.setdefault("settings", {})
         settings["entry_filter_profile"] = "jma_exceptional_hazards"
@@ -109,7 +109,7 @@ def plan_official_news(
             entry_id, feed_id, source_id, enabled=True, user_confirmed=True,
             poll_interval_seconds=(
                 300 if entry_id == "usgs_earthquakes"
-                else 3600 if entry_id == "japan_meteorological_agency"
+                else 21600 if entry_id == "japan_meteorological_agency"
                 else 900
             ),
         )

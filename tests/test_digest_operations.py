@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from argus.auth import AdminAuth
+from argus.config import DigestConfig
 from argus.database import Database
-from argus.digest import DigestCluster, DigestDocument, SourceCoverage, with_api_summary
+from argus.digest import DigestCluster, DigestDocument, DigestScheduler, SourceCoverage, with_api_summary
 from argus.digest_analysis import ApiDigestSummarizer
+from argus.event_pool import EventPoolProjector
 from argus.model_analyzers import AnalyzerSettings, OpenAICompatibleAnalyzer
 
 
@@ -35,6 +39,38 @@ def digest() -> DigestDocument:
 
 
 class DigestRunRepositoryTests(unittest.TestCase):
+    def test_schema_nineteen_adds_preparation_failures_without_consuming_ai_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.db"
+            database = Database(path)
+            database.close()
+            connection = sqlite3.connect(path)
+            connection.executescript(
+                "DROP TABLE digest_preparation_failures; PRAGMA user_version=19;"
+            )
+            connection.close()
+            reopened = Database(path)
+            try:
+                reopened.record_digest_preparation_failure(
+                    "daily:2026-09-12", stage="projection", error="Bearer TOPSECRET", now=NOW,
+                )
+                run = reopened.get_digest_run("daily:2026-09-12", now=NOW + 1)
+                assert run is not None
+                self.assertEqual("preparation_failed", run["state"])
+                self.assertEqual(0, run["reserved_attempts"])
+                self.assertEqual([], run["attempts"])
+                self.assertEqual(1, len(reopened.list_digest_runs(now=NOW + 1)))
+                self.assertEqual("<redacted>", run["preparation"]["last_error"])
+
+                saved = reopened.save_digest(digest())
+                reopened.publish_digest(saved.digest_key, saved.version, NOW + 1)
+                published_run = reopened.get_digest_run(saved.digest_key, now=NOW + 2)
+                assert published_run is not None
+                self.assertEqual("algorithm_published", published_run["state"])
+                self.assertEqual("projection", published_run["preparation"]["stage"])
+            finally:
+                reopened.close()
+
     def test_run_uses_latest_published_ai_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "state.db")
@@ -185,6 +221,83 @@ class DigestRetryAuthTests(unittest.TestCase):
                 self.assertTrue(auth.validate_csrf(reader, {"Cookie": f"__Host-eos_session={reader_session}; __Host-eos_csrf={reader_csrf}", "X-CSRF-Token": reader_csrf}))
             finally:
                 database.close()
+
+
+class DigestPreparationSchedulerTests(unittest.IsolatedAsyncioTestCase):
+    def test_sync_projection_failure_is_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "state.db")
+            try:
+                config = DigestConfig(enabled=True, timezone="UTC", daily_time="00:00", notify=False)
+                scheduler = DigestScheduler(config, database, topic="eos")
+                with patch.object(EventPoolProjector, "project_pending", side_effect=RuntimeError(
+                    "projection failed"
+                )):
+                    with self.assertRaisesRegex(RuntimeError, "projection failed"):
+                        scheduler.process_once(NOW)
+                key = f"daily:{datetime.fromtimestamp(NOW, UTC).date().isoformat()}"
+                run = database.get_digest_run(key, now=NOW)
+                assert run is not None
+                self.assertEqual("preparation_failed", run["state"])
+                self.assertEqual("projection", run["preparation"]["stage"])
+                self.assertEqual(0, run["reserved_attempts"])
+            finally:
+                database.close()
+
+    async def test_projection_and_build_failures_survive_restart_and_clear_on_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.db"
+            database = Database(path)
+            key = f"daily:{datetime.fromtimestamp(NOW, UTC).date().isoformat()}"
+            config = DigestConfig(enabled=True, timezone="UTC", daily_time="00:00", notify=False)
+            summarizer = Mock()
+            scheduler = DigestScheduler(config, database, topic="eos", summarizer=summarizer)
+            try:
+                with patch.object(EventPoolProjector, "project_pending", side_effect=RuntimeError(
+                    "Bearer PROJECTION_SECRET token=HIDDEN"
+                )):
+                    with self.assertRaises(RuntimeError):
+                        await scheduler.process_once_async(NOW)
+                run = database.get_digest_run(key, now=NOW)
+                assert run is not None
+                self.assertEqual("preparation_failed", run["state"])
+                self.assertEqual("projection", run["preparation"]["stage"])
+                self.assertEqual(1, run["preparation"]["failure_count"])
+                self.assertNotIn("PROJECTION_SECRET", run["preparation"]["last_error"])
+                self.assertNotIn("HIDDEN", run["preparation"]["last_error"])
+                self.assertEqual(0, run["reserved_attempts"])
+                summarizer.summarize.assert_not_called()
+            finally:
+                database.close()
+
+            reopened = Database(path)
+            try:
+                scheduler = DigestScheduler(config, reopened, topic="eos", summarizer=summarizer)
+                with patch.object(scheduler.builder, "build", side_effect=RuntimeError(
+                    "password=BUILD_SECRET"
+                )):
+                    with self.assertRaises(RuntimeError):
+                        await scheduler.process_once_async(NOW + 1)
+                run = reopened.get_digest_run(key, now=NOW + 1)
+                assert run is not None
+                self.assertEqual("build", run["preparation"]["stage"])
+                self.assertEqual(2, run["preparation"]["failure_count"])
+                self.assertEqual(NOW, run["preparation"]["first_failed_at"])
+                self.assertEqual(NOW + 1, run["preparation"]["last_failed_at"])
+                self.assertNotIn("BUILD_SECRET", run["preparation"]["last_error"])
+                self.assertEqual(0, run["reserved_attempts"])
+                summarizer.summarize.assert_not_called()
+
+                recovered = DigestScheduler(config, reopened, topic="eos")
+                published = await recovered.process_once_async(NOW + 2)
+                assert published is not None
+                run = reopened.get_digest_run(key, now=NOW + 2)
+                assert run is not None
+                self.assertEqual("algorithm_published", run["state"])
+                self.assertIsNone(run["preparation"])
+                self.assertEqual(0, run["reserved_attempts"])
+            finally:
+                reopened.close()
 
 
 if __name__ == "__main__":

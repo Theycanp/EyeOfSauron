@@ -25,11 +25,14 @@ class DigestRunRepository(Protocol):
 
 def digest_run_state(
     *, generation_kind: str | None, retry: Mapping[str, Any] | None,
-    latest_attempt: Mapping[str, Any] | None, now: int,
+    latest_attempt: Mapping[str, Any] | None,
+    preparation: Mapping[str, Any] | None, now: int,
 ) -> str:
     """Derive display state; never maintain a second publication state machine."""
     if generation_kind == "api":
         return "ai_published"
+    if generation_kind is None and preparation is not None:
+        return "preparation_failed"
     if latest_attempt and latest_attempt.get("status") == "running":
         return "generating"
     if retry:

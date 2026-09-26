@@ -1045,7 +1045,8 @@ class DigestScheduler:
     def process_once(self, now: int) -> DigestDocument | None:
         if self.summarizer is not None:
             raise RuntimeError("model-assisted digests require process_once_async")
-        document = self._prepare(now)
+        self._project_events_sync(now)
+        document = self._prepare(now, project_events=False)
         return self._publish(document, now) if document else None
 
     async def process_once_async(self, now: int) -> DigestDocument | None:
@@ -1300,19 +1301,58 @@ class DigestScheduler:
         if scheduled_at is None:
             return
         local_date = datetime.fromtimestamp(scheduled_at, ZoneInfo(self.config.timezone)).date()
-        if self.repository.get_digest(f"daily:{local_date.isoformat()}", published_only=True) is not None:
+        digest_key = f"daily:{local_date.isoformat()}"
+        if self.repository.get_digest(digest_key, published_only=True) is not None:
             return
-        previous_at = self._latest_occurrence(scheduled_at - 1)
-        if previous_at is None:
-            raise RuntimeError("cannot resolve previous digest boundary")
-        projector = EventPoolProjector(self.repository)
-        for _ in range((self.builder.observation_limit + 49) // 50 + 1):
-            projected = projector.project_pending(
-                now=now, since=previous_at, until=scheduled_at, limit=50,
-            )
-            if projected == 0:
-                break
-            await asyncio.sleep(0)
+        try:
+            previous_at = self._latest_occurrence(scheduled_at - 1)
+            if previous_at is None:
+                raise RuntimeError("cannot resolve previous digest boundary")
+            projector = EventPoolProjector(self.repository)
+            for _ in range((self.builder.observation_limit + 49) // 50 + 1):
+                projected = projector.project_pending(
+                    now=now, since=previous_at, until=scheduled_at, limit=50,
+                )
+                if projected == 0:
+                    break
+                await asyncio.sleep(0)
+        except Exception as exc:
+            self._record_preparation_failure(digest_key, "projection", exc, now)
+            raise
+
+    def _project_events_sync(self, now: int) -> None:
+        if not self.config.enabled or not isinstance(self.repository, EventPoolRepository) or not isinstance(
+            self.repository, EventRepository
+        ):
+            return
+        scheduled_at = self._latest_occurrence(now)
+        if scheduled_at is None:
+            return
+        local_date = datetime.fromtimestamp(scheduled_at, ZoneInfo(self.config.timezone)).date()
+        digest_key = f"daily:{local_date.isoformat()}"
+        if self.repository.get_digest(digest_key, published_only=True) is not None:
+            return
+        try:
+            previous_at = self._latest_occurrence(scheduled_at - 1)
+            if previous_at is None:
+                raise RuntimeError("cannot resolve previous digest boundary")
+            projector = EventPoolProjector(self.repository)
+            for _ in range((self.builder.observation_limit + 499) // 500 + 1):
+                projected = projector.project_pending(
+                    now=now, since=previous_at, until=scheduled_at, limit=500,
+                )
+                if projected == 0:
+                    break
+        except Exception as exc:
+            self._record_preparation_failure(digest_key, "projection", exc, now)
+            raise
+
+    def _record_preparation_failure(
+        self, digest_key: str, stage: str, error: Exception, now: int,
+    ) -> None:
+        recorder = getattr(self.repository, "record_digest_preparation_failure", None)
+        if recorder is not None:
+            recorder(digest_key, stage=stage, error=error, now=now)
 
     def _prepare(self, now: int, *, project_events: bool = True) -> DigestDocument | None:
         if not self.config.enabled:
@@ -1320,33 +1360,42 @@ class DigestScheduler:
         scheduled_at = self._latest_occurrence(now)
         if scheduled_at is None:
             return None
-        previous_at = self._latest_occurrence(scheduled_at - 1)
-        if previous_at is None:
-            raise RuntimeError("cannot resolve previous digest boundary")
         local_date = datetime.fromtimestamp(scheduled_at, ZoneInfo(self.config.timezone)).date()
         digest_key = f"daily:{local_date.isoformat()}"
-        published = self.repository.get_digest(digest_key, published_only=True)
-        if published is None:
-            quality_rows = self.repository.list_source_quality(
-                source_ids=self.source_ids or None,
-                now=now,
-            )
-            self.builder.source_quality_weights = {
-                str(row["source_id"]): float(row["weight"])
-                for row in quality_rows
-                if isinstance(row, Mapping) and row.get("source_id")
-            }
-            return self.builder.build(
-                digest_key=digest_key,
-                period_start=previous_at,
-                period_end=scheduled_at,
-                timezone=self.config.timezone,
-                created_at=now,
-                source_ids=self.source_ids,
-                title=f"EyeOfSauron 每日情报摘要 · {local_date.isoformat()}",
-                project_events=project_events,
-            )
-        return published
+        try:
+            previous_at = self._latest_occurrence(scheduled_at - 1)
+            if previous_at is None:
+                raise RuntimeError("cannot resolve previous digest boundary")
+            published = self.repository.get_digest(digest_key, published_only=True)
+            if published is None:
+                quality_rows = self.repository.list_source_quality(
+                    source_ids=self.source_ids or None,
+                    now=now,
+                )
+                self.builder.source_quality_weights = {
+                    str(row["source_id"]): float(row["weight"])
+                    for row in quality_rows
+                    if isinstance(row, Mapping) and row.get("source_id")
+                }
+                document = self.builder.build(
+                    digest_key=digest_key,
+                    period_start=previous_at,
+                    period_end=scheduled_at,
+                    timezone=self.config.timezone,
+                    created_at=now,
+                    source_ids=self.source_ids,
+                    title=f"EyeOfSauron 每日情报摘要 · {local_date.isoformat()}",
+                    project_events=project_events,
+                )
+            else:
+                document = published
+        except Exception as exc:
+            self._record_preparation_failure(digest_key, "build", exc, now)
+            raise
+        clearer = getattr(self.repository, "clear_digest_preparation_failure", None)
+        if clearer is not None:
+            clearer(digest_key)
+        return document
 
     def _publish(self, document: DigestDocument, now: int) -> DigestDocument:
         published = document

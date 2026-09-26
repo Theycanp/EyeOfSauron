@@ -167,7 +167,7 @@ The reviewed JMA retention policy is previewed with
 `activate_news_sources.py --disaster-signal-policy --expect-revision N`. The
 preview fetches and parses the live feed without writing configuration; `--apply`
 creates the next managed revision. Verify the applied revision, one successful
-JMA poll, zero direct JMA alerts, and continued USGS coverage after restart.
+six-hour JMA poll, zero direct JMA alerts, and continued five-minute USGS coverage after restart.
 An empty retained JMA batch is healthy when the unfiltered Feed is current.
 
 `scripts/operations/check_status.py` reports dead-letter outbox rows as warnings.
@@ -273,6 +273,13 @@ The online backup includes committed WAL transactions and does not require a
 service outage. Take one before every release or configuration migration and at
 least daily once the service contains information that cannot be reconstructed.
 The initial operating objectives are RPO 24 hours and RTO 30 minutes.
+For a non-disruptive database-only restore drill, run
+`python scripts/operations/restore_drill.py --bundle BACKUP_DIRECTORY --report artifacts/restore-drill-YYYYMMDD.json`.
+The command verifies the bundle, restores into a private temporary directory,
+checks SQLite integrity, foreign keys and table counts, and reports the backup
+age and measured database restore time. It never writes the production database
+or restarts services. Its `rto_database_seconds` does not establish the full
+service RTO; activation and readiness must be measured separately.
 
 `argus-backup.timer` runs daily at 03:15 UTC with up to ten minutes of jitter;
 missed runs execute after boot. Enable it after confirming the first manual run:
@@ -348,10 +355,10 @@ An active worker that has not attempted a poll for three configured intervals
 (at least 90 seconds) fails readiness even if the engine heartbeat is fresh.
 Newly registered workers receive the same grace period before their first poll.
 
-The current production installation predates the `current` symlink layout. Its
-one-time migration must be performed in an explicit maintenance window with a
-verified backup; the installer deliberately refuses to reinterpret a normal
-directory as a symlink.
+Production uses `/opt/eyeofsauron/current` as a symlink to a read-only release.
+The one-time migration instructions in `RELEASES.md` apply only to older
+installations that still use a normal directory; the installer refuses to
+reinterpret such a directory as a symlink.
 
 ## Remove or disable
 

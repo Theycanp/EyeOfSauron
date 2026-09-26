@@ -21,6 +21,23 @@ const run: DigestRun = {
 }
 
 describe('digest run diagnostics', () => {
+  it('shows preparation failures without spending an AI attempt', async () => {
+    const failed: DigestRun = {
+      ...run, digest_key: 'daily:preparation', state: 'preparation_failed',
+      published_version: null, generation_kind: null, published_at: null,
+      retry: null, attempts: [], reserved_attempts: 0, can_retry_now: false,
+      preparation: { stage: 'event_projection', last_error: 'event evidence unavailable',
+        first_failed_at: 1_800_000_000, last_failed_at: 1_800_000_120,
+        failure_count: 2 },
+    }
+    const api = { digestRuns: vi.fn().mockResolvedValue({ runs: [failed] }) } as unknown as AdminApi
+    render(<DigestRunsPanel api={api} onUnauthorized={vi.fn()} canRetry />)
+    expect(await screen.findByText('准备失败')).toBeVisible()
+    expect(screen.getByText(/event evidence unavailable/)).toBeVisible()
+    expect(screen.getByText('0 / 5 次逻辑生成')).toBeVisible()
+    expect(screen.getByRole('button', { name: '提前重试' })).toBeDisabled()
+  })
+
   it('shows unpublished runs and recorded model evidence without inventing older history', async () => {
     const old = { ...run, digest_key: 'daily:old', state: 'algorithm_published',
       attempts: [], attempt_history_available: false, retry: null, can_retry_now: false }

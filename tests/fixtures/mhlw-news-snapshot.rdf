@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Public feed excerpt: https://www.mhlw.go.jp/stf/news.rdf, 2026-09-25. -->
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns="http://purl.org/rss/1.0/"
+         xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel rdf:about="https://www.mhlw.go.jp/stf/news.rdf">
+    <title>厚生労働省新着情報</title>
+  </channel>
+  <item rdf:about="https://www.mhlw.go.jp/stf/newpage_76380.html">
+    <title><![CDATA[第４回介護保険制度における預貯金等の把握等に係る検討の場の開催について]]></title>
+    <link>https://www.mhlw.go.jp/stf/newpage_76380.html</link>
+    <dc:creator>厚生労働省</dc:creator>
+    <dc:date>2026-09-25T16:00:00+09:00</dc:date>
+  </item>
+  <item rdf:about="https://www.mhlw.go.jp/toukei/saikin/hw/jinkou/geppo/s2026/07.html">
+    <title><![CDATA[「人口動態統計速報」令和８（2026）年07月分]]></title>
+    <link>https://www.mhlw.go.jp/toukei/saikin/hw/jinkou/geppo/s2026/07.html</link>
+    <dc:creator>厚生労働省</dc:creator>
+    <dc:date>2026-09-25T15:00:00+09:00</dc:date>
+  </item>
+</rdf:RDF>
