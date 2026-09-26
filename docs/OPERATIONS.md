@@ -204,6 +204,9 @@ existing install root `.release.lock` through checking and recovery; release,
 rollback and backups hold an exclusive lock. During maintenance it skips the
 poll without increasing its failure counter or restarting the engine. A missing
 or unreadable release lock is an error, not a silently successful health check.
+The unit preserves its runtime directory between oneshot invocations so the
+consecutive failure counter survives timer polls; reboot resets this transient
+counter. Otherwise systemd would remove the counter at every service stop.
 
 The admin supports HEAD with the same status, headers and authentication as GET,
 without a response body. The browser icon is served locally; `/favicon.ico`

@@ -227,6 +227,7 @@ class DailyBackupTests(unittest.TestCase):
         timer = configparser.ConfigParser(interpolation=None)
         unit.read(ROOT / 'deploy/argus-watchdog.service')
         timer.read(ROOT / 'deploy/argus-watchdog.timer')
+        self.assertEqual("yes", unit["Service"]["RuntimeDirectoryPreserve"])
         interval = int(unit['Unit']['StartLimitIntervalSec'].removesuffix('min'))
         cadence = int(timer['Timer']['OnUnitActiveSec'].removesuffix('min'))
         self.assertLessEqual(interval, cadence)
