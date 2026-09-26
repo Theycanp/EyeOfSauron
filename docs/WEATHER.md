@@ -139,7 +139,10 @@ the forecast's local date. A newly activated release can publish its first
 daily forecast before independent optional polling finishes; those fields then
 show as unavailable until the next normal daily report. This is not fabricated
 as complete data. Solar elevation is the value at the astronomy poll time, not
-an all-day angle.
+an all-day angle. The QWeather request uses `alt=0`, a sea-level reference,
+because subscription elevation is not currently measured or stored; displayed
+solar elevation and azimuth are therefore approximations rather than site-survey
+values. Both display the time of the last astronomy poll.
 
 ## Operations and limitations
 

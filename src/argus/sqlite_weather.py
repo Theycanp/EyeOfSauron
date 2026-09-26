@@ -56,7 +56,7 @@ class SQLiteWeather:
         ).fetchone()
         sky_row = self.connection.execute(
             "SELECT local_date,sunrise,sunset,moonrise,moonset,moon_phase,moon_illumination,"
-            "solar_elevation,solar_azimuth FROM weather_astronomy WHERE subscription_id=?",
+            "solar_elevation,solar_azimuth,updated_at FROM weather_astronomy WHERE subscription_id=?",
             (subscription.id,),
         ).fetchone()
         latest = json.loads(row["latest_json"]) if row["latest_json"] else None
@@ -150,7 +150,7 @@ class SQLiteWeather:
             day = daily_due(subscription, state["last_daily_date"], now)
             if day is not None:
                 sky_row = self.connection.execute(
-                    "SELECT moonrise,moonset,moon_phase,moon_illumination,solar_elevation "
+                    "SELECT moonrise,moonset,moon_phase,moon_illumination,solar_elevation,solar_azimuth,updated_at "
                     "FROM weather_astronomy WHERE subscription_id=? AND local_date=?",
                     (subscription.id, day.replace("-", "")),
                 ).fetchone()

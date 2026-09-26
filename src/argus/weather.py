@@ -340,7 +340,11 @@ def astronomy_text(value: Mapping[str, Any] | None, timezone: str) -> str:
     illumination = value.get("moon_illumination")
     light = f"，照明 {float(illumination):.0f}%" if isinstance(illumination, (int, float)) else ""
     angle = value.get("solar_elevation")
-    solar = f"，太阳高度角 {float(angle):.1f}°" if isinstance(angle, (int, float)) else ""
+    azimuth = value.get("solar_azimuth")
+    observed = value.get("updated_at")
+    direction = f"、方位角 {float(azimuth):.1f}°" if isinstance(azimuth, (int, float)) else ""
+    solar = (f"，太阳高度角 {float(angle):.1f}°{direction}（{format_clock(observed, timezone)} 查询）"
+             if isinstance(angle, (int, float)) else "")
     return (f"月升 {format_clock(value.get('moonrise'), timezone)}、月落 "
             f"{format_clock(value.get('moonset'), timezone)}，月相 {phase}{light}{solar}")
 

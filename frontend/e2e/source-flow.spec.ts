@@ -54,7 +54,7 @@ async function mockAdminApi(page: Page) {
           air_quality: { observed_at: now, pm2_5: 12, pm10: 20, european_aqi: 27, us_aqi: 39 },
           astronomy: { date: '20260926', sunrise: 1790373600, sunset: 1790416800,
             moonrise: 1790413200, moonset: 1790370000, moon_phase: '盈凸月',
-            moon_illumination: 95, solar_elevation: 42.5, solar_azimuth: 230 },
+            moon_illumination: 95, solar_elevation: 42.5, solar_azimuth: 230, updated_at: now },
           calendar: { lunar: '农历2026年8月16日', festivals: '' },
           observed_at: now, is_today: true,
         } : null,
@@ -482,7 +482,8 @@ test('weather location and schedule are usable on desktop and mobile', async ({ 
   await expect(page.getByRole('heading', { name: '本地天气' })).toBeVisible()
   await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('欧洲 AQI 27')
   await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('月升 / 月落')
-  await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('太阳高度角')
+  await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('太阳角度')
+  await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('方位 230.0°')
   await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('农历2026年8月16日')
   await page.getByLabel('搜索城市或地区').fill('天安门')
   await page.getByRole('button', { name: '搜索地点' }).click()

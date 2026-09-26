@@ -207,7 +207,7 @@ class WeatherTests(unittest.TestCase):
         daily = self.database.connection.execute(
             "SELECT message FROM alerts WHERE rule_id='weather.daily'"
         ).fetchone()[0]
-        for expected in ("农历2026年8月16日", "PM2.5 15.0", "月相 满月", "太阳高度角 22.0"):
+        for expected in ("农历2026年8月16日", "PM2.5 15.0", "月相 满月", "太阳高度角 22.0", "方位角 90.0", "07:01 查询"):
             self.assertIn(expected, daily)
         self.assertTrue(self.database.enqueue_weather_test(
             topic="eos", click_url="https://example.test/#/weather", now=now + 1,
