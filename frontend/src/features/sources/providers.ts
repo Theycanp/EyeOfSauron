@@ -317,7 +317,7 @@ export function catalogSourceDraft(entry: NewsCatalogEntry, feed: NewsCatalogFee
     url: feed.url,
     allowed_hosts: [...feed.allowed_hosts],
     enabled: true,
-    poll_interval_seconds: entry.id === 'japan_meteorological_agency' ? 21_600 : entry.id === 'sec' ? 600 : 300,
+    poll_interval_seconds: entry.id === 'japan_meteorological_agency' ? 43_200 : entry.id === 'sec' ? 600 : 300,
     request_timeout_seconds: 20,
     request_attempts: 3,
     retry_base_seconds: 2,
@@ -333,7 +333,7 @@ export function catalogSourceDraft(entry: NewsCatalogEntry, feed: NewsCatalogFee
       topic: entry.topic || 'general',
       ...(entry.id === 'japan_meteorological_agency' ? {
         headline_from_summary: true,
-        entry_filter_profile: 'jma_exceptional_hazards',
+        entry_filter_profile: 'jma_global_significance',
         notification_eligible: false,
       } : {}),
       ...(entry.source_kind === 'official_list' ? {
