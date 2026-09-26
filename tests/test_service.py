@@ -107,6 +107,25 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, status["consecutive_failures"])
         self.assertIsNone(status["rain_expected"])
 
+    async def test_local_weather_revision_starts_all_three_channels(self) -> None:
+        from unittest.mock import Mock
+        from argus.weather import WeatherAstronomy
+
+        service = self._service(None, None)
+        provider = Mock()
+        provider.fetch_minutely.return_value = Mock()
+        provider.fetch_alerts.return_value = ()
+        provider.fetch_astronomy.return_value = WeatherAstronomy("20260926", None, None, None, None, None, None)
+        service.local_weather_provider = provider
+        with (patch.object(self.database, "record_weather_nowcast", return_value=0),
+              patch.object(self.database, "record_official_weather_alerts", return_value=0),
+              patch.object(self.database, "record_weather_astronomy", side_effect=lambda *_args, **_kwargs: service.stop_event.set()),
+              patch("argus.service.nowcast_signal", return_value=None)):
+            await asyncio.wait_for(service._local_weather_loop(), timeout=3)
+        provider.fetch_minutely.assert_called_once()
+        provider.fetch_alerts.assert_called_once()
+        provider.fetch_astronomy.assert_called_once()
+
     def _queue_content_fetch(self) -> int:
         baseline = FeedFetchResult((), None, None)
         self.database.record_source_success(

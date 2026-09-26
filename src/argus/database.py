@@ -33,7 +33,7 @@ from .event_identity import EventOccurrenceIdentity, identify_semantic_event
 from .event_fact_projection import EventFactWorkItem, SQLiteEventFacts
 from .event_facts import EventFactCandidate
 from .sqlite_weather import SQLiteWeather
-from .weather import OfficialWeatherAlert, WeatherForecast, WeatherNowcast, WeatherSubscription
+from .weather import OfficialWeatherAlert, WeatherAirQuality, WeatherAstronomy, WeatherForecast, WeatherNowcast, WeatherSubscription
 from .events import (
     EventEvidenceGraph,
     EventListItem,
@@ -62,7 +62,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 
 _DIGEST_PROVIDER_TRACE_FIELDS = frozenset({
@@ -1551,6 +1551,35 @@ class Database:
                     (("minutely",), ("alerts",)),
                 )
                 self.connection.execute("PRAGMA user_version=23")
+            version = 23
+        if version < 24:
+            with self.unit_of_work():
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS weather_air_quality (
+                        subscription_id TEXT PRIMARY KEY REFERENCES weather_subscriptions(id) ON DELETE CASCADE,
+                        observed_at INTEGER NOT NULL,
+                        pm2_5 REAL,
+                        pm10 REAL,
+                        european_aqi REAL,
+                        us_aqi REAL
+                    )
+                """)
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS weather_astronomy (
+                        subscription_id TEXT PRIMARY KEY REFERENCES weather_subscriptions(id) ON DELETE CASCADE,
+                        local_date TEXT NOT NULL,
+                        sunrise INTEGER,
+                        sunset INTEGER,
+                        moonrise INTEGER,
+                        moonset INTEGER,
+                        moon_phase TEXT,
+                        moon_illumination REAL,
+                        solar_elevation REAL,
+                        solar_azimuth REAL,
+                        updated_at INTEGER NOT NULL
+                    )
+                """)
+                self.connection.execute("PRAGMA user_version=24")
 
     def record_digest_preparation_failure(
         self, digest_key: str, *, stage: str, error: BaseException | str, now: int,
@@ -4884,6 +4913,17 @@ class Database:
         SQLiteWeather(self).record_qweather_failure(
             subscription, kind, error, now, topic=topic, click_url=click_url,
         )
+
+    def record_weather_air_quality(self, subscription: WeatherSubscription,
+                                   air_quality: WeatherAirQuality, *, now: int) -> None:
+        SQLiteWeather(self).record_weather_air_quality(subscription, air_quality, now=now)
+
+    def record_weather_astronomy(self, subscription: WeatherSubscription,
+                                 astronomy: WeatherAstronomy, *, now: int) -> None:
+        SQLiteWeather(self).record_weather_astronomy(subscription, astronomy, now=now)
+
+    def enqueue_weather_test(self, *, topic: str, click_url: str, now: int) -> bool:
+        return SQLiteWeather(self).enqueue_weather_test(topic=topic, click_url=click_url, now=now)
 
     def complete_event_fact_job(
         self, work: EventFactWorkItem, facts: Sequence[EventFactCandidate], now: int,

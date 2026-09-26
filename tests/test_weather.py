@@ -12,8 +12,9 @@ from zoneinfo import ZoneInfo
 from argus.database import Database
 from argus.open_meteo import OpenMeteoProvider, WeatherProviderError
 from argus.weather import (
-    ForecastHour, NowcastSlot, OfficialWeatherAlert, WeatherNowcast, WeatherForecast, WeatherError, daily_due,
-    remaining_day_rain, validate_forecast, weather_signals,
+    ForecastHour, NowcastSlot, OfficialWeatherAlert, WeatherAirQuality, WeatherAstronomy,
+    WeatherNowcast, WeatherForecast, WeatherError, daily_due,
+    remaining_day_rain, summarize_weather, validate_forecast, weather_signals,
 )
 
 
@@ -64,7 +65,7 @@ class WeatherTests(unittest.TestCase):
         )]
 
     def test_schema_seed_uses_verified_campus_location(self) -> None:
-        self.assertEqual(23, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(24, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("北京邮电大学沙河校区", self.subscription.label)
         self.assertAlmostEqual(40.1561163, self.subscription.latitude)
         self.assertAlmostEqual(116.2835626, self.subscription.longitude)
@@ -147,8 +148,92 @@ class WeatherTests(unittest.TestCase):
         connection.commit()
         connection.close()
         self.database = Database(self.path)
-        self.assertEqual(23, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(24, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("北京邮电大学沙河校区", self.database.get_weather_subscription().label)
+
+    def test_schema_twenty_three_migration_preserves_existing_weather_state(self) -> None:
+        now = DAY + 10 * 3600
+        self.record(now)
+        before = self.database.get_weather_status()
+        self.database.close()
+        connection = sqlite3.connect(self.path)
+        connection.execute("DROP TABLE weather_air_quality")
+        connection.execute("DROP TABLE weather_astronomy")
+        connection.execute("PRAGMA user_version=23")
+        connection.commit()
+        connection.close()
+        self.database = Database(self.path)
+        after = self.database.get_weather_status()
+        self.assertEqual(24, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(before["subscription"], after["subscription"])
+        self.assertEqual(before["rain_expected"], after["rain_expected"])
+        self.assertEqual(before["latest"]["observed_at"], after["latest"]["observed_at"])
+
+    def test_air_quality_and_astronomy_use_typed_tables_and_survive_restart(self) -> None:
+        now = DAY + 10 * 3600
+        self.database.record_weather_air_quality(
+            self.subscription, WeatherAirQuality(now, 12.5, 20, 28, 45), now=now,
+        )
+        self.database.record_weather_astronomy(
+            self.subscription,
+            WeatherAstronomy("20260926", now - 4 * 3600, now + 8 * 3600,
+                             now + 7 * 3600, now - 3 * 3600, "盈凸月", 95, 45.2, 230.0),
+            now=now,
+        )
+        self.record(now)
+        self.database.close()
+        self.database = Database(self.path)
+        with patch("argus.sqlite_weather.time.time", return_value=now):
+            latest = self.database.get_weather_status()["latest"]
+        self.assertEqual(12.5, latest["air_quality"]["pm2_5"])
+        self.assertEqual("盈凸月", latest["astronomy"]["moon_phase"])
+        self.assertEqual(45.2, latest["astronomy"]["solar_elevation"])
+        self.assertEqual(1, self.database.connection.execute(
+            "SELECT COUNT(*) FROM weather_air_quality"
+        ).fetchone()[0])
+
+    def test_daily_message_and_test_snapshot_keep_real_data_separate(self) -> None:
+        now = DAY + 7 * 3600 + 60
+        self.database.record_weather_air_quality(
+            self.subscription, WeatherAirQuality(now, 15, 25, 30, 50), now=now,
+        )
+        self.database.record_weather_astronomy(
+            self.subscription,
+            WeatherAstronomy("20260926", now - 3600, now + 11 * 3600,
+                             now + 10 * 3600, now - 2 * 3600, "满月", 99, 22, 90),
+            now=now,
+        )
+        self.assertEqual(1, self.record(now))
+        daily = self.database.connection.execute(
+            "SELECT message FROM alerts WHERE rule_id='weather.daily'"
+        ).fetchone()[0]
+        for expected in ("农历2026年8月16日", "PM2.5 15.0", "月相 满月", "太阳高度角 22.0"):
+            self.assertIn(expected, daily)
+        self.assertTrue(self.database.enqueue_weather_test(
+            topic="eos", click_url="https://example.test/#/weather", now=now + 1,
+        ))
+        test = self.database.connection.execute(
+            "SELECT message FROM alerts WHERE rule_id='weather.test'"
+        ).fetchone()[0]
+        self.assertIn("[测试通知]", test)
+        self.assertIn("不代表官方气象预警", test)
+        self.assertEqual("2026-09-26", str(datetime.fromtimestamp(now, TZ).date()))
+
+    def test_stale_optional_weather_data_is_not_presented_as_current(self) -> None:
+        now = DAY + 10 * 3600
+        self.database.record_weather_air_quality(
+            self.subscription, WeatherAirQuality(now, 12, 20, 25, 40), now=now,
+        )
+        self.database.record_weather_astronomy(
+            self.subscription, WeatherAstronomy("20260925", None, None, None, None, "旧月相", 40), now=now,
+        )
+        self.record(now)
+        with patch("argus.sqlite_weather.time.time", return_value=now + 7 * 3600):
+            latest = self.database.get_weather_status()["latest"]
+        self.assertIsNone(latest["air_quality"])
+        self.assertIsNone(latest["astronomy"])
+        with self.assertRaisesRegex(WeatherError, "fresh"):
+            self.database.enqueue_weather_test(topic="eos", click_url="", now=now + 25 * 3600)
 
     def test_forecast_rules_are_conservative(self) -> None:
         now = DAY + 10 * 3600

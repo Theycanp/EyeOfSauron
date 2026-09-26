@@ -13,14 +13,18 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-from .weather import NowcastSlot, OfficialWeatherAlert, WeatherNowcast, WeatherSubscription, validate_nowcast
+from .weather import (
+    NowcastSlot, OfficialWeatherAlert, WeatherAstronomy, WeatherNowcast, WeatherSubscription,
+    validate_nowcast,
+)
 
 
 _HOST = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.qweatherapi\.com$")
@@ -48,6 +52,12 @@ def _timestamp(value: Any) -> int:
     if instant.tzinfo is None:
         raise QWeatherError("QWeather timestamp has no timezone")
     return int(instant.timestamp())
+
+
+def _optional_timestamp(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    return _timestamp(value)
 
 
 def _text(value: Any, limit: int = 200) -> str:
@@ -191,3 +201,53 @@ class QWeatherProvider:
                 instruction=_text(item.get("instruction"), 1000),
             ))
         return tuple(alerts)
+
+    def fetch_astronomy(self, subscription: WeatherSubscription, date: str) -> WeatherAstronomy:
+        if not re.fullmatch(r"\d{8}", date):
+            raise QWeatherError("QWeather astronomy date is invalid")
+        location = urllib.parse.quote(f"{subscription.longitude:.2f},{subscription.latitude:.2f}")
+        sun = self._request(f"/v7/astronomy/sun?location={location}&date={date}")
+        moon = self._request(f"/v7/astronomy/moon?location={location}&date={date}")
+        phases = moon.get("moonPhase")
+        if not isinstance(phases, list):
+            phases = []
+        phase = next((item for item in phases if isinstance(item, dict)
+                      and isinstance(item.get("fxTime"), str)
+                      and item["fxTime"][11:13] == "12" and item.get("name")), None)
+        if phase is None:
+            phase = next((item for item in phases if isinstance(item, dict) and item.get("name")), None)
+        illumination: float | None = None
+        if isinstance(phase, dict):
+            try:
+                illumination = float(str(phase.get("illumination")))
+            except (TypeError, ValueError):
+                illumination = None
+        local_now = datetime.now(ZoneInfo(subscription.timezone))
+        offset = local_now.utcoffset() or UTC.utcoffset(local_now)
+        tz = f"{int(offset.total_seconds() // 3600):+03d}00"
+        angle_payload: dict[str, Any] = {}
+        if local_now.strftime("%Y%m%d") == date:
+            try:
+                angle_payload = self._request(
+                    f"/v7/astronomy/solar-elevation-angle?location={location}&date={date}"
+                    f"&time={local_now:%H%M}&tz={tz}"
+                )
+            except QWeatherError:
+                pass  # Optional angle data must not hide valid sun/moon times.
+        def optional_number(value: Any, low: float, high: float) -> float | None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return number if math.isfinite(number) and low <= number <= high else None
+        return WeatherAstronomy(
+            date=date,
+            sunrise=_optional_timestamp(sun.get("sunrise")),
+            sunset=_optional_timestamp(sun.get("sunset")),
+            moonrise=_optional_timestamp(moon.get("moonrise")),
+            moonset=_optional_timestamp(moon.get("moonset")),
+            moon_phase=str(phase["name"])[:80] if isinstance(phase, dict) else None,
+            moon_illumination=illumination,
+            solar_elevation=optional_number(angle_payload.get("solarElevationAngle"), -90, 90),
+            solar_azimuth=optional_number(angle_payload.get("solarAzimuthAngle"), 0, 360),
+        )

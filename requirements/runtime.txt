@@ -1,3 +1,4 @@
 # Keep this synchronized with pyproject.toml; pip-audit checks this exact set.
 argon2-cffi==25.1.0
 cryptography==50.0.1
+lunardate==0.3.0

@@ -1,12 +1,12 @@
 [project]
 name = "eyeofsauron"
-version = "0.24.0"
+version = "0.24.1"
 description = "EyeOfSauron personal intelligence monitoring, powered by the Argus watcher engine"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES"]
 requires-python = ">=3.12"
-dependencies = ["argon2-cffi>=21.1,<26", "cryptography>=50.0.1,<51"]
+dependencies = ["argon2-cffi>=21.1,<26", "cryptography>=50.0.1,<51", "lunardate>=0.3,<0.4"]
 keywords = ["monitoring", "alerts", "ntfy", "rss", "personal-intelligence"]
 
 classifiers = [

@@ -81,6 +81,44 @@ class CiGateTests(unittest.TestCase):
             self.assertFalse(marker.exists())
 
 
+class ReleasePackagingTests(unittest.TestCase):
+    def test_release_drill_health_uses_selected_runtime(self) -> None:
+        script = (ROOT / "scripts/ci/release-drill-health.sh").read_text()
+        self.assertIn('"${ARGUS_PYTHON:-/usr/bin/python3}"', script)
+        self.assertNotIn('PYTHONPATH="$EOS_INSTALL_ROOT/current/src" /usr/bin/python3', script)
+
+    def test_package_metadata_uses_selected_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            (repo / "scripts/release").mkdir(parents=True)
+            (repo / "src/argus").mkdir(parents=True)
+            shutil.copy2(ROOT / "scripts/release/package-release.sh", repo / "scripts/release")
+            (repo / "src/argus/__init__.py").write_text('__version__ = "1.2.3"\n')
+            (repo / "src/argus/database.py").write_text("SCHEMA_VERSION = 24\n")
+            (repo / "pyproject.toml").write_text('[project]\nlicense = "Apache-2.0"\n')
+            subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test",
+                            "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"],
+                           check=True, capture_output=True)
+            marker = root / "selected-python-used"
+            runtime = root / "runtime-python"
+            runtime.write_text(f'#!/bin/sh\ntouch "{marker}"\nexec "{sys.executable}" "$@"\n')
+            runtime.chmod(0o755)
+            archive = root / "release.tar.gz"
+            result = subprocess.run(
+                ["bash", str(repo / "scripts/release/package-release.sh"), str(archive), "v1.2.3-test"],
+                text=True, capture_output=True, env={**os.environ, "ARGUS_PYTHON": str(runtime)}, timeout=20,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue(marker.exists())
+            with tarfile.open(archive, "r:gz") as package:
+                manifest = json.load(package.extractfile("eyeofsauron/RELEASE.json"))
+            self.assertEqual(24, manifest["database_schema"])
+            self.assertEqual("1.2.3", manifest["version"])
+
+
 class ReleaseDrillSafetyTests(unittest.TestCase):
     def test_drill_rejects_paths_outside_its_marked_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

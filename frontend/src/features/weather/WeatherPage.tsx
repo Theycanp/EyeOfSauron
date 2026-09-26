@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { CloudSun, LocateFixed, MapPin, RefreshCw, Search, Wind } from 'lucide-react'
+import { CloudSun, Droplets, LocateFixed, MapPin, Moon, RefreshCw, Search, Sun, Wind } from 'lucide-react'
 import type { AdminApi } from '../../shared/api'
 import type { WeatherPlace, WeatherStatus, WeatherSubscription } from '../../shared/types'
 import { formatDate } from '../../shared/utils'
@@ -9,6 +9,15 @@ interface Props {
   api: AdminApi
   canWrite: boolean
   onUnauthorized: () => void
+}
+
+function localClock(timestamp: number | null | undefined, timezone: string): string {
+  if (timestamp == null) return '—'
+  return new Intl.DateTimeFormat('zh-CN', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(timestamp * 1000)
+}
+
+function localDate(timestamp: number, timezone: string): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(timestamp * 1000)
 }
 
 export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
@@ -116,23 +125,36 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
   if (!draft) return error ? <div className="form-error" role="alert">{error}<button className="button subtle" onClick={() => { void load(true) }}>重试</button></div>
     : <div className="loading-state"><RefreshCw className="spin" size={20} />正在读取天气订阅…</div>
 
+  const latest = status?.latest
+  const today = latest?.is_today
+
   return <div className="weather-page">
     <div className="page-actions"><div><h2>本地天气</h2><p>{status?.subscription.label || draft.label}</p></div>
       <button className="icon-button" aria-label="刷新天气状态" title="刷新天气状态" onClick={() => { void load() }}><RefreshCw size={18} /></button></div>
 
     <section className="weather-current" aria-label="最新天气预报">
       <div className="weather-current-icon"><CloudSun size={34} /></div>
-      <div><span className="eyebrow">{status?.last_success_at ? `上次查询 ${formatDate(status.last_success_at)}` : '等待首次查询'}</span>
+      <div><span className="eyebrow">{status?.last_success_at ? `${today ? '今日预报' : '历史预报'} · 上次查询 ${formatDate(status.last_success_at)}` : '等待首次查询'}</span>
         <h3>{status?.latest?.condition || '暂无预报'}</h3>
-        <p>{status?.latest?.low != null && status.latest.high != null ? `${Math.round(status.latest.low)}~${Math.round(status.latest.high)}℃` : '温度待获取'}
-          <span> · </span>今日降水 {status?.latest?.rain_mm ?? '—'} mm<span> · </span>阵风 {status?.latest?.wind_gust_kmh ?? '—'} km/h</p>
+        <p>{latest?.low != null && latest.high != null ? `${Math.round(latest.low)}~${Math.round(latest.high)}℃` : '温度待获取'}
+          <span> · </span>{today ? '今日' : '当日'}降水 {latest?.rain_mm ?? '—'} mm<span> · </span>阵风 {latest?.wind_gust_kmh ?? '—'} km/h</p>
       </div>
       <div className="weather-current-side"><Wind size={17} />{status?.rain_expected === true ? '今日预计有雨' : status?.rain_expected === false ? '当前预报无明显降雨' : '雨情等待基线'}</div>
     </section>
+    {latest && <section className="weather-metrics" aria-label={today ? '今日天气详情' : '历史天气详情'}>
+      <div><Droplets size={16} /><span>湿度</span><strong>{latest.humidity != null ? `${Math.round(latest.humidity)}%` : '—'}</strong></div>
+      <div><Wind size={16} /><span>风</span><strong>{latest.wind_speed_kmh != null ? `${Math.round(latest.wind_speed_kmh)} km/h ${latest.wind_direction_name || ''}` : '—'}</strong></div>
+      <div><Sun size={16} /><span>日出 / 日落</span><strong>{localClock(latest.sunrise, draft.timezone)} / {localClock(latest.sunset, draft.timezone)}</strong></div>
+      <div><span>空气（模型估计）</span><strong>{latest.air_quality?.european_aqi != null ? `欧洲 AQI ${Math.round(latest.air_quality.european_aqi)}` : latest.air_quality?.us_aqi != null ? `美国 AQI ${Math.round(latest.air_quality.us_aqi)}` : '—'}<br />PM2.5 {latest.air_quality?.pm2_5 ?? '—'} · PM10 {latest.air_quality?.pm10 ?? '—'} μg/m³</strong></div>
+      <div><Moon size={16} /><span>月升 / 月落</span><strong>{localClock(latest.astronomy?.moonrise, draft.timezone)} / {localClock(latest.astronomy?.moonset, draft.timezone)}</strong></div>
+      <div><Moon size={16} /><span>月相</span><strong>{latest.astronomy?.moon_phase || '—'}{latest.astronomy?.moon_illumination != null ? ` · 照明 ${latest.astronomy.moon_illumination}%` : ''}</strong></div>
+      <div><Sun size={16} /><span>太阳高度角</span><strong>{latest.astronomy?.solar_elevation != null ? `${latest.astronomy.solar_elevation.toFixed(1)}°` : '—'}</strong></div>
+      <div><span>日期</span><strong>{localDate(latest.observed_at, draft.timezone)} · {latest.calendar?.lunar || '—'} {latest.calendar?.festivals || ''}</strong></div>
+    </section>}
 
     {status?.last_error && <div className="partial-error" role="status">天气取数失败 {status.consecutive_failures} 次：{status.last_error}</div>}
     {status?.qweather && <div className="weather-provider-status" aria-label="和风天气状态">{Object.entries(status.qweather).map(([kind, provider]) => <div key={kind}>
-      <strong>{kind === 'minutely' ? '临近雨雪' : '官方预警'}</strong><span>{provider.last_success_at ? formatDate(provider.last_success_at) : '等待和风天气查询'}</span>
+      <strong>{kind === 'minutely' ? '临近雨雪' : kind === 'alerts' ? '官方预警' : '日月天文'}</strong><span>{provider.last_success_at ? formatDate(provider.last_success_at) : '等待和风天气查询'}</span>
       {provider.last_error && <span className="form-error">连续失败 {provider.consecutive_failures} 次：{provider.last_error}</span>}
     </div>)}</div>}
     {error && <div className="form-error" role="alert">{error}</div>}

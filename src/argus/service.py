@@ -9,8 +9,10 @@ import socket
 import time
 import uuid
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 from . import __version__
 from .adapters import build_collector
@@ -26,7 +28,9 @@ from .notifier import Notifier, delivery_error_details
 from .rules import RuleSet
 from .runtime_io import run_network_call
 from .util import now_epoch, sanitize_error
-from .weather import LocalWeatherProvider, WeatherProvider, nowcast_signal, validate_forecast
+from .weather import (
+    LocalWeatherProvider, WeatherAirQuality, WeatherProvider, nowcast_signal, validate_forecast,
+)
 
 
 LOGGER = logging.getLogger("argus")
@@ -125,8 +129,8 @@ class ArgusService:
         collector = self.collectors[source_id]
         source_config = next(source for source in self.config.sources if source.id == source_id)
         state = self.database.get_source_state(source_id)
-        now = now_epoch()
         started = time.monotonic()
+        now = now_epoch()
         self.database.mark_source_runtime(
             source_id, "degraded" if state.consecutive_failures else "active", now
         )
@@ -497,7 +501,6 @@ class ArgusService:
         if self.weather_provider is None:
             return False
         subscription = self.database.get_weather_subscription()
-        now = now_epoch()
         base_url = self.config.admin.public_base_url or self.config.digest.public_base_url
         click_url = f"{base_url}/#/weather" if base_url else ""
         try:
@@ -512,8 +515,18 @@ class ArgusService:
             )
             LOGGER.warning("weather_poll_failed error=%s", sanitize_error(exc))
             return False
+        fetch_air_quality = getattr(self.weather_provider, "fetch_air_quality", None)
+        if callable(fetch_air_quality):
+            try:
+                air_quality = await run_network_call(fetch_air_quality, subscription)
+                if isinstance(air_quality, WeatherAirQuality):
+                    self.database.record_weather_air_quality(subscription, air_quality, now=now_epoch())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("air_quality_poll_failed error=%s", sanitize_error(exc))
         queued = self.database.record_weather_forecast(
-            subscription, forecast, now=now, topic=self.config.ntfy.default_topic,
+            subscription, forecast, now=now_epoch(), topic=self.config.ntfy.default_topic,
             click_url=click_url,
         )
         LOGGER.info("weather_poll_succeeded location=%s queued=%d", subscription.id, queued)
@@ -544,18 +557,18 @@ class ArgusService:
     async def _local_weather_loop(self) -> None:
         assert self.local_weather_provider is not None
         revision: int | None = None
-        due = {"minutely": 0, "alerts": 0}
+        due = {"minutely": 0, "alerts": 0, "astronomy": 0}
         while not self.stop_event.is_set():
             subscription = self.database.get_weather_subscription()
             if subscription.revision != revision:
                 revision = subscription.revision
-                due = {"minutely": 0, "alerts": 0}
+                due = {"minutely": 0, "alerts": 0, "astronomy": 0}
             base_url = self.config.admin.public_base_url or self.config.digest.public_base_url
             click_url = f"{base_url}/#/weather" if base_url else ""
-            for kind in ("minutely", "alerts"):
+            for kind in ("minutely", "alerts", "astronomy"):
                 if now_epoch() < due[kind]:
                     continue
-                interval = 600
+                interval = 600 if kind != "astronomy" else 21600
                 try:
                     if kind == "minutely":
                         nowcast = await run_network_call(self.local_weather_provider.fetch_minutely, subscription)
@@ -566,25 +579,33 @@ class ArgusService:
                         )
                         if nowcast_signal(nowcast, now) is not None:
                             interval = 300
-                    else:
+                    elif kind == "alerts":
                         alerts = await run_network_call(self.local_weather_provider.fetch_alerts, subscription)
                         queued = self.database.record_official_weather_alerts(
                             subscription, alerts, now=now_epoch(), topic=self.config.ntfy.default_topic,
                             click_url=click_url,
                         )
+                    else:
+                        local_date = datetime.now(ZoneInfo(subscription.timezone)).date().strftime("%Y%m%d")
+                        astronomy = await run_network_call(
+                            self.local_weather_provider.fetch_astronomy, subscription, local_date
+                        )
+                        self.database.record_weather_astronomy(subscription, astronomy, now=now_epoch())
+                        queued = 0
                     LOGGER.info("qweather_poll_succeeded kind=%s queued=%d", kind, queued)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    interval = 300
-                    try:
-                        self.database.record_qweather_failure(
-                            subscription, kind, exc, now_epoch(), topic=self.config.ntfy.default_topic,
-                            click_url=click_url,
-                        )
-                    except Exception as persistence_exc:
-                        LOGGER.error("qweather_failure_record_failed kind=%s error=%s",
-                                     kind, sanitize_error(persistence_exc))
+                    interval = 300 if kind != "astronomy" else 3600
+                    if kind != "astronomy":
+                        try:
+                            self.database.record_qweather_failure(
+                                subscription, kind, exc, now_epoch(), topic=self.config.ntfy.default_topic,
+                                click_url=click_url,
+                            )
+                        except Exception as persistence_exc:
+                            LOGGER.error("qweather_failure_record_failed kind=%s error=%s",
+                                         kind, sanitize_error(persistence_exc))
                     LOGGER.warning("qweather_poll_failed kind=%s error=%s", kind, sanitize_error(exc))
                 due[kind] = now_epoch() + interval
             try:

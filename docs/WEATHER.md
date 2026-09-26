@@ -6,7 +6,8 @@ The first subscription is Beijing University of Posts and Telecommunications,
 Shahe campus (`40.1561163, 116.2835626`, `Asia/Shanghai`). Tiananmen is only a
 suggested example for future manual setup. A browser may supply coordinates, or
 an operator may search for a place and edit coordinates in the admin Weather page.
-There is one subscription in schema 23; this is not a multi-user weather service.
+There is one subscription; this is not a multi-user weather service. Schema 23
+introduced the subscription and schema 24 adds typed optional observations.
 
 Source review on 2026-09-26:
 
@@ -14,6 +15,8 @@ Source review on 2026-09-26:
 |---|---|---|
 | Open-Meteo forecast and geocoding APIs | HTTPS JSON returned 72 hourly values for the Shahe coordinates. Forecast and place search worked from this host without a key. Free API terms allow non-commercial use below 10,000 calls/day and require CC BY 4.0 attribution. | Use for model forecast and location search. One hourly request is about 24/day; place searches are operator initiated. |
 | QWeather minute precipitation, hourly v1 and official-alert v1 APIs | All three returned valid JSON; Ed25519 JWT separately verified. Minute precipitation returned 24 slots and a district lightning warning was present. | Use minute precipitation and official alerts. Hourly data was probed but is not yet integrated into decisions. |
+| Open-Meteo Air Quality API | Current PM2.5, PM10, European AQI and US AQI returned for the subscribed coordinates. Values are model estimates, not station measurements. | Optional independent six-hour-freshness snapshot; not used to trigger official alerts. EU and US indices retain separate labels. |
+| QWeather sun, moon and solar elevation APIs | JWT requests returned local sunrise/sunset, moonrise/moonset, hourly phase/illumination and the current solar elevation/azimuth. | Optional local-date-matched astronomy snapshot. An angle request failure does not discard sun/moon data. Moon angle was not verified and is not claimed. |
 | China Meteorological Administration / National Meteorological Center public pages | Public pages were reachable, but no verified, authorized machine-readable warning feed was established; the NMC page's reuse restriction rules out treating HTML scraping as an authorized integration. | Do not scrape or represent a model forecast as an official warning. |
 | US NWS and Japan JMA | Official warning products exist but their jurisdiction is not Beijing. | Not a Beijing local-weather provider. Existing JMA news monitoring remains a separate international-disaster signal. |
 
@@ -43,7 +46,11 @@ first successful fetch after that sends one recovery alert.
 At the configured local time (default 07:00), the first successful fetch in the
 next six hours queues one daily forecast per local date. It reports current
 condition, today's temperature range, remaining-day predicted precipitation,
-maximum rain probability, and gusts. The daily-date key is durable; retries and
+maximum rain probability, gusts, humidity, wind, sunrise/sunset, Gregorian and
+lunar dates, and a small verified set of fixed-date festivals. Fresh optional
+air quality and matching-date QWeather moon data are appended when available;
+missing optional data is labelled missing, not invented. Qingming and other
+solar-term or movable festivals are not yet calculated. The daily-date key is durable; retries and
 restarts do not duplicate it. The daily notification can be disabled separately
 from change alerts.
 
@@ -67,7 +74,7 @@ is absent from the model or guarantee notice before an event begins.
 
 The `WeatherProvider` and `WeatherRepository` protocols isolate the forecast
 source and persistent state. `open_meteo.py` is the network adapter,
-`weather.py` owns validation and rules, `sqlite_weather.py` owns schema-23 state
+`weather.py` owns validation and rules, `sqlite_weather.py` owns schema-24 state
 and atomic outbox writes, and `service.py` owns scheduling. The admin API uses
 the same repository boundary; settings writes require `settings:write`, origin
 and CSRF validation, revision match, and an audit record. Read/search requires
@@ -117,9 +124,22 @@ References: [authentication](https://dev.qweather.com/en/docs/configuration/auth
 [official alerts](https://dev.qweather.com/en/docs/api/warning/weather-alert/).
 QWeather data may be delayed; safety decisions must refer to the issuer's latest
 warning. No AI call is used by the weather module. QWeather base polling is
-about 288 requests/day (144 per endpoint), rising to at most 432/day with wet
+about 292 requests/day (144 per minute/warning endpoint and about four astronomy
+polls, each requiring two or three requests), rising to about 436/day with wet
 minute polling, excluding bounded retries. Check account quota/billing rather
 than assuming a shared conversation's free-tier figure is guaranteed.
+
+The Open-Meteo forecast poll also requests optional air quality. Air-quality
+failure is logged but does not fail the forecast. QWeather astronomy is checked
+at startup and every six hours, with one-hour retry on failure. Neither optional
+provider has permission to generate a weather hazard or official warning. The
+Weather page marks an old forecast as historical and shows the subscription
+timezone; optional air quality expires after six hours and astronomy must match
+the forecast's local date. A newly activated release can publish its first
+daily forecast before independent optional polling finishes; those fields then
+show as unavailable until the next normal daily report. This is not fabricated
+as complete data. Solar elevation is the value at the astronomy poll time, not
+an all-day angle.
 
 ## Operations and limitations
 
@@ -139,8 +159,9 @@ typed warning chains, fixed provider hosts and incomplete configuration.
 `tests/test_admin_auth_http.py` covers weather read/write authentication,
 CSRF and viewer RBAC. Frontend tests and desktop/mobile E2E cover saving and
 responsive controls. Production acceptance must check one real forecast poll,
-correct local coordinates, schema 23, no duplicate outbox rows, and the public
-admin entry without sending a fabricated weather warning.
+correct local coordinates, schema 24, no duplicate outbox rows, and the public
+admin entry. `argus weather-test` creates a labelled snapshot through the normal
+outbox without changing rain or daily state; use only on explicit operator request.
 
 ## Follow-up Work (Not Implemented)
 
@@ -161,9 +182,9 @@ admin entry without sending a fabricated weather warning.
 - Official-warning detail/history: further cover supersedes branches, area
   changes, downgrades and instructions, with replay fixtures and an auditable
   reader. Never infer cancellation from missing data or failed requests.
-- AQI, heat, UV, visibility and multiple locations: add typed detector/routing
-  contracts with operator controls and tests. These are not covered by the
-  current rain/wind/cold heuristics.
+- Air-quality/heat/UV/visibility alerts and multiple locations: add typed
+  detector/routing contracts with operator controls and tests. Air-quality
+  display exists, but no such alert is currently generated by its estimate.
 - Provider controls and budgets: persist configured/enabled state and request
   counts, expose per-channel polling and quota limits without exposing secrets.
   Acceptance: an unconfigured provider is explicitly shown as unconfigured,

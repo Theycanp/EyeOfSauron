@@ -42,6 +42,7 @@ def _parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="show persisted collector and outbox status")
     status.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     commands.add_parser("enqueue-test", help="queue one clearly labeled ntfy test message")
+    commands.add_parser("weather-test", help="queue one clearly labeled current weather snapshot")
     commands.add_parser("admin", help="run the loopback-only management API")
     return parser
 
@@ -265,6 +266,15 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.command == "enqueue-test":
                 queued = database.enqueue_test_alert(config.ntfy.default_topic, now_epoch())
                 print("test notification queued" if queued else "test notification already queued")
+                return 0
+            if arguments.command == "weather-test":
+                base_url = config.admin.public_base_url or config.digest.public_base_url
+                queued = database.enqueue_weather_test(
+                    topic=config.ntfy.default_topic,
+                    click_url=f"{base_url}/#/weather" if base_url else "",
+                    now=now_epoch(),
+                )
+                print("weather test notification queued" if queued else "weather test notification already queued")
                 return 0
 
             if arguments.command == "admin":

@@ -25,7 +25,9 @@ production data are never release artifacts.
 3. Review dependency updates and both SBOMs; resolve high-severity findings or
    document a time-bounded exception.
 4. Build the archive with `scripts/release/package-release.sh` and verify its
-   checksum on the target host.
+   checksum on the target host. Set `ARGUS_PYTHON` to the prepared, dependency-
+   complete versioned runtime when packaging; the metadata step imports the
+   exact release modules and must not silently use the host system Python.
 5. Run `install-release.sh --prepare-only` before the maintenance window. The
    activation command accepts the same verified archive and reuses the prepared
    directory only when its content is identical.

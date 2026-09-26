@@ -5,6 +5,25 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-09-26
+
+### Added
+
+- Expand daily weather and the responsive admin view with humidity, wind,
+  sunrise/sunset, lunar and Gregorian dates, supported festivals, air-quality
+  estimates, moonrise/moonset, moon phase and optional solar elevation.
+- Add schema 24 typed air-quality and astronomy records. Optional-provider
+  failures do not overwrite the validated forecast or official warnings.
+- Add an operator-requested, clearly labelled weather snapshot test through
+  the normal notification outbox.
+
+### Changed
+
+- Label old forecasts as historical and hide stale optional data; distinguish
+  European from US AQI and model estimates from station measurements.
+- Document that migration effort never justifies weakening data ownership or
+  domain contracts. Schema rollback requires a matching backup.
+
 ## [0.24.0] - 2026-09-26
 
 ### Added

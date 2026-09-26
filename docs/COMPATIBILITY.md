@@ -11,8 +11,8 @@
 - Production frontend runtime: a modern browser; Node is not installed or run as
   part of the service.
 
-Argus keeps its runtime dependency set small; `argon2-cffi` and the Ed25519
-signing library `cryptography` are pinned in
+Argus keeps its runtime dependency set small; `argon2-cffi`, the Ed25519
+signing library `cryptography`, and `lunardate` for calendar conversion are pinned in
 `requirements/runtime.txt`. CI and release tools in `requirements/ci.txt` are
 development dependencies only. The backend gate uses Python's built-in
 `unittest` runner; `pytest` is not required or pinned.
@@ -31,6 +31,9 @@ must be transactional, idempotent, and tested from every supported prior schema.
 A newer schema is not assumed to be readable by older code. Downgrades therefore
 require the matching pre-release backup unless the target release explicitly
 documents support for the live schema.
+Schema 24 adds typed optional weather observations. Schema-23 code is not a
+supported reader of the migrated live database; use the matching backup for
+rollback. Lunar conversion uses the library's supported 1900-2099 date range.
 
 ## API and adapter compatibility
 

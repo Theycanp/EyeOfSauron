@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import time
 from dataclasses import asdict
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Mapping
@@ -11,9 +13,11 @@ from zoneinfo import ZoneInfo
 from .models import AlertCandidate
 from .util import sanitize_error
 from .weather import (
-    FORECAST_CREDIT, OfficialWeatherAlert, WeatherError, WeatherForecast, WeatherNowcast,
+    FORECAST_CREDIT, OfficialWeatherAlert, WeatherAirQuality, WeatherAstronomy,
+    WeatherError, WeatherForecast, WeatherNowcast,
     WeatherSubscription, daily_due, nowcast_signal, parse_weather_subscription,
     remaining_day_rain, summarize_weather, validate_forecast, validate_nowcast, weather_signals,
+    air_quality_text, astronomy_text, format_clock,
 )
 
 if TYPE_CHECKING:
@@ -46,9 +50,31 @@ class SQLiteWeather:
             "SELECT kind,last_success_at,last_error,consecutive_failures FROM weather_provider_state "
             "WHERE subscription_id=?", (subscription.id,),
         ).fetchall()
+        air_row = self.connection.execute(
+            "SELECT observed_at,pm2_5,pm10,european_aqi,us_aqi FROM weather_air_quality "
+            "WHERE subscription_id=?", (subscription.id,),
+        ).fetchone()
+        sky_row = self.connection.execute(
+            "SELECT local_date,sunrise,sunset,moonrise,moonset,moon_phase,moon_illumination,"
+            "solar_elevation,solar_azimuth FROM weather_astronomy WHERE subscription_id=?",
+            (subscription.id,),
+        ).fetchone()
+        latest = json.loads(row["latest_json"]) if row["latest_json"] else None
+        if isinstance(latest, dict):
+            observed_at = latest.get("observed_at")
+            forecast_date = (datetime.fromtimestamp(observed_at, ZoneInfo(subscription.timezone))
+                             .strftime("%Y%m%d") if isinstance(observed_at, int) else None)
+            latest["is_today"] = forecast_date == datetime.fromtimestamp(
+                time.time(), ZoneInfo(subscription.timezone)).strftime("%Y%m%d")
+            latest["air_quality"] = (dict(air_row) if air_row
+                                     and 0 <= int(time.time()) - int(air_row["observed_at"]) <= 6 * 3600 else None)
+            latest["astronomy"] = (dict(sky_row) if sky_row and sky_row["local_date"] == forecast_date
+                                    else None)
+            if isinstance(latest["astronomy"], dict):
+                latest["astronomy"]["date"] = latest["astronomy"].pop("local_date")
         return {
             "subscription": asdict(subscription),
-            "latest": json.loads(row["latest_json"]) if row["latest_json"] else None,
+            "latest": latest,
             "last_success_at": row["last_success_at"],
             "last_daily_date": row["last_daily_date"],
             "last_error": row["last_error"],
@@ -94,6 +120,8 @@ class SQLiteWeather:
                 self.connection.execute(
                     "DELETE FROM weather_warning_messages WHERE subscription_id=?", (updated.id,),
                 )
+                self.connection.execute("DELETE FROM weather_air_quality WHERE subscription_id=?", (updated.id,))
+                self.connection.execute("DELETE FROM weather_astronomy WHERE subscription_id=?", (updated.id,))
             self.connection.execute(
                 "INSERT INTO weather_subscription_audit(revision,actor,settings_json,created_at) "
                 "VALUES(?,?,?,?)",
@@ -121,6 +149,20 @@ class SQLiteWeather:
             assert state is not None
             day = daily_due(subscription, state["last_daily_date"], now)
             if day is not None:
+                sky_row = self.connection.execute(
+                    "SELECT moonrise,moonset,moon_phase,moon_illumination,solar_elevation "
+                    "FROM weather_astronomy WHERE subscription_id=? AND local_date=?",
+                    (subscription.id, day.replace("-", "")),
+                ).fetchone()
+                daily_message += "\n" + astronomy_text(dict(sky_row) if sky_row else None, subscription.timezone)
+                air_row = self.connection.execute(
+                    "SELECT observed_at,pm2_5,pm10,european_aqi,us_aqi FROM weather_air_quality "
+                    "WHERE subscription_id=?", (subscription.id,),
+                ).fetchone()
+                if air_row and 0 <= now - int(air_row["observed_at"]) <= 6 * 3600:
+                    daily_message += "\n" + air_quality_text(WeatherAirQuality(**dict(air_row)))
+                else:
+                    daily_message += "\n空气质量暂无数据"
                 queued += int(self.database._insert_alert(AlertCandidate(
                     rule_id="weather.daily", dedupe_key=f"weather:{subscription.id}:daily:{day}",
                     title=f"今日天气 · {subscription.label}", message=daily_message + "\n" + FORECAST_CREDIT,
@@ -192,6 +234,86 @@ class SQLiteWeather:
                  now, local_date, int(rain_expected), subscription.id),
             )
         return queued
+
+    def record_weather_air_quality(self, subscription: WeatherSubscription,
+                                   air_quality: WeatherAirQuality, *, now: int) -> None:
+        values = (air_quality.pm2_5, air_quality.pm10, air_quality.european_aqi, air_quality.us_aqi)
+        if (now < 0 or not now - 7200 <= air_quality.observed_at <= now + 900
+                or any(value is not None and (not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0)
+                          for value in values)):
+            raise WeatherError("air quality values are invalid")
+        with self.database.unit_of_work():
+            if self.get_weather_subscription().revision != subscription.revision:
+                return
+            self.connection.execute(
+                "INSERT INTO weather_air_quality(subscription_id,observed_at,pm2_5,pm10,european_aqi,us_aqi) "
+                "VALUES(?,?,?,?,?,?) ON CONFLICT(subscription_id) DO UPDATE SET "
+                "observed_at=excluded.observed_at,pm2_5=excluded.pm2_5,pm10=excluded.pm10,"
+                "european_aqi=excluded.european_aqi,us_aqi=excluded.us_aqi",
+                (subscription.id, air_quality.observed_at, *values),
+            )
+
+    def record_weather_astronomy(self, subscription: WeatherSubscription,
+                                 astronomy: WeatherAstronomy, *, now: int) -> None:
+        if now < 0 or len(astronomy.date) != 8:
+            raise WeatherError("astronomy data is invalid")
+        with self.database.unit_of_work():
+            if self.get_weather_subscription().revision != subscription.revision:
+                return
+            self.connection.execute(
+                "INSERT INTO weather_astronomy(subscription_id,local_date,sunrise,sunset,moonrise,moonset,"
+                "moon_phase,moon_illumination,solar_elevation,solar_azimuth,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(subscription_id) DO UPDATE SET "
+                "local_date=excluded.local_date,sunrise=excluded.sunrise,sunset=excluded.sunset,"
+                "moonrise=excluded.moonrise,moonset=excluded.moonset,moon_phase=excluded.moon_phase,"
+                "moon_illumination=excluded.moon_illumination,solar_elevation=excluded.solar_elevation,"
+                "solar_azimuth=excluded.solar_azimuth,updated_at=excluded.updated_at",
+                (subscription.id, astronomy.date, astronomy.sunrise, astronomy.sunset,
+                 astronomy.moonrise, astronomy.moonset, astronomy.moon_phase,
+                 astronomy.moon_illumination, astronomy.solar_elevation,
+                 astronomy.solar_azimuth, now),
+            )
+
+    def enqueue_weather_test(self, *, topic: str, click_url: str, now: int) -> bool:
+        """Queue a clearly labelled snapshot without changing forecast state."""
+        if not topic or now < 0:
+            raise WeatherError("weather test metadata is invalid")
+        with self.database.unit_of_work():
+            subscription = self.get_weather_subscription()
+            latest = self.get_weather_status()["latest"]
+            if not isinstance(latest, dict):
+                raise WeatherError("no weather snapshot is available yet")
+            observed_at = latest.get("observed_at")
+            if (not isinstance(observed_at, int) or not -900 <= now - observed_at <= 2 * 3600
+                    or datetime.fromtimestamp(observed_at, ZoneInfo(subscription.timezone)).date()
+                    != datetime.fromtimestamp(now, ZoneInfo(subscription.timezone)).date()):
+                raise WeatherError("no fresh weather snapshot is available for today")
+            message = "[测试通知] 今日天气快照\n"
+            message += f"地点：{subscription.label}\n"
+            message += (f"天气：{latest.get('condition', '暂无')}，当前 {latest.get('temperature_now', '—')}℃，"
+                        f"今日 {latest.get('low', '—')}~{latest.get('high', '—')}℃\n")
+            message += (f"降水 {latest.get('rain_mm', '—')} mm，最高概率 {latest.get('rain_probability', '—')}%，"
+                        f"阵风 {latest.get('wind_gust_kmh', '—')} km/h\n")
+            message += (f"湿度 {latest.get('humidity', '—')}%，风 {latest.get('wind_speed_kmh', '—')} km/h "
+                        f"{latest.get('wind_direction_name', '—')}\n")
+            aq = latest.get("air_quality")
+            message += (air_quality_text(WeatherAirQuality(**aq)) if isinstance(aq, dict)
+                        else "空气质量暂无数据") + "\n"
+            message += (f"日出 {format_clock(latest.get('sunrise'), subscription.timezone)}，"
+                        f"日落 {format_clock(latest.get('sunset'), subscription.timezone)}\n")
+            message += astronomy_text(latest.get("astronomy"), subscription.timezone) + "\n"
+            calendar = latest.get("calendar")
+            if isinstance(calendar, dict):
+                message += f"阳历 {datetime.fromtimestamp(now, ZoneInfo(subscription.timezone)).date().isoformat()}，{calendar.get('lunar', '')}。{calendar.get('festivals', '')}\n"
+            message += "这是测试通知，不代表官方气象预警。"
+            inserted = self.database._insert_alert(AlertCandidate(
+                rule_id="weather.test", dedupe_key=f"weather:{subscription.id}:test:{now}",
+                title=f"天气测试通知 · {subscription.label}", message=message,
+                priority=3, tags=("test", "cloud"), click_url=click_url, topic=topic,
+                confidence=1.0, evidence=("operator-requested weather snapshot",),
+            ), None, now)
+            return bool(inserted)
 
     def record_weather_failure(
         self, subscription: WeatherSubscription, error: BaseException, now: int,

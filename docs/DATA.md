@@ -53,6 +53,12 @@ Schema 23 adds the local weather tables and seeds the Shahe campus subscription;
 it does not add a weather feed to the news-source catalog. Migration tests
 construct older schemas and verify upgrade behavior. See `WEATHER.md` for the
 weather state machine and source limitations.
+Schema 24 separates optional air-quality and astronomical observations into
+typed weather tables instead of embedding them in the forecast state JSON.
+Their source timestamps and local dates govern freshness; changing location
+clears both records. Upgrade from schema 23 is additive and must preserve the
+existing subscription, forecast baseline, and alert history. A rollback to
+schema-23 code requires its matching pre-release backup, not only a code switch.
 
 ## Retention and backup
 
