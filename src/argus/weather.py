@@ -77,6 +77,8 @@ class WeatherAstronomy:
     moon_illumination: float | None
     solar_elevation: float | None = None
     solar_azimuth: float | None = None
+    solar_noon_elevation: float | None = None
+    solar_noon_at: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,12 +341,10 @@ def astronomy_text(value: Mapping[str, Any] | None, timezone: str) -> str:
     phase = value.get("moon_phase") or "月相暂无数据"
     illumination = value.get("moon_illumination")
     light = f"，照明 {float(illumination):.0f}%" if isinstance(illumination, (int, float)) else ""
-    angle = value.get("solar_elevation")
-    azimuth = value.get("solar_azimuth")
-    observed = value.get("updated_at")
-    direction = f"、方位角 {float(azimuth):.1f}°" if isinstance(azimuth, (int, float)) else ""
-    solar = (f"，太阳高度角 {float(angle):.1f}°{direction}（{format_clock(observed, timezone)} 查询）"
-             if isinstance(angle, (int, float)) else "")
+    angle = value.get("solar_noon_elevation")
+    noon_at = value.get("solar_noon_at")
+    solar = (f"，近似太阳正午高度角 {float(angle):.1f}°（{format_clock(noon_at, timezone)}，海平面基准）"
+             if isinstance(angle, (int, float)) and isinstance(noon_at, int) else "")
     return (f"月升 {format_clock(value.get('moonrise'), timezone)}、月落 "
             f"{format_clock(value.get('moonset'), timezone)}，月相 {phase}{light}{solar}")
 

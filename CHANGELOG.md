@@ -5,6 +5,17 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.24.3] - 2026-09-26
+
+### Changed
+
+- Use a separately sampled, approximate solar-noon elevation in the daily weather
+  notification. The admin page keeps the poll-time angle distinct and displays
+  both timestamps. Noon is approximated by the sunrise/sunset midpoint, not
+  claimed as a mathematically exact daily maximum.
+- Add schema 25 typed noon angle and sample time. Old astronomy rows remain
+  readable with noon data unavailable until the next successful poll.
+
 ## [0.24.2] - 2026-09-26
 
 ### Fixed

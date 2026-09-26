@@ -7,7 +7,8 @@ Shahe campus (`40.1561163, 116.2835626`, `Asia/Shanghai`). Tiananmen is only a
 suggested example for future manual setup. A browser may supply coordinates, or
 an operator may search for a place and edit coordinates in the admin Weather page.
 There is one subscription; this is not a multi-user weather service. Schema 23
-introduced the subscription and schema 24 adds typed optional observations.
+introduced the subscription, schema 24 adds typed optional observations, and
+schema 25 adds the distinct approximate solar-noon angle and sample time.
 
 Source review on 2026-09-26:
 
@@ -16,7 +17,7 @@ Source review on 2026-09-26:
 | Open-Meteo forecast and geocoding APIs | HTTPS JSON returned 72 hourly values for the Shahe coordinates. Forecast and place search worked from this host without a key. Free API terms allow non-commercial use below 10,000 calls/day and require CC BY 4.0 attribution. | Use for model forecast and location search. One hourly request is about 24/day; place searches are operator initiated. |
 | QWeather minute precipitation, hourly v1 and official-alert v1 APIs | All three returned valid JSON; Ed25519 JWT separately verified. Minute precipitation returned 24 slots and a district lightning warning was present. | Use minute precipitation and official alerts. Hourly data was probed but is not yet integrated into decisions. |
 | Open-Meteo Air Quality API | Current PM2.5, PM10, European AQI and US AQI returned for the subscribed coordinates. Values are model estimates, not station measurements. | Optional independent six-hour-freshness snapshot; not used to trigger official alerts. EU and US indices retain separate labels. |
-| QWeather sun, moon and solar elevation APIs | JWT requests returned local sunrise/sunset, moonrise/moonset, hourly phase/illumination and the current solar elevation/azimuth. | Optional local-date-matched astronomy snapshot. An angle request failure does not discard sun/moon data. Moon angle was not verified and is not claimed. |
+| QWeather sun, moon and solar elevation APIs | JWT requests returned local sunrise/sunset, moonrise/moonset, hourly phase/illumination and angles at requested times. | Optional local-date-matched astronomy snapshot. Request the sunrise/sunset midpoint separately as approximate solar noon; keep the poll-time angle for admin inspection. Either angle request may fail without discarding sun/moon data. Moon angle was not verified and is not claimed. |
 | China Meteorological Administration / National Meteorological Center public pages | Public pages were reachable, but no verified, authorized machine-readable warning feed was established; the NMC page's reuse restriction rules out treating HTML scraping as an authorized integration. | Do not scrape or represent a model forecast as an official warning. |
 | US NWS and Japan JMA | Official warning products exist but their jurisdiction is not Beijing. | Not a Beijing local-weather provider. Existing JMA news monitoring remains a separate international-disaster signal. |
 
@@ -124,8 +125,8 @@ References: [authentication](https://dev.qweather.com/en/docs/configuration/auth
 [official alerts](https://dev.qweather.com/en/docs/api/warning/weather-alert/).
 QWeather data may be delayed; safety decisions must refer to the issuer's latest
 warning. No AI call is used by the weather module. QWeather base polling is
-about 292 requests/day (144 per minute/warning endpoint and about four astronomy
-polls, each requiring two or three requests), rising to about 436/day with wet
+about 296 requests/day (144 per minute/warning endpoint and about four astronomy
+polls, each requiring three or four requests), rising to about 440/day with wet
 minute polling, excluding bounded retries. Check account quota/billing rather
 than assuming a shared conversation's free-tier figure is guaranteed.
 
@@ -138,11 +139,17 @@ timezone; optional air quality expires after six hours and astronomy must match
 the forecast's local date. A newly activated release can publish its first
 daily forecast before independent optional polling finishes; those fields then
 show as unavailable until the next normal daily report. This is not fabricated
-as complete data. Solar elevation is the value at the astronomy poll time, not
-an all-day angle. The QWeather request uses `alt=0`, a sea-level reference,
+as complete data. The daily notification uses a separate QWeather angle query
+at the midpoint between local sunrise and sunset, an approximation of solar
+noon and the day's highest solar elevation. It is not a mathematically exact
+maximum; no noon angle is shown when the day length or angle response is invalid.
+The admin also shows the separate poll-time elevation and azimuth. QWeather
+angle requests use `alt=0`, a sea-level reference,
 because subscription elevation is not currently measured or stored; displayed
 solar elevation and azimuth are therefore approximations rather than site-survey
-values. Both display the time of the last astronomy poll.
+values. Each angle displays its own sample time. Schema-24 rows have no noon
+sample until the next astronomy poll, without deriving one from an unrelated
+poll-time angle.
 
 ## Operations and limitations
 

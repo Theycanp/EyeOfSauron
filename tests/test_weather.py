@@ -65,7 +65,7 @@ class WeatherTests(unittest.TestCase):
         )]
 
     def test_schema_seed_uses_verified_campus_location(self) -> None:
-        self.assertEqual(24, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(25, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("北京邮电大学沙河校区", self.subscription.label)
         self.assertAlmostEqual(40.1561163, self.subscription.latitude)
         self.assertAlmostEqual(116.2835626, self.subscription.longitude)
@@ -148,7 +148,7 @@ class WeatherTests(unittest.TestCase):
         connection.commit()
         connection.close()
         self.database = Database(self.path)
-        self.assertEqual(24, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(25, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("北京邮电大学沙河校区", self.database.get_weather_subscription().label)
 
     def test_schema_twenty_three_migration_preserves_existing_weather_state(self) -> None:
@@ -164,10 +164,34 @@ class WeatherTests(unittest.TestCase):
         connection.close()
         self.database = Database(self.path)
         after = self.database.get_weather_status()
-        self.assertEqual(24, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(25, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual(before["subscription"], after["subscription"])
         self.assertEqual(before["rain_expected"], after["rain_expected"])
         self.assertEqual(before["latest"]["observed_at"], after["latest"]["observed_at"])
+
+    def test_schema_twenty_four_migration_preserves_astronomy(self) -> None:
+        now = DAY + 10 * 3600
+        self.database.record_weather_astronomy(
+            self.subscription, WeatherAstronomy("20260926", DAY + 6 * 3600,
+                DAY + 18 * 3600, None, None, "满月", 99, 22, 90), now=now,
+        )
+        self.database.close()
+        connection = sqlite3.connect(self.path)
+        connection.execute("ALTER TABLE weather_astronomy DROP COLUMN solar_noon_elevation")
+        connection.execute("ALTER TABLE weather_astronomy DROP COLUMN solar_noon_at")
+        connection.execute("PRAGMA user_version=24")
+        connection.commit()
+        connection.close()
+        self.database = Database(self.path)
+        self.assertEqual(25, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        row = self.database.connection.execute(
+            "SELECT moon_phase,solar_elevation,solar_noon_elevation,solar_noon_at "
+            "FROM weather_astronomy WHERE subscription_id='home'"
+        ).fetchone()
+        self.assertEqual("满月", row["moon_phase"])
+        self.assertEqual(22, row["solar_elevation"])
+        self.assertIsNone(row["solar_noon_elevation"])
+        self.assertIsNone(row["solar_noon_at"])
 
     def test_air_quality_and_astronomy_use_typed_tables_and_survive_restart(self) -> None:
         now = DAY + 10 * 3600
@@ -177,7 +201,8 @@ class WeatherTests(unittest.TestCase):
         self.database.record_weather_astronomy(
             self.subscription,
             WeatherAstronomy("20260926", now - 4 * 3600, now + 8 * 3600,
-                             now + 7 * 3600, now - 3 * 3600, "盈凸月", 95, 45.2, 230.0),
+                             now + 7 * 3600, now - 3 * 3600, "盈凸月", 95, 45.2, 230.0,
+                             48.6, DAY + 12 * 3600 + 6 * 60),
             now=now,
         )
         self.record(now)
@@ -188,6 +213,7 @@ class WeatherTests(unittest.TestCase):
         self.assertEqual(12.5, latest["air_quality"]["pm2_5"])
         self.assertEqual("盈凸月", latest["astronomy"]["moon_phase"])
         self.assertEqual(45.2, latest["astronomy"]["solar_elevation"])
+        self.assertEqual(48.6, latest["astronomy"]["solar_noon_elevation"])
         self.assertEqual(1, self.database.connection.execute(
             "SELECT COUNT(*) FROM weather_air_quality"
         ).fetchone()[0])
@@ -200,15 +226,17 @@ class WeatherTests(unittest.TestCase):
         self.database.record_weather_astronomy(
             self.subscription,
             WeatherAstronomy("20260926", now - 3600, now + 11 * 3600,
-                             now + 10 * 3600, now - 2 * 3600, "满月", 99, 22, 90),
+                             now + 10 * 3600, now - 2 * 3600, "满月", 99, 22, 90,
+                             48.6, DAY + 12 * 3600 + 6 * 60),
             now=now,
         )
         self.assertEqual(1, self.record(now))
         daily = self.database.connection.execute(
             "SELECT message FROM alerts WHERE rule_id='weather.daily'"
         ).fetchone()[0]
-        for expected in ("农历2026年8月16日", "PM2.5 15.0", "月相 满月", "太阳高度角 22.0", "方位角 90.0", "07:01 查询"):
+        for expected in ("农历2026年8月16日", "PM2.5 15.0", "月相 满月", "近似太阳正午高度角 48.6", "12:06", "海平面基准"):
             self.assertIn(expected, daily)
+        self.assertNotIn("高度角 22.0", daily)
         self.assertTrue(self.database.enqueue_weather_test(
             topic="eos", click_url="https://example.test/#/weather", now=now + 1,
         ))
@@ -216,6 +244,7 @@ class WeatherTests(unittest.TestCase):
             "SELECT message FROM alerts WHERE rule_id='weather.test'"
         ).fetchone()[0]
         self.assertIn("[测试通知]", test)
+        self.assertIn("近似太阳正午高度角 48.6", test)
         self.assertIn("不代表官方气象预警", test)
         self.assertEqual("2026-09-26", str(datetime.fromtimestamp(now, TZ).date()))
 
