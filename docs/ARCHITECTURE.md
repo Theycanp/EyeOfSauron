@@ -195,6 +195,21 @@ to it. A notification already claimed by the delivery worker may have left the
 host and cannot be recalled. Actual delivery remains at-least-once and therefore
 retains the same rare post-publish crash duplicate boundary as other alerts.
 
+Optional acknowledgement is scoped to each scheduled occurrence, including each
+day of a daily reminder. The reminder, occurrence, and outbox entry are committed
+together. Each successful delivery starts the configured repeat interval; no
+repeat is queued while a prior delivery is still pending or failing. A unique
+occurrence/repeat dedupe key prevents duplicate scheduling after restart. The
+notification opens the authenticated reminder page, which shows the exact
+occurrence and a CSRF-protected acknowledgement action. Confirming stops that
+occurrence's future repeats and removes pending copies. A repeat count of zero
+means unlimited; finite counts refer to additional sends after the first.
+Occurrence title, message, and acknowledgement setting are immutable snapshots,
+not cascading children of the parent reminder. Deleting a reminder stops its
+repeats but leaves delivered occurrence links readable until retention cleanup.
+If an outbox alert becomes dead-letter, no successful delivery occurred to start
+the next interval; operator retry is required.
+
 ## Bloomberg stage
 
 The source is Bloomberg's public official RSS service, not scraped article HTML.

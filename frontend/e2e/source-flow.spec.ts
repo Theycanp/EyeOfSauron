@@ -3,6 +3,7 @@ import { expect, test, type Page } from '@playwright/test'
 async function mockAdminApi(page: Page) {
   let authenticated = false
   let weatherHasForecast = true
+  let weatherRefreshPending = false
   let weatherSubscription = {
     id: 'home', label: '北京邮电大学沙河校区', latitude: 40.1561163,
     longitude: 116.2835626, timezone: 'Asia/Shanghai', daily_time: '07:00',
@@ -44,10 +45,17 @@ async function mockAdminApi(page: Page) {
         const submitted = route.request().postDataJSON() as Partial<typeof weatherSubscription>
         weatherSubscription = { ...weatherSubscription, ...submitted, revision: weatherSubscription.revision + 1 }
         weatherHasForecast = false
+        weatherRefreshPending = true
         await route.fulfill({ json: { subscription: weatherSubscription, restart_required: false } })
       } else {
+        if (!weatherHasForecast && !weatherRefreshPending) weatherHasForecast = true
+        else if (weatherRefreshPending) weatherRefreshPending = false
         await route.fulfill({ json: { subscription: weatherSubscription, latest: weatherHasForecast ? {
           condition: '多云', low: 16, high: 24, rain_mm: 0, rain_probability: 20,
+          uv_index_max: 5.4,
+          forecast_hours: Array.from({ length: 24 }, (_, index) => ({ at: now + index * 3600,
+            temperature: 20 - index / 6, precipitation: index < 4 ? 0.4 : 0,
+            rain_probability: index < 4 ? 65 : 10, weather_code: index < 4 ? 61 : 2 })),
           wind_gust_kmh: 32, temperature_now: 20, humidity: 58,
           wind_speed_kmh: 12, wind_direction_name: '东南',
           sunrise: 1790373600, sunset: 1790416800,
@@ -58,7 +66,7 @@ async function mockAdminApi(page: Page) {
           calendar: { lunar: '农历2026年8月16日', festivals: '' },
           observed_at: now, is_today: true,
         } : null,
-          last_success_at: now, last_daily_date: null, last_error: null,
+          last_success_at: weatherHasForecast ? now + 1 : null, last_daily_date: null, last_error: null,
           consecutive_failures: 0, rain_expected: null } })
       }
       return
@@ -491,7 +499,10 @@ test('weather location and schedule are usable on desktop and mobile', async ({ 
   await expect(page.getByLabel('地点名称')).toHaveValue('北京市天安门')
   await page.getByLabel('每天推送时间').fill('08:00')
   await page.getByRole('button', { name: '保存天气订阅' }).click()
-  await expect(page.getByText('天气订阅已更新，下次查询自动使用新设置。')).toBeVisible()
+  await expect(page.getByText('天气订阅已保存，正在立即获取新地点天气…')).toBeVisible()
+  await expect(page.getByText('天气订阅已更新，已载入最新数据。')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByRole('heading', { name: '本地天气 · 北京市天安门' })).toBeVisible()
+  await expect(page.getByRole('region', { name: '今日雨雪预报' })).toBeVisible()
   await expect(page.locator('body')).toHaveJSProperty('scrollWidth', await page.locator('body').evaluate((node) => node.clientWidth))
   await page.evaluate(() => window.scrollTo(0, 0))
   await page.screenshot({ path: testInfo.outputPath('weather.png'), fullPage: true })

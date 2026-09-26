@@ -37,7 +37,10 @@ This is not blanket coverage or an inference from the Open-Meteo dust variable.
 
 Argus fetches the current conditions and 72 hourly forecast slots at startup and
 then every hour after a successful fetch. Failure retries after 20 minutes. An
-admin settings revision makes the next fetch due within 60 seconds. The request
+admin settings revision is observed by the worker within one second, so a
+location change starts the next fetch promptly across the separate admin and
+Argus processes. QWeather's independent channels use the same revision check
+to refresh promptly. The request
 is limited to fixed Open-Meteo HTTPS hosts, 12 seconds, no redirects, JSON only,
 and 512 KiB. The response must have a current observation no older than two
 hours, valid finite values and contiguous hourly coverage through the next 24
@@ -48,8 +51,9 @@ first successful fetch after that sends one recovery alert.
 At the configured local time (default 07:00), the first successful fetch in the
 next six hours queues one daily forecast per local date. It reports current
 condition, today's temperature range, remaining-day predicted precipitation,
-maximum rain probability, gusts, humidity, wind, sunrise/sunset, Gregorian and
-lunar dates, and a small verified set of fixed-date festivals. Fresh optional
+maximum rain probability, gusts, humidity, wind, sunrise/sunset, the day's
+maximum UV index when Open-Meteo supplies it, Gregorian and lunar dates, and a
+small verified set of fixed-date festivals. Fresh optional
 air quality and matching-date QWeather moon data are appended when available;
 missing optional data is labelled missing, not invented. Qingming and other
 solar-term or movable festivals are not yet calculated. The daily-date key is durable; retries and
@@ -79,7 +83,8 @@ is absent from the model or guarantee notice before an event begins.
 
 The `WeatherProvider` and `WeatherRepository` protocols isolate the forecast
 source and persistent state. `open_meteo.py` is the network adapter,
-`weather.py` owns validation and rules, `sqlite_weather.py` owns schema-26 state
+`weather.py` owns validation, bounded hourly forecast projection and rules,
+`sqlite_weather.py` owns schema-26 state
 and atomic outbox writes, and `service.py` owns scheduling. The admin API uses
 the same repository boundary; settings writes require `settings:write`, origin
 and CSRF validation, revision match, and an audit record. Read/search requires
@@ -175,9 +180,38 @@ typed warning chains, fixed provider hosts and incomplete configuration.
 `tests/test_admin_auth_http.py` covers weather read/write authentication,
 CSRF and viewer RBAC. Frontend tests and desktop/mobile E2E cover saving and
 responsive controls. Production acceptance must check one real forecast poll,
-correct local coordinates, schema 26, no duplicate outbox rows, and the public
+correct local coordinates, current schema, no duplicate outbox rows, and the public
 admin entry. `argus weather-test` creates a labelled snapshot through the normal
 outbox without changing rain or daily state; use only on explicit operator request.
+
+The admin Weather page also provides a Leaflet/OpenStreetMap map picker. A map
+click updates the draft coordinates without saving; the backend resolves the
+coordinates' timezone before the operator can save. Only the latest coordinate
+selection may update the timezone, so an older lookup cannot overwrite a newer
+map click. If lookup fails, the previous timezone remains but the UI explicitly
+requires review. Search and direct coordinate editing remain available if map
+tiles are blocked. Direct coordinate edits also require timezone review. Browser location is an
+explicit user action: the browser permission prompt is requested on that click,
+and a denied/timeout state explains how to retry site permissions. Saving a new
+location starts a bounded foreground refresh poll, so the home page updates as
+soon as the worker records a successful forecast rather than waiting for the
+next hourly cycle. The page title includes the active location, and the daily
+UV maximum (when supplied by the forecast) is shown with the other metrics.
+The admin Content Security Policy permits images only from the three explicit
+OpenStreetMap tile hosts in addition to local/data images; no arbitrary image
+origin is allowed. If the bounded foreground poll does not see a fresh forecast,
+the page reports that collection continues in the background instead of claiming
+the new location is ready. Tile loading failures do not block coordinate search
+or saving.
+The authenticated read-only `GET /api/weather/place-timezone?lat=...&lon=...`
+resolves a map click to an IANA timezone using Open-Meteo's fixed-host forecast
+endpoint with `timezone=auto` and a single current field. Coordinates are
+strictly bounded before network access; an unavailable or invalid provider
+timezone is an explicit failure and never silently reuses the previous zone.
+The latest snapshot stores at most 48 hours of hourly records, and the page puts a 24-hour
+precipitation timeline before the metrics. Bars identify rain, snow or sleet and
+the overlaid line shows hourly temperature; absence of hourly records is shown
+explicitly rather than inferred from the daily total.
 
 ## Upgrade plan and boundaries
 

@@ -222,7 +222,7 @@ class SQLiteWeather:
                 queued += int(self.database._insert_alert(AlertCandidate(
                     rule_id="weather.provider_recovered",
                     dedupe_key=f"weather:{subscription.id}:provider-recovered:{now // 3600}",
-                    title="天气数据恢复", message=f"{subscription.label} 的天气预报获取已恢复。",
+                    title=f"天气数据恢复 · {subscription.label}", message=f"{subscription.label} 的天气预报获取已恢复。",
                     priority=3, tags=("white_check_mark",), click_url=click_url, topic=topic,
                     confidence=1.0,
                 ), None, now))
@@ -304,6 +304,9 @@ class SQLiteWeather:
                         else "空气质量暂无数据") + "\n"
             message += (f"日出 {format_clock(latest.get('sunrise'), subscription.timezone)}，"
                         f"日落 {format_clock(latest.get('sunset'), subscription.timezone)}\n")
+            uv = latest.get("uv_index_max")
+            message += (f"今日最高紫外线指数 {float(uv):.1f}\n"
+                        if isinstance(uv, (int, float)) else "今日最高紫外线指数暂无数据\n")
             message += astronomy_text(latest.get("astronomy"), subscription.timezone) + "\n"
             calendar = latest.get("calendar")
             if isinstance(calendar, dict):
@@ -336,7 +339,7 @@ class SQLiteWeather:
                 self.database._insert_alert(AlertCandidate(
                     rule_id="weather.provider_outage",
                     dedupe_key=f"weather:{subscription.id}:provider-outage:{subscription.revision}:{row['last_success_at'] or 0}",
-                    title="本地天气数据连续获取失败",
+                    title=f"本地天气数据连续获取失败 · {subscription.label}",
                     message=f"{subscription.label} 已连续 {failures} 次无法获取天气预报。天气提醒可能延迟，请检查后台。",
                     priority=4, tags=("warning",), click_url=click_url, topic=topic, confidence=1.0,
                 ), None, now)
@@ -359,7 +362,7 @@ class SQLiteWeather:
             queued = int(self.database._insert_alert(AlertCandidate(
                 rule_id="weather.qweather_recovered",
                 dedupe_key=f"weather:{subscription.id}:qweather:{kind}:recovered:{now // 3600}",
-                title="和风天气数据恢复", message=f"{subscription.label} 的{kind}数据获取已恢复。",
+                title=f"和风天气数据恢复 · {subscription.label}", message=f"{subscription.label} 的{kind}数据获取已恢复。",
                 priority=3, tags=("white_check_mark",), click_url=click_url,
                 topic=topic, confidence=1.0,
             ), None, now))
@@ -484,7 +487,7 @@ class SQLiteWeather:
                         rule_id="weather.official_warning",
                         dedupe_key=f"weather:{subscription.id}:official:{alert.alert_id}",
                         title=("官方天气预警取消 · " if cancelled else "官方天气预警 · ")
-                              + (alert.headline or alert.kind or subscription.label),
+                              + (alert.headline or alert.kind or "天气") + f" · {subscription.label}",
                         message=message, priority=3 if cancelled else priority,
                         tags=("warning",), click_url=click_url, topic=topic, confidence=1.0,
                         evidence=(f"QWeather relayed alert {alert.alert_id}",),
@@ -529,7 +532,7 @@ class SQLiteWeather:
                 self.database._insert_alert(AlertCandidate(
                     rule_id="weather.qweather_outage",
                     dedupe_key=f"weather:{subscription.id}:qweather:{kind}:outage:{row['last_success_at'] or 0}",
-                    title="和风天气数据连续获取失败",
+                    title=f"和风天气数据连续获取失败 · {subscription.label}",
                     message=f"{subscription.label} 的{kind}接口已连续 {failures} 次失败；相应天气提醒可能延迟。",
                     priority=4, tags=("warning",), click_url=click_url, topic=topic, confidence=1.0,
                 ), None, now)

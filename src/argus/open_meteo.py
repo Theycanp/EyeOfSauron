@@ -66,6 +66,26 @@ def _series(value: Any, key: str, count: int) -> list[Any]:
 
 
 class OpenMeteoProvider:
+    def resolve_timezone(self, latitude: float, longitude: float) -> str:
+        if (not math.isfinite(latitude) or not math.isfinite(longitude)
+                or not -90 <= latitude <= 90 or not -180 <= longitude <= 180):
+            raise ValueError("latitude or longitude is invalid")
+        payload = _request_json(_FORECAST_ORIGIN, "/v1/forecast", {
+            "latitude": f"{latitude:.6f}",
+            "longitude": f"{longitude:.6f}",
+            "timezone": "auto",
+            "current": "temperature_2m",
+            "forecast_days": "1",
+        })
+        timezone = payload.get("timezone")
+        if not isinstance(timezone, str) or not 1 <= len(timezone) <= 80:
+            raise WeatherProviderError("weather provider timezone is missing")
+        try:
+            ZoneInfo(timezone)
+        except (ValueError, KeyError) as exc:
+            raise WeatherProviderError("weather provider timezone is invalid") from exc
+        return timezone
+
     def fetch(self, subscription: WeatherSubscription) -> WeatherForecast:
         coordinates = {"latitude": f"{subscription.latitude:.6f}",
                        "longitude": f"{subscription.longitude:.6f}",
@@ -73,8 +93,8 @@ class OpenMeteoProvider:
         payload = _request_json(_FORECAST_ORIGIN, "/v1/forecast", {
             **coordinates,
             "current": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m",
-            "hourly": "temperature_2m,precipitation_probability,precipitation,wind_gusts_10m",
-            "daily": "sunrise,sunset",
+            "hourly": "temperature_2m,precipitation_probability,precipitation,wind_gusts_10m,weather_code",
+            "daily": "sunrise,sunset,uv_index_max",
         })
         hourly = payload.get("hourly")
         times = hourly.get("time") if isinstance(hourly, dict) else None
@@ -85,6 +105,13 @@ class OpenMeteoProvider:
         precipitation = _series(hourly, "precipitation", count)
         probability = _series(hourly, "precipitation_probability", count)
         gusts = _series(hourly, "wind_gusts_10m", count)
+        raw_weather_codes = hourly.get("weather_code") if isinstance(hourly, dict) else None
+        # Older Open-Meteo-compatible fixtures/providers may omit the hourly
+        # weather code.  The chart can still use precipitation amounts; keep
+        # the optional enrichment nullable rather than rejecting the whole
+        # forecast.
+        weather_codes = (raw_weather_codes if isinstance(raw_weather_codes, list)
+                         and len(raw_weather_codes) == count else [None] * count)
         hours: list[ForecastHour] = []
         for index, raw_time in enumerate(times):
             if not isinstance(raw_time, str) or not _LOCAL_TIME.fullmatch(raw_time):
@@ -98,6 +125,7 @@ class OpenMeteoProvider:
                 precipitation=_number(precipitation[index]),
                 rain_probability=_number(probability[index]),
                 wind_gust=_number(gusts[index]),
+                weather_code=(weather_codes[index] if type(weather_codes[index]) is int else None),
             ))
         if any(right.at <= left.at for left, right in zip(hours, hours[1:])):
             raise WeatherProviderError("weather provider hourly times are unordered")
@@ -114,6 +142,7 @@ class OpenMeteoProvider:
             raise WeatherProviderError("weather provider current time is invalid") from exc
         daily = payload.get("daily")
         sunrise = sunset = None
+        uv_index_max = None
         if isinstance(daily, dict):
             dates = daily.get("time")
             sunrises, sunsets = daily.get("sunrise"), daily.get("sunset")
@@ -129,6 +158,14 @@ class OpenMeteoProvider:
                         except (TypeError, ValueError):
                             sunrise = sunset = None
                         break
+            uv_dates = daily.get("time")
+            uv_values = daily.get("uv_index_max")
+            if isinstance(uv_dates, list) and isinstance(uv_values, list):
+                local_date = datetime.fromtimestamp(observed_at, ZoneInfo(subscription.timezone)).date().isoformat()
+                for index, value in enumerate(uv_dates):
+                    if value == local_date and index < len(uv_values):
+                        uv_index_max = _number(uv_values[index])
+                        break
         return WeatherForecast(
             observed_at=observed_at,
             temperature=_number(current.get("temperature_2m")),
@@ -139,6 +176,7 @@ class OpenMeteoProvider:
             wind_direction=_number(current.get("wind_direction_10m")),
             sunrise=sunrise,
             sunset=sunset,
+            uv_index_max=uv_index_max,
         )
 
     def fetch_air_quality(self, subscription: WeatherSubscription) -> WeatherAirQuality:

@@ -5,12 +5,21 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-26
+
+### Added
+
+- Add opt-in, per-occurrence reminder acknowledgement and durable repeat
+  notifications with configurable interval and finite or unlimited repeats.
+- Add a map picker, browser-location recovery guidance, UV maximum and an
+  hourly precipitation/temperature timeline to the weather management page.
+
 ### Changed
 
-- Preserve the same-day weather report when the daemon's configured time was
-  missed; the first successful forecast later that local day publishes it once.
-- Track QWeather astronomy failures and recovery independently, alongside
-  minute precipitation and official-warning channels.
+- Refresh weather promptly after subscription changes, show the subscribed
+  location in weather titles, and persist a bounded hourly forecast snapshot.
+- Migrate reminder occurrence state to schema 27, preserving existing reminder
+  settings and delivery history.
 
 ## [0.25.0] - 2026-09-26
 

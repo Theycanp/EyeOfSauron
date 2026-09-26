@@ -822,7 +822,9 @@ def make_handler(
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; "
-                "img-src 'self' data:; font-src 'self'; form-action 'self'; frame-ancestors 'none'; "
+                "img-src 'self' data: https://a.tile.openstreetmap.org "
+                "https://b.tile.openstreetmap.org https://c.tile.openstreetmap.org; "
+                "font-src 'self'; form-action 'self'; frame-ancestors 'none'; "
                 "base-uri 'none'; manifest-src 'self'",
             )
             self.end_headers()
@@ -1162,8 +1164,39 @@ def make_handler(
                     return
                 self._json(HTTPStatus.OK, {"places": places})
                 return
+            if path == "/api/weather/place-timezone":
+                latitude_values, longitude_values = query.get("lat", []), query.get("lon", [])
+                if (set(query) != {"lat", "lon"} or len(latitude_values) != 1
+                        or len(longitude_values) != 1
+                        or not all(0 < len(value) <= 32 and value == value.strip()
+                                   for value in (*latitude_values, *longitude_values))):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "valid lat and lon are required", "code": "invalid_query"})
+                    return
+                try:
+                    timezone = OpenMeteoProvider().resolve_timezone(
+                        float(latitude_values[0]), float(longitude_values[0])
+                    )
+                except ValueError:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid coordinates", "code": "invalid_query"})
+                    return
+                except WeatherProviderError as exc:
+                    self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc), "code": "timezone_lookup_failed"})
+                    return
+                self._json(HTTPStatus.OK, {"timezone": timezone})
+                return
             if path == "/api/weather":
                 self._json(HTTPStatus.OK, database.get_weather_status())
+                return
+            if path.startswith("/api/reminders/occurrences/"):
+                raw_id = path[len("/api/reminders/occurrences/") :].strip("/")
+                if not raw_id.isdigit() or int(raw_id) < 1:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "reminder occurrence id is invalid", "code": "invalid_query"})
+                    return
+                occurrence = database.get_reminder_occurrence(int(raw_id))
+                if occurrence is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "reminder occurrence not found", "code": "not_found"})
+                else:
+                    self._json(HTTPStatus.OK, {"occurrence": occurrence})
                 return
             if path.startswith("/api/reminders/"):
                 identifier = urllib.parse.unquote(path[len("/api/reminders/"):].strip())
@@ -1355,6 +1388,18 @@ def make_handler(
                     reminder = parse_reminder(data, now)
                     saved = database.upsert_reminder(reminder, actor, now)
                     self._json(HTTPStatus.OK, {"saved": saved, "restart_required": False})
+                    return
+                if path.startswith("/api/reminders/occurrences/") and path.endswith("/acknowledge"):
+                    raw_id = path[len("/api/reminders/occurrences/") : -len("/acknowledge")].strip("/")
+                    if not raw_id.isdigit() or int(raw_id) < 1:
+                        raise AdminError("reminder occurrence id is invalid")
+                    occurrence = database.acknowledge_reminder_occurrence(
+                        int(raw_id), actor, int(time.time())
+                    )
+                    if occurrence is None:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "reminder occurrence not found", "code": "not_found"})
+                    else:
+                        self._json(HTTPStatus.OK, {"occurrence": occurrence, "restart_required": False})
                     return
                 if path == "/api/weather":
                     saved = database.update_weather_subscription(data, actor=actor, now=int(time.time()))

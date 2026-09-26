@@ -19,6 +19,7 @@ import type {
   OutboxStatus,
   PromptResponse,
   ReminderResponse,
+  ReminderOccurrence,
   RevisionResponse,
   SourceQualityResponse,
   SourceHealth,
@@ -175,9 +176,16 @@ export class AdminApi {
     return this.request(`/api/users/${id}/revoke-sessions`, { method: 'POST', body: '{}' })
   }
   reminders(): Promise<ReminderResponse> { return this.request('/api/reminders') }
+  reminderOccurrence(id: number): Promise<{ occurrence: ReminderOccurrence }> {
+    return this.request(`/api/reminders/occurrences/${id}`)
+  }
   weather(): Promise<WeatherStatus> { return this.request('/api/weather') }
   weatherPlaces(query: string): Promise<{ places: WeatherPlace[] }> {
     return this.request(`/api/weather/places?q=${encodeURIComponent(query)}`, {}, 20_000)
+  }
+  weatherPlaceTimezone(latitude: number, longitude: number): Promise<{ timezone: string }> {
+    const query = new URLSearchParams({ lat: String(latitude), lon: String(longitude) })
+    return this.request(`/api/weather/place-timezone?${query}`, {}, 20_000)
   }
   saveWeather(subscription: Omit<WeatherSubscription, 'id'>): Promise<{ subscription: WeatherSubscription }> {
     return this.request('/api/weather', { method: 'POST', body: JSON.stringify(subscription) })
