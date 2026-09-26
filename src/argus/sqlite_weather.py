@@ -509,11 +509,15 @@ class SQLiteWeather:
 
     def record_qweather_failure(self, subscription: WeatherSubscription, kind: str,
                                 error: BaseException, now: int, *, topic: str, click_url: str) -> None:
-        if kind not in {"minutely", "alerts"}:
+        if kind not in {"minutely", "alerts", "astronomy"}:
             raise WeatherError("unknown QWeather operation")
         with self.database.unit_of_work():
             if self.get_weather_subscription().revision != subscription.revision:
                 return
+            self.connection.execute(
+                "INSERT OR IGNORE INTO weather_provider_state(subscription_id,kind) VALUES(?,?)",
+                (subscription.id, kind),
+            )
             row = self.connection.execute(
                 "SELECT consecutive_failures,outage_alerted,last_success_at FROM weather_provider_state "
                 "WHERE subscription_id=? AND kind=?", (subscription.id, kind),
@@ -535,3 +539,16 @@ class SQLiteWeather:
                 "WHERE subscription_id=? AND kind=?",
                 (sanitize_error(error)[:300], failures, int(alerted), subscription.id, kind),
             )
+
+    def record_qweather_success(self, subscription: WeatherSubscription, kind: str, now: int,
+                                *, topic: str, click_url: str) -> int:
+        if kind not in {"minutely", "alerts", "astronomy"}:
+            raise WeatherError("unknown QWeather operation")
+        with self.database.unit_of_work():
+            if self.get_weather_subscription().revision != subscription.revision:
+                return 0
+            self.connection.execute(
+                "INSERT OR IGNORE INTO weather_provider_state(subscription_id,kind) VALUES(?,?)",
+                (subscription.id, kind),
+            )
+            return self._qweather_success(subscription, kind, now, topic, click_url)

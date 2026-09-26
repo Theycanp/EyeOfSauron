@@ -65,7 +65,7 @@ class WeatherTests(unittest.TestCase):
         )]
 
     def test_schema_seed_uses_verified_campus_location(self) -> None:
-        self.assertEqual(25, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(26, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("北京邮电大学沙河校区", self.subscription.label)
         self.assertAlmostEqual(40.1561163, self.subscription.latitude)
         self.assertAlmostEqual(116.2835626, self.subscription.longitude)
@@ -76,7 +76,7 @@ class WeatherTests(unittest.TestCase):
         self.assertEqual(1, self.record(seven))
         self.assertEqual(0, self.record(seven + 3600))
         self.assertEqual(["weather.daily"], self.alert_rules())
-        self.assertIsNone(daily_due(self.subscription, None, DAY + 16 * 3600))
+        self.assertEqual("2026-09-26", daily_due(self.subscription, None, DAY + 16 * 3600))
         self.assertIsNone(daily_due(self.subscription, None, DAY + 6 * 3600))
 
     def test_rain_change_uses_persisted_baseline_and_no_repeat_after_restart(self) -> None:
@@ -148,7 +148,7 @@ class WeatherTests(unittest.TestCase):
         connection.commit()
         connection.close()
         self.database = Database(self.path)
-        self.assertEqual(25, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(26, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("北京邮电大学沙河校区", self.database.get_weather_subscription().label)
 
     def test_schema_twenty_three_migration_preserves_existing_weather_state(self) -> None:
@@ -164,7 +164,7 @@ class WeatherTests(unittest.TestCase):
         connection.close()
         self.database = Database(self.path)
         after = self.database.get_weather_status()
-        self.assertEqual(25, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(26, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual(before["subscription"], after["subscription"])
         self.assertEqual(before["rain_expected"], after["rain_expected"])
         self.assertEqual(before["latest"]["observed_at"], after["latest"]["observed_at"])
@@ -183,7 +183,7 @@ class WeatherTests(unittest.TestCase):
         connection.commit()
         connection.close()
         self.database = Database(self.path)
-        self.assertEqual(25, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(26, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         row = self.database.connection.execute(
             "SELECT moon_phase,solar_elevation,solar_noon_elevation,solar_noon_at "
             "FROM weather_astronomy WHERE subscription_id='home'"
@@ -363,6 +363,22 @@ class WeatherTests(unittest.TestCase):
         self.assertEqual(1, self.database.record_official_weather_alerts(
             self.subscription, (), now=now + 1500, topic="custom", click_url="",
         ))
+        self.assertEqual(["weather.qweather_outage", "weather.qweather_recovered"], self.alert_rules())
+
+    def test_qweather_astronomy_failure_and_recovery_are_visible(self) -> None:
+        now = DAY + 10 * 3600
+        for index in range(3):
+            self.database.record_qweather_failure(
+                self.subscription, "astronomy", RuntimeError("unavailable"), now + index * 3600,
+                topic="custom", click_url="",
+            )
+        status = self.database.get_weather_status()
+        self.assertEqual(3, status["qweather"]["astronomy"]["consecutive_failures"])
+        self.assertEqual(1, len(self.alert_rules()))
+        self.assertEqual(1, self.database.record_qweather_success(
+            self.subscription, "astronomy", now + 4 * 3600, topic="custom", click_url="",
+        ))
+        self.assertEqual(0, self.database.get_weather_status()["qweather"]["astronomy"]["consecutive_failures"])
         self.assertEqual(["weather.qweather_outage", "weather.qweather_recovered"], self.alert_rules())
 
     def test_warning_absence_is_not_cancellation_and_write_failure_is_atomic(self) -> None:

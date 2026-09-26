@@ -140,6 +140,8 @@ class WeatherRepository(Protocol):
     ) -> int: ...
     def record_qweather_failure(self, subscription: WeatherSubscription, kind: str,
                                 error: BaseException, now: int, *, topic: str, click_url: str) -> None: ...
+    def record_qweather_success(self, subscription: WeatherSubscription, kind: str, now: int,
+                                *, topic: str, click_url: str) -> int: ...
     def record_weather_air_quality(self, subscription: WeatherSubscription,
                                    air_quality: WeatherAirQuality, *, now: int) -> None: ...
     def record_weather_astronomy(self, subscription: WeatherSubscription,
@@ -392,4 +394,6 @@ def daily_due(subscription: WeatherSubscription, last_date: str | None, now: int
     if local < scheduled:
         return None
     date_key = scheduled.date().isoformat()
-    return date_key if last_date != date_key and 0 <= (local - scheduled).total_seconds() <= 6 * 3600 else None
+    # A successful forecast later the same local day is still that day's report.
+    # Downtime or provider retries must not silently lose the daily notification.
+    return date_key if last_date != date_key else None

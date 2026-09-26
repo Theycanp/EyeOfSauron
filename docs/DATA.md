@@ -63,6 +63,9 @@ Schema 25 adds nullable `solar_noon_elevation` and `solar_noon_at` columns to
 the typed astronomy table. Existing records retain their poll-time angle and
 read as noon-unavailable until a fresh sample; the forecast state is unchanged.
 Rollback to code that supports only schema 24 requires its matching backup.
+QWeather provider health rows are created lazily for optional channels, including
+astronomy; schema 26 expands the provider-kind constraint without fabricating a
+success before the first real response.
 
 ## Retention and backup
 
