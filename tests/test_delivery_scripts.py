@@ -175,6 +175,12 @@ class DailyBackupTests(unittest.TestCase):
                     capture_output=True, text=True, timeout=10,
                 )
 
+            def failure_count():
+                return subprocess.run(
+                    [*prefix, "cat", str(runtime / "failures")],
+                    check=True, capture_output=True, text=True, timeout=5,
+                ).stdout.strip()
+
             try:
                 with lock.open() as descriptor:
                     fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -184,14 +190,14 @@ class DailyBackupTests(unittest.TestCase):
                 result = run()
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual("", result.stdout)
-                self.assertEqual("0", (runtime / "failures").read_text().strip())
+                self.assertEqual("0", failure_count())
                 result = run(1)
                 self.assertEqual(1, result.returncode)
                 self.assertIn("failure 1/3", result.stderr)
-                self.assertEqual("1", (runtime / "failures").read_text().strip())
+                self.assertEqual("1", failure_count())
                 result = run()
                 self.assertEqual(0, result.returncode, result.stderr)
-                self.assertEqual("0", (runtime / "failures").read_text().strip())
+                self.assertEqual("0", failure_count())
             finally:
                 if prefix and runtime.exists():
                     subprocess.run([*prefix, "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(runtime)],
