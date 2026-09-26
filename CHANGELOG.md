@@ -5,6 +5,15 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.26.2] - 2026-09-26
+
+### Fixed
+
+- Allow same-origin browser geolocation in the EOS Nginx template while keeping
+  camera and microphone blocked; deployment must apply the reviewed host template.
+- Preserve the watchdog runtime directory between oneshot polls so consecutive
+  failure counting survives systemd service stops.
+
 ## [0.26.1] - 2026-09-26
 
 ### Fixed

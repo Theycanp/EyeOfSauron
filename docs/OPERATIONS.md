@@ -75,6 +75,12 @@ dedicated `deploy/nginx/eos.juggler.cc.conf` virtual host under
 origin is `https://eos.juggler.cc:10008`; it reuses the existing TLS port through
 SNI while ntfy retains its own hostname. No firewall rule is added, and
 `127.0.0.1:18080` remains unreachable from the network.
+The EOS virtual host permits geolocation only for its own origin through
+`geolocation=(self)`; camera and microphone remain disabled. This allows the
+weather location button to request browser permission, not to bypass consent.
+An existing browser denial still requires changing that site's permission.
+Release activation does not install Nginx virtual hosts: apply reviewed template
+changes separately, run `nginx -t`, reload, and verify the actual public header.
 Install `deploy/certbot/nginx-reload` as an executable Certbot deploy hook so a
 successfully renewed certificate is loaded only after `nginx -t` succeeds.
 
@@ -198,6 +204,9 @@ existing install root `.release.lock` through checking and recovery; release,
 rollback and backups hold an exclusive lock. During maintenance it skips the
 poll without increasing its failure counter or restarting the engine. A missing
 or unreadable release lock is an error, not a silently successful health check.
+The unit preserves its runtime directory between oneshot invocations so the
+consecutive failure counter survives timer polls; reboot resets this transient
+counter. Otherwise systemd would remove the counter at every service stop.
 
 The admin supports HEAD with the same status, headers and authentication as GET,
 without a response body. The browser icon is served locally; `/favicon.ico`
