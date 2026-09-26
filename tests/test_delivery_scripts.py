@@ -151,6 +151,11 @@ class ReleaseDrillSafetyTests(unittest.TestCase):
 
 
 class DailyBackupTests(unittest.TestCase):
+    def test_public_weather_can_request_same_origin_location_permission(self):
+        template = (ROOT / "deploy/nginx/eos.juggler.cc.conf").read_text()
+        self.assertIn('Permissions-Policy "camera=(), microphone=(), geolocation=(self)" always;', template)
+        self.assertNotIn("geolocation=*", template)
+
     def test_watchdog_skips_maintenance_and_preserves_failures(self):
         prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
         if prefix and (not shutil.which("sudo") or subprocess.run(
