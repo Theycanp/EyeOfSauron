@@ -5,6 +5,32 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-27
+
+### Added
+
+- Add bounded, permission-checked content parser repair and active-version fact
+  job diagnostics/retry/backfill; new extractor versions avoid implicit full
+  historical replay.
+- Add durable per-channel weather HTTP accounting, daily budgets, polling and
+  enable controls with an administration panel and credential-free statuses.
+- Add conditional QWeather hourly fallback with source/freshness/unit metadata,
+  independently scheduled air quality and persisted fallback cooldown.
+- Migrate to schema 28; rollback to schema 27 requires the pre-release backup.
+
+### Changed
+
+- Keep public-document 404/410 failures terminal per URL without pausing good
+  sibling documents; access/rate failures retain their bounded host backoff.
+- Add transparent event-quality label metrics for bounded human review samples;
+  merge precision/recall-like values include explicit denominators and do not
+  claim full-corpus accuracy.
+- Freeze selected Claim/Evidence snapshots with digest reports, preserve them
+  through later corrections and retention, and pass only frozen bounded facts
+  to AI synthesis retries.
+- Add a previewed, primary-evidence-only manual fact correction transaction with
+  retained prior evidence, audited supersedes links and idempotent outbox delivery.
+
 ## [0.26.2] - 2026-09-26
 
 ### Fixed

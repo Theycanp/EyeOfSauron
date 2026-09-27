@@ -329,6 +329,19 @@ class EventEditorialRepository(Protocol):
 
 
 @runtime_checkable
+class EventFactCorrectionRepository(Protocol):
+    """Explicit human correction commands, independent of the storage adapter."""
+
+    def preview_event_fact_correction(
+        self, event_key: str, old_claim_key: str, new_claim_key: str, report_id: int,
+    ) -> dict[str, Any]: ...
+
+    def apply_event_fact_correction(
+        self, event_key: str, old_claim_key: str, new_claim_key: str, report_id: int, *,
+        expected_revision: str, actor: str, reason: str, topic: str, now: int,
+    ) -> dict[str, Any]: ...
+
+
 class EventWorkspaceRepository(EventEditorialRepository, Protocol):
     """Review commands are separate from collection and immutable digest storage."""
 

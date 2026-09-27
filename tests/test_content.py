@@ -18,6 +18,7 @@ from argus.content import (
     ContentLevel,
     PublicDocumentFetcher,
     content_availability,
+    content_host_backoff_seconds,
     plain_text,
     public_document_url,
 )
@@ -44,6 +45,14 @@ class _Response(io.BytesIO):
 
 
 class ContentExtractionTests(unittest.TestCase):
+    def test_host_backoff_distinguishes_dead_links_from_transient_failures(self) -> None:
+        self.assertEqual(0, content_host_backoff_seconds("http_404"))
+        self.assertEqual(0, content_host_backoff_seconds("http_410"))
+        self.assertEqual(3600, content_host_backoff_seconds("http_403"))
+        self.assertEqual(900, content_host_backoff_seconds("http_429"))
+        self.assertEqual(120, content_host_backoff_seconds("http_503"))
+        self.assertEqual(0, content_host_backoff_seconds("empty_content"))
+
     def test_html_reader_prefers_article_and_removes_active_content(self) -> None:
         body = plain_text(
             "<html><body><nav>menu</nav><article><h1>Policy decision</h1>"
@@ -155,6 +164,23 @@ class ContentExtractionTests(unittest.TestCase):
         self.assertEqual("http_403", error.exception.kind)
         self.assertFalse(error.exception.retryable)
         self.assertEqual(1, opener.open.call_count)
+
+    def test_real_commission_pdf_snapshot_uses_bounded_production_extractor(self) -> None:
+        url = "https://ec.europa.eu/commission/presscorner/detail/en/ip_26_1900"
+        print_url = public_document_url(url)
+        payload = (Path(__file__).parent / "fixtures" / "ec-ip-26-1900.pdf").read_bytes()
+        opener = Mock()
+        opener.open.return_value = _Response(payload, "application/pdf", print_url)
+        item = replace(self._item(), request=ContentFetchRequest(url, ("ec.europa.eu",)))
+        document = PublicDocumentFetcher(
+            opener=opener, resolver=lambda *a, **k: PUBLIC_IP,
+        ).fetch(item)
+        self.assertEqual(ContentLevel.DOCUMENT, document.level)
+        self.assertEqual(url, document.metadata["requested_url"])
+        self.assertIn("Commission disburses", document.body)
+        self.assertIn("Ukraine Support Loan", document.body)
+        self.assertIn("IP/26/1900", document.body)
+        self.assertGreater(len(document.body), 4000)
 
     def test_content_level_is_independent_of_failed_enrichment_and_analysis(self) -> None:
         for level, has_full in (("metadata", False), ("excerpt", False), ("full_text", True)):
@@ -319,6 +345,34 @@ class ContentPersistenceTests(unittest.TestCase):
             "bloomberg_markets", FeedFetchResult(tuple(items), None, None), self.rules, NOW + 1, "eos"
         )
 
+    def test_parser_retry_is_explicit_bounded_and_does_not_revive_access_denial(self) -> None:
+        self._queue_host_items("parser.example", "blocked.example")
+        parser = self.database.claim_content_fetch(NOW + 1)
+        assert parser is not None
+        self.database.fail_content_fetch(parser, "empty", NOW + 2, NOW + 3,
+                                        retryable=False, failure_kind="empty_content")
+        blocked = self.database.claim_content_fetch(NOW + 3)
+        assert blocked is not None
+        self.database.fail_content_fetch(blocked, "blocked", NOW + 4, NOW + 5,
+                                        retryable=False, failure_kind="http_403")
+        with self.assertRaises(ValueError):
+            self.database.retry_content_parser_jobs(
+                [parser.id, blocked.id], reason="parser upgraded", actor="operator", now=NOW + 6,
+            )
+        jobs = self.database.list_content_fetch_jobs("bloomberg_markets")
+        self.assertEqual({"dead"}, {job["status"] for job in jobs})
+        self.assertEqual(1, self.database.retry_content_parser_jobs(
+            [parser.id], reason="parser upgraded", actor="operator", now=NOW + 6,
+        ))
+        restarted = self.database.claim_content_fetch(NOW + 6)
+        assert restarted is not None
+        self.assertEqual(parser.id, restarted.id)
+        self.assertEqual(1, restarted.attempts)
+        audit = self.database.connection.execute(
+            "SELECT details_json FROM admin_auth_audit WHERE action='content_parser_retry'"
+        ).fetchone()
+        self.assertIn("empty_content", audit["details_json"])
+
     def test_host_pause_survives_restart_without_blocking_other_hosts_or_spending_attempts(self) -> None:
         self._queue_host_items("blocked.example", "blocked.example", "other.example")
         first = self.database.claim_content_fetch(NOW + 1)
@@ -356,6 +410,24 @@ class ContentPersistenceTests(unittest.TestCase):
         self.assertEqual(2, retry.attempts)
         self.database.complete_content_fetch(retry, ContentDocumentDraft(ContentLevel.DOCUMENT, "public_text", "body"), NOW + 123)
         self.assertIsNotNone(self.database.claim_content_fetch(NOW + 123))
+
+    def test_dead_link_does_not_pause_sibling_document_after_restart(self) -> None:
+        self._queue_host_items("gone.example", "gone.example")
+        first = self.database.claim_content_fetch(NOW + 1)
+        assert first is not None
+        self.database.fail_content_fetch(
+            first, "gone", NOW + 2, NOW + 10, retryable=False, failure_kind="http_410"
+        )
+        self.database.close()
+        self.database = Database(self.config.service.database_path)
+        pending = self.database.claim_content_fetch(NOW + 3)
+        assert pending is not None
+        self.assertEqual("https://gone.example/release/1", pending.request.url)
+        self.assertEqual(1, pending.attempts)
+        first_row = self.database.connection.execute(
+            "SELECT status, attempts FROM content_fetch_jobs WHERE id=?", (first.id,)
+        ).fetchone()
+        self.assertEqual(("dead", 1), tuple(first_row))
 
     def test_short_page_does_not_pause_other_pages(self) -> None:
         self._queue_host_items("official.example", "official.example")

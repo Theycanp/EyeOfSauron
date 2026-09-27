@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urljoin, urlsplit
 
 from .util import decode_http_content
@@ -125,6 +125,11 @@ class ContentFetchWorkItem:
     request: ContentFetchRequest
     lease_token: str
     attempts: int
+
+
+class ContentAdministrationRepository(Protocol):
+    def list_content_fetch_jobs(self, source_id: str, *, limit: int = 100) -> list[dict[str, Any]]: ...
+    def retry_content_parser_jobs(self, ids: Sequence[int], *, reason: str, actor: str, now: int) -> int: ...
 
 
 def content_host_backoff_seconds(failure_kind: str) -> int:

@@ -29,7 +29,8 @@ from .rules import RuleSet
 from .runtime_io import run_network_call
 from .util import now_epoch, sanitize_error
 from .weather import (
-    LocalWeatherProvider, WeatherAirQuality, WeatherProvider, nowcast_signal, validate_forecast,
+    LocalWeatherProvider, WeatherAirQuality, WeatherProvider, WeatherRequestDenied, WeatherSubscription,
+    nowcast_signal, validate_forecast,
 )
 
 
@@ -120,6 +121,10 @@ class ArgusService:
         self.content_fetcher = content_fetcher
         self.weather_provider = weather_provider
         self.local_weather_provider = local_weather_provider
+        availability = getattr(database, "record_weather_provider_availability", None)
+        if callable(availability):
+            availability("open_meteo", configured=weather_provider is not None, now=now_epoch())
+            availability("qweather", configured=local_weather_provider is not None, now=now_epoch())
         self.instance_id = uuid.uuid4().hex
         self._source_slots = asyncio.Semaphore(config.service.max_source_concurrency)
         self._jitter = random.SystemRandom()
@@ -301,7 +306,7 @@ class ArgusService:
             )
             # Inaccessible/unsupported public text is an enrichment limitation;
             # the independently saved Feed remains usable and source health is intact.
-            expected = exc.kind in {"http_403", "http_404", "empty_content", "unsupported_type", "unsupported_pdf"}
+            expected = exc.kind in {"http_403", "http_404", "http_410", "empty_content", "unsupported_type", "unsupported_pdf"}
             log = LOGGER.warning if expected or state != "dead" else LOGGER.error
             log(
                 "content_fetch_failed job_id=%d observation_id=%d attempts=%d state=%s "
@@ -502,34 +507,67 @@ class ArgusService:
             except TimeoutError:
                 pass
 
-    async def process_weather_once(self) -> bool:
+    async def process_weather_once(self, *, poll_primary: bool = True) -> bool:
         if self.weather_provider is None:
             return False
         subscription = self.database.get_weather_subscription()
         base_url = self.config.admin.public_base_url or self.config.digest.public_base_url
         click_url = f"{base_url}/#/weather" if base_url else ""
-        try:
-            forecast = await run_network_call(self.weather_provider.fetch, subscription)
-            validate_forecast(forecast, now_epoch())
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self.database.record_weather_failure(
-                subscription, exc, now_epoch(), topic=self.config.ntfy.default_topic,
-                click_url=click_url,
-            )
-            LOGGER.warning("weather_poll_failed error=%s", sanitize_error(exc))
-            return False
-        fetch_air_quality = getattr(self.weather_provider, "fetch_air_quality", None)
-        if callable(fetch_air_quality):
+        now = now_epoch()
+        forecast: Any | None = None
+        primary_error: BaseException | None = None
+        reuse_latest = False
+        if poll_primary and self._reserve_weather_request("open_meteo", "forecast", now):
             try:
-                air_quality = await run_network_call(fetch_air_quality, subscription)
-                if isinstance(air_quality, WeatherAirQuality):
-                    self.database.record_weather_air_quality(subscription, air_quality, now=now_epoch())
+                candidate = await run_network_call(self.weather_provider.fetch, subscription)
+                validate_forecast(candidate, now_epoch())
+                forecast = candidate
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                LOGGER.warning("air_quality_poll_failed error=%s", sanitize_error(exc))
+                primary_error = exc
+                self._record_weather_provider_error("open_meteo", "forecast", exc)
+                LOGGER.warning("weather_poll_primary_failed error=%s", sanitize_error(exc))
+        else:
+            LOGGER.info("weather_poll_skipped provider=open_meteo kind=forecast reason=%s",
+                        "schedule" if not poll_primary else "policy")
+            reuse_latest = self._latest_weather_is_fresh(now)
+
+        # QWeather hourly data is a conditional fallback.  It never runs after
+        # a valid Open-Meteo result, so probabilities and rain episodes are not
+        # averaged or emitted twice.
+        hourly = getattr(self.local_weather_provider, "fetch_hourly", None)
+        hourly_due = self._weather_channel_due("qweather", "hourly", now, 3600)
+        if (forecast is None and not reuse_latest and callable(hourly) and hourly_due
+                and self._reserve_weather_request("qweather", "hourly", now)):
+            try:
+                candidate = await run_network_call(hourly, subscription)
+                validate_forecast(candidate, now_epoch())
+                forecast = candidate
+                LOGGER.info("weather_poll_fallback_succeeded provider=qweather")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if primary_error is None:
+                    primary_error = exc
+                self._record_weather_provider_error("qweather", "hourly", exc)
+                LOGGER.warning("weather_poll_fallback_failed error=%s", sanitize_error(exc))
+        elif forecast is None and not reuse_latest and callable(hourly):
+            LOGGER.info("weather_poll_skipped provider=qweather kind=hourly reason=policy")
+
+        await self._process_air_quality_once(subscription, now)
+        if forecast is None:
+            if reuse_latest or self._latest_weather_is_fresh(now):
+                return True
+            if primary_error is None:
+                return False
+            error = primary_error or RuntimeError("no weather forecast provider is available")
+            self.database.record_weather_failure(
+                subscription, error, now_epoch(), topic=self.config.ntfy.default_topic,
+                click_url=click_url,
+            )
+            LOGGER.warning("weather_poll_failed error=%s", sanitize_error(error))
+            return False
         queued = self.database.record_weather_forecast(
             subscription, forecast, now=now_epoch(), topic=self.config.ntfy.default_topic,
             click_url=click_url,
@@ -537,23 +575,156 @@ class ArgusService:
         LOGGER.info("weather_poll_succeeded location=%s queued=%d", subscription.id, queued)
         return True
 
+    def _latest_weather_is_fresh(self, now: int) -> bool:
+        latest = self.database.get_weather_status().get("latest")
+        return bool(isinstance(latest, dict) and isinstance(latest.get("observed_at"), int)
+                    and now - 7200 <= latest["observed_at"] <= now + 900
+                    and isinstance(latest.get("forecast_end_at"), int)
+                    and latest["forecast_end_at"] >= now + 23 * 3600)
+
+    def _weather_channel_due(self, provider: str, kind: str, now: int, default: int) -> bool:
+        policy = self._weather_policy(provider, kind)
+        if policy and not policy.get("enabled"):
+            return False
+        last_request = policy.get("last_request_at") if policy else None
+        return not isinstance(last_request, int) or now - last_request >= self._weather_interval(provider, kind, default)
+
+    async def _process_air_quality_once(self, subscription: WeatherSubscription, now: int) -> None:
+        fetch_air_quality = getattr(self.weather_provider, "fetch_air_quality", None)
+        if (not callable(fetch_air_quality)
+                or not self._weather_channel_due("open_meteo", "air_quality", now, 3600)
+                or not self._reserve_weather_request("open_meteo", "air_quality", now)):
+            return
+        try:
+            air_quality = await run_network_call(fetch_air_quality, subscription)
+            if isinstance(air_quality, WeatherAirQuality):
+                self.database.record_weather_air_quality(subscription, air_quality, now=now_epoch())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._record_weather_provider_error("open_meteo", "air_quality", exc)
+            LOGGER.warning("air_quality_poll_failed error=%s", sanitize_error(exc))
+
+    def _weather_policy(self, provider: str, kind: str) -> dict[str, Any] | None:
+        listing = getattr(self.database, "list_weather_provider_policies", None)
+        if not callable(listing):
+            return None
+        try:
+            return next((item for item in listing() if item.get("provider") == provider
+                         and item.get("kind") == kind), None)
+        except Exception as exc:
+            LOGGER.warning("weather_policy_read_failed provider=%s kind=%s error=%s",
+                           provider, kind, sanitize_error(exc))
+            return None
+
+    def _weather_interval(self, provider: str, kind: str, default: int) -> int:
+        policy = self._weather_policy(provider, kind)
+        value = policy.get("interval_seconds") if policy else None
+        return int(value) if isinstance(value, int) and value >= 60 else default
+
+    def _reserve_weather_request(self, provider: str, kind: str, now: int) -> bool:
+        reserve = getattr(self.database, "reserve_weather_provider_request", None)
+        if not callable(reserve):
+            return True
+        try:
+            return bool(reserve(provider, kind, now=now))
+        except Exception as exc:
+            LOGGER.warning("weather_policy_reservation_failed provider=%s kind=%s error=%s",
+                           provider, kind, sanitize_error(exc))
+            return False
+
+    def _record_weather_provider_error(self, provider: str, kind: str, error: BaseException) -> None:
+        record = getattr(self.database, "record_weather_provider_error", None)
+        if callable(record):
+            try:
+                record(provider, kind, error, now=now_epoch())
+            except Exception as exc:
+                LOGGER.warning("weather_provider_error_record_failed provider=%s kind=%s error=%s",
+                               provider, kind, sanitize_error(exc))
+
+    async def _reserve_astronomy_request(self) -> None:
+        if not self._reserve_weather_request("qweather", "astronomy", now_epoch()):
+            raise WeatherRequestDenied("QWeather astronomy request budget unavailable")
+
     async def _weather_loop(self) -> None:
         revision: int | None = None
+        policy_signature: tuple[Any, ...] | None = None
+        hourly_signature: tuple[Any, ...] | None = None
+        primary_next_at = 0
         next_at = 0
+        budget_day: int | None = None
+        primary_budget_exhausted = False
+        hourly_budget_exhausted = False
+        primary_failed = False
         while not self.stop_event.is_set():
+            current_budget_day = now_epoch() // 86400
+            if budget_day is not None and current_budget_day != budget_day:
+                if primary_budget_exhausted:
+                    primary_next_at = 0
+                if primary_budget_exhausted or hourly_budget_exhausted:
+                    next_at = 0
+            budget_day = current_budget_day
             current_revision = self.database.get_weather_subscription().revision
             if current_revision != revision:
                 revision = current_revision
+                primary_next_at = 0
+                next_at = 0
+            policy = self._weather_policy("open_meteo", "forecast")
+            current_policy_signature = tuple(policy.get(key) for key in (
+                "enabled", "interval_seconds", "daily_budget", "updated_at"
+            )) if policy else ()
+            hourly_policy = self._weather_policy("qweather", "hourly")
+            current_hourly_signature = tuple(hourly_policy.get(key) for key in (
+                "enabled", "interval_seconds", "daily_budget", "updated_at"
+            )) if hourly_policy else ()
+            if current_policy_signature != policy_signature:
+                policy_signature = current_policy_signature
+                primary_next_at = 0
+                next_at = 0
+            if current_hourly_signature != hourly_signature:
+                hourly_signature = current_hourly_signature
                 next_at = 0
             if now_epoch() >= next_at:
+                poll_primary = now_epoch() >= primary_next_at
                 try:
-                    healthy = await self.process_weather_once()
+                    healthy = (await self.process_weather_once() if poll_primary else
+                               await self.process_weather_once(poll_primary=False))
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     LOGGER.error("weather_worker_failed error=%s", sanitize_error(exc))
                     healthy = False
-                next_at = now_epoch() + (3600 if healthy else 1200)
+                now = now_epoch()
+                if poll_primary:
+                    primary_next_at = now + self._weather_interval(
+                        "open_meteo", "forecast", 3600 if healthy else 1200
+                    )
+                next_at = primary_next_at
+                policy = self._weather_policy("open_meteo", "forecast")
+                hourly_policy = self._weather_policy("qweather", "hourly")
+                latest = self.database.get_weather_status().get("latest")
+                if poll_primary:
+                    primary_failed = bool(policy and policy.get("last_error"))
+                primary_budget_exhausted = bool(policy and policy.get("enabled")
+                    and policy.get("requests", 0) >= policy.get("daily_budget", 0))
+                hourly_budget_exhausted = bool(hourly_policy and hourly_policy.get("enabled")
+                    and hourly_policy.get("requests", 0) >= hourly_policy.get("daily_budget", 0))
+                primary_unavailable = bool(policy and (
+                    not policy.get("enabled") or policy.get("configured") == 0
+                    or primary_budget_exhausted
+                ))
+                hourly_available = bool(hourly_policy and hourly_policy.get("enabled")
+                    and hourly_policy.get("configured") != 0
+                    and not hourly_budget_exhausted
+                    and callable(getattr(self.local_weather_provider, "fetch_hourly", None)))
+                # A fallback wake must not advance the independent primary clock.
+                if hourly_available and (primary_unavailable or primary_failed or not healthy or
+                        isinstance(latest, dict) and latest.get("provider") == "QWeather"):
+                    next_at = min(next_at, now + self._weather_interval("qweather", "hourly", 3600))
+                if primary_budget_exhausted or hourly_budget_exhausted:
+                    next_at = min(next_at, (now // 86400 + 1) * 86400)
+            else:
+                await self._process_air_quality_once(self.database.get_weather_subscription(), now_epoch())
             try:
                 # The admin process updates the subscription in SQLite.  A
                 # one-second revision check makes a location change trigger a
@@ -567,6 +738,7 @@ class ArgusService:
         assert self.local_weather_provider is not None
         revision: int | None = None
         due = {"minutely": 0, "alerts": 0, "astronomy": 0}
+        policy_signatures: dict[str, tuple[Any, ...]] = {}
         while not self.stop_event.is_set():
             subscription = self.database.get_weather_subscription()
             if subscription.revision != revision:
@@ -575,9 +747,25 @@ class ArgusService:
             base_url = self.config.admin.public_base_url or self.config.digest.public_base_url
             click_url = f"{base_url}/#/weather" if base_url else ""
             for kind in ("minutely", "alerts", "astronomy"):
+                policy = self._weather_policy("qweather", kind)
+                signature = tuple(policy.get(key) for key in (
+                    "enabled", "interval_seconds", "daily_budget", "updated_at"
+                )) if policy else ()
+                if signature != policy_signatures.get(kind):
+                    policy_signatures[kind] = signature
+                    due[kind] = 0
                 if now_epoch() < due[kind]:
                     continue
-                interval = 600 if kind != "astronomy" else 21600
+                interval = self._weather_interval(
+                    "qweather", kind, 600 if kind != "astronomy" else 21600
+                )
+                budgeted_astronomy = (kind == "astronomy" and callable(
+                    getattr(type(self.local_weather_provider), "fetch_astronomy_budgeted", None)
+                ))
+                if not budgeted_astronomy and not self._reserve_weather_request("qweather", kind, now_epoch()):
+                    LOGGER.info("weather_poll_skipped provider=qweather kind=%s reason=policy", kind)
+                    due[kind] = now_epoch() + interval
+                    continue
                 try:
                     if kind == "minutely":
                         nowcast = await run_network_call(self.local_weather_provider.fetch_minutely, subscription)
@@ -587,7 +775,7 @@ class ArgusService:
                             click_url=click_url,
                         )
                         if nowcast_signal(nowcast, now) is not None:
-                            interval = 300
+                            interval = min(interval, 300)
                     elif kind == "alerts":
                         alerts = await run_network_call(self.local_weather_provider.fetch_alerts, subscription)
                         queued = self.database.record_official_weather_alerts(
@@ -596,9 +784,18 @@ class ArgusService:
                         )
                     else:
                         local_date = datetime.now(ZoneInfo(subscription.timezone)).date().strftime("%Y%m%d")
-                        astronomy = await run_network_call(
-                            self.local_weather_provider.fetch_astronomy, subscription, local_date
-                        )
+                        if budgeted_astronomy:
+                            event_loop = asyncio.get_running_loop()
+                            def before_request() -> None:
+                                asyncio.run_coroutine_threadsafe(
+                                    self._reserve_astronomy_request(), event_loop
+                                ).result(timeout=15)
+                            method = getattr(self.local_weather_provider, "fetch_astronomy_budgeted")
+                            astronomy = await run_network_call(method, subscription, local_date, before_request)
+                        else:
+                            astronomy = await run_network_call(
+                                self.local_weather_provider.fetch_astronomy, subscription, local_date
+                            )
                         now = now_epoch()
                         self.database.record_weather_astronomy(subscription, astronomy, now=now)
                         queued = self.database.record_qweather_success(
@@ -608,8 +805,11 @@ class ArgusService:
                     LOGGER.info("qweather_poll_succeeded kind=%s queued=%d", kind, queued)
                 except asyncio.CancelledError:
                     raise
+                except WeatherRequestDenied:
+                    LOGGER.info("weather_poll_skipped provider=qweather kind=%s reason=policy", kind)
                 except Exception as exc:
-                    interval = 300 if kind != "astronomy" else 3600
+                    self._record_weather_provider_error("qweather", kind, exc)
+                    interval = min(interval, 300 if kind != "astronomy" else 3600)
                     try:
                         self.database.record_qweather_failure(
                             subscription, kind, exc, now_epoch(), topic=self.config.ntfy.default_topic,

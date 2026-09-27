@@ -6,6 +6,19 @@ import type { NewsEvent } from '../../shared/types'
 import { EventReviewPanel } from './EventReviewPanel'
 
 describe('EventReviewPanel evidence history', () => {
+  it('records a human label with a reason after reviewing evidence', async () => {
+    const eventReview = vi.fn().mockResolvedValue({ reports: [], audit: [] })
+    const eventQualityLabel = vi.fn().mockResolvedValue({ label: {} })
+    const user = userEvent.setup()
+    render(<EventReviewPanel api={{ eventReview, eventQualityLabel } as unknown as AdminApi} event={{ event_key: 'event' } as NewsEvent} canWrite onChange={vi.fn()} onUnauthorized={vi.fn()} />)
+    await user.click(screen.getByRole('button', { name: '查看事件历史与匹配依据' }))
+    await user.selectOptions(await screen.findByLabelText('人工聚合评估'), 'false_merge')
+    expect(screen.getByRole('button', { name: '保存人工评估' })).toBeDisabled()
+    await user.type(screen.getByLabelText('聚合评估原因'), '不同日期的独立决议')
+    await user.click(screen.getByRole('button', { name: '保存人工评估' }))
+    expect(eventQualityLabel).toHaveBeenCalledWith('event', 'false_merge', '不同日期的独立决议')
+    expect(await screen.findByText('人工评估已记录')).toBeInTheDocument()
+  })
   it('shows disputed facts, source evidence, chronology and notification detail links', async () => {
     const eventReview = vi.fn().mockResolvedValue({
       reports: [{ report_id: 2, observation_id: 7, title: 'Official correction', publisher: 'Agency', url: 'https://example.com/correction', match_score: 1, evidence: { score: 1, title_similarity: 1, time_distance_hours: 0, shared_entities: [], shared_numbers: [] } }],

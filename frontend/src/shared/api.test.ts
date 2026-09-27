@@ -64,6 +64,40 @@ describe('AdminApi', () => {
     expect(init?.signal).toBeInstanceOf(AbortSignal)
   })
 
+  it('loads and mutates weather provider policies and fact diagnostics', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(jsonResponse({ subscription_id: 'home', policies: [] }))
+      .mockResolvedValueOnce(jsonResponse({ policy: { provider: 'qweather', kind: 'alerts', enabled: false } }))
+      .mockResolvedValueOnce(jsonResponse({ jobs: [], completed_without_claim: 0 }))
+      .mockResolvedValueOnce(jsonResponse({ changed: 3, count: 3 }))
+    const api = new AdminApi('secret')
+
+    await api.weatherProviderPolicies()
+    await api.updateWeatherProviderPolicy('qweather', 'alerts', {
+      enabled: false, interval_seconds: 900, daily_budget: 100,
+    })
+    await api.eventFactDiagnostics(1)
+    await api.retryEventFactJobs(1, 10)
+
+    expect(fetchMock.mock.calls.map(([url]) => requestUrl(url))).toEqual([
+      '/api/weather/providers?subscription_id=home',
+      '/api/weather/providers/qweather/alerts',
+      '/api/event-facts/diagnostics?version=1',
+      '/api/event-facts/retry',
+    ])
+    expect(JSON.parse(fetchMock.mock.calls[1]![1]?.body as string)).toMatchObject({
+      enabled: false, interval_seconds: 900, daily_budget: 100,
+    })
+    expect(JSON.parse(fetchMock.mock.calls[3]![1]?.body as string)).toEqual({ version: 1, limit: 10 })
+  })
+
+  it('encodes event keys and preserves human review reasons', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ label: {} }))
+    await new AdminApi('secret').eventQualityLabel('event:key', 'false_merge', 'Independent decisions')
+    expect(requestUrl(fetchMock.mock.calls[0]![0])).toBe('/api/news-events/event%3Akey/quality-label')
+    expect(JSON.parse(fetchMock.mock.calls[0]![1]?.body as string)).toEqual({ label: 'false_merge', reason: 'Independent decisions' })
+  })
+
   it('turns a revision conflict into a clear refresh instruction', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ error: 'stale', code: 'revision_conflict' }, 409))
     const api = new AdminApi('secret')

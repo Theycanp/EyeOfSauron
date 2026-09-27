@@ -40,7 +40,7 @@ waiting for retry, while continuing to display the saved evidence level. A
 | HTTP 403 | 1 hour |
 | HTTP 429 | 15 minutes |
 | HTTP 408/425/5xx, DNS/URL/timeout/socket errors | 2 minutes |
-| Empty text, HTTP 404, unsupported formats, other document-specific failures | None |
+| Empty text, HTTP 404/410, unsupported formats, other document-specific failures | None |
 
 The repository derives unexpired pauses from existing task failure timestamps
 and persists deferred tasks' `next_attempt_at`; no new database schema or broker
@@ -85,6 +85,13 @@ This proves that tested route and document, not that every Commission attachment
 contains machine-readable text. No observations, notifications, or production
 configuration were written by the probe.
 
+On 2026-09-27 the same official PDF was captured as
+`tests/fixtures/ec-ip-26-1900.pdf`. The offline regression runs the production
+bounded `pdftotext` extractor and verifies document identity and substantive text.
+CI installs and verifies `poppler-utils` (`pdftotext`) and `util-linux`
+(`prlimit`) before running this regression, detecting extraction regressions
+without relying on live networking.
+
 ## Verification and limitations
 
 `tests/test_content.py` covers the narrow official URL mapping, access denial,
@@ -95,8 +102,15 @@ The notification-detail frontend tests verify blocked/deferred explanations
 alongside readable saved excerpts.
 
 Existing historical dead tasks are not automatically requeued after an extractor
-upgrade. That would recrawl historical records and needs an explicit bounded
-repair workflow. Host pauses use recent task records and their normal retention;
+upgrade. In 0.27.0 the authenticated `GET /api/content-jobs?source_id=...`
+returns up to 100 recent task identifiers/statuses. `POST /api/content-jobs/retry`
+accepts 1..50 distinct `ids` and a nonempty `reason`. Only terminal
+`empty_content`/`invalid_pdf` jobs are eligible; missing, live, completed,
+access-denied, unsupported and 404/410 jobs reject the entire batch without
+partial changes. `operations:write`, origin/CSRF and an audit record are required.
+The existing queue, URL allowlist, rights policy and bounded worker remain in
+use; no second queue or automatic historical recrawl is introduced.
+Host pauses use recent task records and their normal retention;
 if task volume becomes large, move this read projection behind the same
 repository contract to an indexed host-health table rather than exposing SQL
 to the worker. PDF extraction cannot recover images-only scanned text without

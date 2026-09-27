@@ -75,6 +75,16 @@ class QWeatherTests(unittest.TestCase):
             with self.assertRaisesRegex(QWeatherError, "stale"):
                 self.provider.fetch_minutely(self.subscription)
 
+    def test_provider_status_429_is_visible_without_returning_payload_details(self) -> None:
+        response = Mock(status=200, headers={"Content-Type": "application/json"})
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        self.provider.opener = Mock()
+        self.provider.opener.open.return_value = response
+        response.read.return_value = json.dumps({"code": "429", "details": "not-for-error-output"}).encode()
+        with self.assertRaisesRegex(QWeatherError, "provider status 429"):
+            self.provider._request("/v7/weather/24h")
+
     def test_official_alerts_preserve_supersedes_and_issuer(self) -> None:
         payload = {"alerts": [{
             "id": "warning", "issuedTime": "2026-09-26T07:00Z", "expireTime": "2026-09-27T07:00Z",
@@ -90,6 +100,43 @@ class QWeatherTests(unittest.TestCase):
         with patch.object(self.provider, "_request", return_value={}):
             with self.assertRaises(QWeatherError):
                 self.provider.fetch_alerts(self.subscription)
+
+    def test_hourly_normalizes_units_and_keeps_missing_gust_and_icon_unknown(self) -> None:
+        from datetime import UTC, datetime
+        iso = lambda at: datetime.fromtimestamp(at, UTC).isoformat()
+        start = NOW // 3600 * 3600 + 3600
+        payload = {"updateTime": iso(NOW), "hourly": [
+            {"fxTime": iso(start + index * 3600), "temp": "-2.5", "precip": "0.2",
+             "pop": "70", "windSpeed": "100", "windDir": "北风", "wind360": "0"}
+            for index in range(24)
+        ]}
+        with patch.object(self.provider, "_request", return_value=payload) as request, patch("argus.qweather.time.time", return_value=NOW):
+            result = self.provider.fetch_hourly(self.subscription)
+        self.assertIn("/v7/weather/24h?", request.call_args.args[0])
+        self.assertEqual("QWeather", result.provider)
+        self.assertEqual("metric", result.units)
+        self.assertEqual("hourly_forecast", result.conditions_basis)
+        self.assertEqual(NOW, result.observed_at)
+        self.assertEqual(-2.5, result.temperature)
+        self.assertIsNone(result.weather_code)
+        self.assertIsNone(result.hours[0].wind_gust)
+        self.assertEqual(0, result.wind_direction)
+        from argus.weather import weather_signals
+        self.assertEqual((), weather_signals(result, NOW))
+
+        with patch.object(self.provider, "_request", return_value={**payload, "updateTime": iso(NOW - 7201)}), patch("argus.qweather.time.time", return_value=NOW):
+            from argus.weather import WeatherError
+            with self.assertRaisesRegex(WeatherError, "stale"):
+                self.provider.fetch_hourly(self.subscription)
+
+    def test_astronomy_budget_callback_counts_each_http_request(self) -> None:
+        from argus.weather import WeatherRequestDenied
+        budget = Mock(side_effect=[None, WeatherRequestDenied("limit")])
+        with patch.object(self.provider, "_request", return_value={}) as request:
+            with self.assertRaises(WeatherRequestDenied):
+                self.provider.fetch_astronomy_budgeted(self.subscription, "20260926", budget)
+        self.assertEqual(2, budget.call_count)
+        self.assertEqual(1, request.call_count)
 
     def test_host_is_not_an_arbitrary_credential_destination(self) -> None:
         with self.assertRaisesRegex(QWeatherError, "host"):

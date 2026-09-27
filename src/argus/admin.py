@@ -590,6 +590,7 @@ def _digest_payload(digest: DigestDocument, *, details: bool) -> dict[str, Any]:
             "links": list(item.links),
             "source_tiers": list(item.source_tiers),
             "handling": item.handling,
+            "facts": asdict(item.facts) if item.facts is not None else None,
         }
         # Event-centric projections are optional during the migration. Keep the
         # legacy item shape stable while exposing nested reports when present.
@@ -764,11 +765,15 @@ def make_handler(
             if path == "/api/events":
                 return "events:write"
             if path.startswith("/api/news-events/"):
-                return "read" if path.endswith("/preference") or not path.endswith(("/digest-choice", "/repair/preview", "/repair/apply")) else "events:write"
+                return "read" if path.endswith("/preference") or not path.endswith(("/digest-choice", "/repair/preview", "/repair/apply", "/quality-label")) else "events:write"
             if path.startswith("/api/source-quality"):
                 return "quality:write"
-            if path.startswith(("/api/outbox", "/api/jobs", "/api/digest-runs")):
+            if path.startswith(("/api/outbox", "/api/jobs", "/api/digest-runs", "/api/content-jobs")):
                 return "operations:write"
+            if path.startswith("/api/event-facts"):
+                return "events:write"
+            if path.startswith("/api/weather/providers"):
+                return "settings:write"
             if path.startswith(("/api/sources", "/api/source-bundles", "/api/rules", "/api/test-source")):
                 return "sources:write"
             return "settings:write"
@@ -976,7 +981,13 @@ def make_handler(
                     if not 1 <= hours <= 720:
                         raise ValueError("event window must be between 1 and 720 hours")
                     now = int(time.time())
-                    self._json(HTTPStatus.OK, event_quality(database, since=max(0, now-hours*3600), until=now+1))
+                    since = max(0, now-hours*3600)
+                    labels = database.list_event_quality_labels(since=since, until=now+1)
+                    self._json(HTTPStatus.OK, {
+                        **event_quality(database, since=since, until=now+1, labels=labels),
+                        "labels": labels, "label_window_basis": "review_created_at",
+                        "label_sample_limit": 1000, "label_sample_may_be_truncated": len(labels) == 1000,
+                    })
                 except ValueError as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), "code": "invalid_query"})
                 return
@@ -1193,6 +1204,38 @@ def make_handler(
                 return
             if path == "/api/weather":
                 self._json(HTTPStatus.OK, database.get_weather_status())
+                return
+            if path == "/api/content-jobs":
+                source_id = query.get("source_id", [""])[0]
+                try:
+                    self._json(HTTPStatus.OK, {"jobs": database.list_content_fetch_jobs(source_id)})
+                except ValueError as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), "code": "invalid_query"})
+                return
+            if path == "/api/weather/providers":
+                subscription_id = query.get("subscription_id", ["home"])[0]
+                if (not isinstance(subscription_id, str) or not subscription_id
+                        or len(subscription_id) > 64):
+                    self._json(HTTPStatus.BAD_REQUEST, {
+                        "error": "weather subscription ID is invalid", "code": "invalid_query",
+                    })
+                    return
+                self._json(HTTPStatus.OK, {
+                    "subscription_id": subscription_id,
+                    "policies": database.list_weather_provider_policies(subscription_id),
+                })
+                return
+            if path == "/api/event-facts/diagnostics":
+                raw_version = query.get("version", [None])[0]
+                try:
+                    version = int(raw_version) if raw_version is not None else None
+                    diagnostics = database.event_fact_diagnostics(version=version, now=int(time.time()))
+                except (TypeError, ValueError) as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {
+                        "error": str(exc), "code": "invalid_query",
+                    })
+                    return
+                self._json(HTTPStatus.OK, diagnostics)
                 return
             if path.startswith("/api/reminders/occurrences/"):
                 raw_id = path[len("/api/reminders/occurrences/") :].strip("/")
@@ -1411,6 +1454,79 @@ def make_handler(
                 if path == "/api/weather":
                     saved = database.update_weather_subscription(data, actor=actor, now=int(time.time()))
                     self._json(HTTPStatus.OK, {"subscription": asdict(saved), "restart_required": False})
+                    return
+                if path == "/api/content-jobs/retry":
+                    ids, reason = data.get("ids"), data.get("reason")
+                    if not isinstance(ids, list) or not isinstance(reason, str):
+                        raise AdminError("content job IDs and reason are required")
+                    changed = database.retry_content_parser_jobs(ids, reason=reason, actor=actor, now=int(time.time()))
+                    self._json(HTTPStatus.OK, {"changed": changed})
+                    return
+                if path.startswith("/api/news-events/") and path.endswith("/quality-label"):
+                    event_key = urllib.parse.unquote(path[len("/api/news-events/"):-len("/quality-label")])
+                    label, reason = data.get("label"), data.get("reason")
+                    if not isinstance(label, str) or not isinstance(reason, str):
+                        raise AdminError("review label and reason are required")
+                    saved = database.save_event_quality_label(
+                        database.canonical_event_key(event_key), label=label, reason=reason,
+                        actor=actor, now=int(time.time()),
+                    )
+                    self._json(HTTPStatus.OK, {"label": saved})
+                    return
+                if path.startswith("/api/weather/providers/"):
+                    prefix = "/api/weather/providers/"
+                    parts = [urllib.parse.unquote(item) for item in path[len(prefix):].strip("/").split("/")]
+                    if len(parts) != 2 or any(not item or len(item) > 64 for item in parts):
+                        raise AdminError("weather provider policy path is invalid")
+                    provider, kind = parts
+                    subscription_id = data.get("subscription_id", "home")
+                    if not isinstance(subscription_id, str) or not subscription_id:
+                        raise AdminError("weather subscription ID is invalid")
+                    enabled = data.get("enabled")
+                    interval_seconds = data.get("interval_seconds")
+                    daily_budget = data.get("daily_budget")
+                    if (type(enabled) is not bool or type(interval_seconds) is not int
+                            or type(daily_budget) is not int):
+                        raise AdminError(
+                            "enabled, interval_seconds, and daily_budget have invalid types"
+                        )
+                    policy = database.update_weather_provider_policy(
+                        provider, kind, enabled=enabled, interval_seconds=interval_seconds,
+                        daily_budget=daily_budget, actor=actor, now=int(time.time()),
+                        subscription_id=subscription_id,
+                    )
+                    self._json(HTTPStatus.OK, {"policy": policy, "restart_required": False})
+                    return
+                if path in {"/api/event-facts/correction/preview", "/api/event-facts/correction/apply"}:
+                    keys = [data.get(name) for name in ("event_key", "old_claim_key", "new_claim_key")]
+                    report_id = data.get("report_id")
+                    if any(not isinstance(key, str) or not key for key in keys) or type(report_id) is not int:
+                        raise AdminError("event, old and new claim keys and primary report ID are required")
+                    if path.endswith("/preview"):
+                        result = database.preview_event_fact_correction(*keys, report_id)
+                    else:
+                        reason, revision = data.get("reason"), data.get("expected_revision")
+                        if not isinstance(reason, str) or not isinstance(revision, str):
+                            raise AdminError("correction reason and preview revision are required")
+                        if data.get("confirmed_primary_correction") is not True:
+                            raise AdminError("explicit primary correction reading confirmation is required")
+                        result = database.apply_event_fact_correction(
+                            *keys, report_id, expected_revision=revision, actor=actor,
+                            reason=reason, topic=notification_topic, now=int(time.time()),
+                        )
+                    self._json(HTTPStatus.OK, result)
+                    return
+                if path in {"/api/event-facts/retry", "/api/event-facts/backfill"}:
+                    version = data.get("version")
+                    limit = data.get("limit", 100)
+                    if type(version) is not int or type(limit) is not int:
+                        raise AdminError("fact retry version and limit must be integers")
+                    operation = (database.backfill_event_fact_jobs if path.endswith("/backfill")
+                                 else database.retry_event_fact_jobs)
+                    changed = operation(
+                        version=version, limit=limit, actor=actor, now=int(time.time())
+                    )
+                    self._json(HTTPStatus.OK, {"changed": changed, "count": changed})
                     return
                 if path == "/api/events":
                     now = int(time.time())

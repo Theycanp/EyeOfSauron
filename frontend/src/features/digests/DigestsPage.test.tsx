@@ -5,6 +5,18 @@ import type { AdminApi } from '../../shared/api'
 import { DigestsPage } from './DigestsPage'
 
 describe('DigestsPage', () => {
+  it('reads the saved fact snapshot without requesting live event facts', async () => {
+    const api = { digest: vi.fn().mockResolvedValue({ digest: {
+      digest_key: 'daily:snapshot', version: 1, title: '已保存日报', summary: '当期摘要', item_count: 1, source_count: 1,
+      period_end: 200, items: [{ cluster_key: 'event', title: '原事件', summary: '原摘要', score: 4, importance: 4,
+        facts: { as_of: 100, truncated: false, claims: [{ claim_key: 'old', text: '原数值 10', status: 'superseded' }, { claim_key: 'new', text: '更正数值 12', status: 'active' }], evidence: [] },
+      }],
+    } }) } as unknown as AdminApi
+    render(<DigestsPage api={api} initialKey="daily:snapshot" onUnauthorized={vi.fn()} />)
+    await userEvent.click(await screen.findByText('本期事实快照 · 2 条'))
+    expect(screen.getByText('已被更正：原数值 10')).toBeVisible()
+    expect(screen.getByText('当前记录：更正数值 12')).toBeVisible()
+  })
   it('moves from the digest list to an evidence-rich reader', async () => {
     const digest = { digest_key: '2026-09-06', version: 1, period_start: 1, period_end: 2, timezone: 'Asia/Shanghai', title: '今日重点', summary: '三地重要动态', generation_kind: 'algorithm', status: 'published' as const, created_at: 2, published_at: 2, item_count: 1, source_count: 2 }
     const api = {

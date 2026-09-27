@@ -201,6 +201,54 @@ async function openSources(page: Page) {
   await page.getByRole('button', { name: '监测来源' }).click()
 }
 
+test('weather budgets and fact retries fit desktop and mobile', async ({ page }, testInfo) => {
+  await mockAdminApi(page)
+  const now = Math.floor(Date.now() / 1000)
+  let policy = { provider: 'qweather', kind: 'alerts', enabled: true, interval_seconds: 600, daily_budget: 288, requests: 12, updated_at: now, updated_by: 'owner', last_error: 'HTTP 429: provider channel rate limited', configured: 1, configuration_checked_at: now, budget_day: '2026-09-27', status: 'error' }
+  await page.route('**/api/weather/providers**', route => {
+    if (route.request().method() === 'POST') {
+      policy = { ...policy, ...route.request().postDataJSON() as object }
+      return route.fulfill({ json: { policy } })
+    }
+    return route.fulfill({ json: { subscription_id: 'home', policies: [policy] } })
+  })
+  let dead = 3
+  await page.route('**/api/event-facts/diagnostics**', route => route.fulfill({ json: {
+    extractor_version: null, as_of: now, active_worker_version: 1, completed_count: 90, completed_with_claim: 10, completed_without_claim: 80, explanation: '',
+    versions: [{ extractor_version: 1, history_highwater: 100, created_at: now }], worker_batch_limit: 10, worker_active_pause_seconds: 1,
+    jobs: [{ extractor_version: 1, status: 'completed', count: 90, newest_updated_at: now }, { extractor_version: 1, status: 'dead', count: dead, newest_updated_at: now }],
+  } }))
+  await page.route('**/api/event-facts/retry', route => {
+    expect(route.request().postDataJSON()).toEqual({ version: 1, limit: 100 })
+    dead = 0
+    return route.fulfill({ json: { count: 3, changed: 3 } })
+  })
+  await login(page)
+  const menu = page.getByRole('button', { name: '打开导航' })
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('button', { name: '天气', exact: true }).click()
+  await page.getByRole('button', { name: '天气来源与预算', exact: true }).click()
+  await expect(page.getByText('今日已用 12 / 288')).toBeVisible()
+  await expect(page.getByText('预算日期 2026-09-27（UTC）')).toBeVisible()
+  await expect(page.getByText('尚无请求 · 查询失败')).toBeVisible()
+  await page.getByLabel('QWeather · 官方预警每日预算').fill('120')
+  await page.getByRole('button', { name: '保存QWeather · 官方预警' }).click()
+  await expect(page.getByText('官方预警设置已保存')).toBeVisible()
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', await page.locator('body').evaluate(node => node.clientWidth))
+  await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }))
+  await page.screenshot({ path: testInfo.outputPath('weather-provider-policies.png'), fullPage: true })
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('button', { name: '日常事件', exact: true }).click()
+  await page.getByRole('button', { name: '事实任务诊断', exact: true }).click()
+  await expect(page.getByText(/不代表报道没有价值/)).toBeVisible()
+  await page.getByLabel('重试提取器版本').selectOption('1')
+  await page.getByRole('button', { name: '重试失败任务（3）' }).click()
+  await expect(page.getByText('已将 3 个失败任务重新排队')).toBeVisible()
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', await page.locator('body').evaluate(node => node.clientWidth))
+  await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }))
+  await page.screenshot({ path: testInfo.outputPath('event-fact-diagnostics.png'), fullPage: true })
+})
+
 test('source diagnostics keep recovered polling and blocked content distinct', async ({ page }, testInfo) => {
   await mockAdminApi(page)
   const now = Math.floor(Date.now() / 1000)
@@ -348,6 +396,14 @@ test('daily events reader is usable on desktop and mobile', async ({ page }, tes
       ],
     }], pagination: { next_cursor: null, has_more: false },
   } }))
+  await page.route('**/api/news-events/fed-decision', route => route.fulfill({ json: {
+    reports: [], audit: [], claims: [{ claim_key: 'rate', text: '利率维持 5.25%', status: 'active' }],
+    claim_evidence: [], timeline: [], notifications: [],
+  } }))
+  await page.route('**/api/news-events/fed-decision/quality-label', route => {
+    expect(route.request().postDataJSON()).toEqual({ label: 'correct_merge', reason: '官方声明与媒体报道为同一决议' })
+    return route.fulfill({ json: { label: { event_key: 'fed-decision', label: 'correct_merge' } } })
+  })
   await login(page)
   const menu = page.getByRole('button', { name: '打开导航' })
   if (await menu.isVisible()) await menu.click()
@@ -359,6 +415,12 @@ test('daily events reader is usable on desktop and mobile', async ({ page }, tes
   await page.getByRole('button', { name: /Federal Reserve issues FOMC statement/ }).click()
   await expect(page.getByText('一手', { exact: true })).toBeVisible()
   await expect(page.getByText('背景信息', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '查看事件历史与匹配依据' }).click()
+  await expect(page.getByText('利率维持 5.25%')).toBeVisible()
+  await page.getByLabel('聚合评估原因').fill('官方声明与媒体报道为同一决议')
+  await page.getByRole('button', { name: '保存人工评估' }).click()
+  await expect(page.getByText('人工评估已记录')).toBeVisible()
+  await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }))
   await page.screenshot({ path: testInfo.outputPath('daily-events-expanded.png'), fullPage: true })
   await page.getByRole('button', { name: '重要', exact: true }).click()
   await expect(page).toHaveURL(/sort=importance/)

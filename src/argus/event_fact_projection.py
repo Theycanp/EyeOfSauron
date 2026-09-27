@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, Sequence
@@ -51,6 +52,12 @@ class EventFactWorkRepository(Protocol):
     def fail_event_fact_job(self, work: EventFactWorkItem, error: BaseException | str, now: int) -> bool: ...
 
 
+class EventFactAdministrationRepository(Protocol):
+    def event_fact_diagnostics(self, *, version: int | None = None, now: int | None = None) -> dict[str, Any]: ...
+    def retry_event_fact_jobs(self, *, version: int, limit: int, actor: str, now: int) -> int: ...
+    def backfill_event_fact_jobs(self, *, version: int, limit: int, actor: str, now: int) -> int: ...
+
+
 class EventFactProjector:
     def __init__(self, repository: EventFactWorkRepository) -> None:
         self.repository = repository
@@ -77,6 +84,66 @@ class SQLiteEventFacts:
         self.database = database
         self.connection = database.connection
 
+    def event_fact_diagnostics(self, *, version: int | None = None, now: int | None = None) -> dict[str, Any]:
+        current = int(time.time()) if now is None else now
+        if type(current) is not int or current < 0 or version is not None and (type(version) is not int or version < 1):
+            raise ValueError("fact diagnostic arguments are invalid")
+        where = "" if version is None else "WHERE extractor_version=?"
+        args: tuple[Any, ...] = () if version is None else (version,)
+        with self.database.unit_of_work(immediate=False):
+            rows = self.connection.execute(
+                f"SELECT extractor_version,status,COUNT(*) count,MIN(updated_at) oldest_updated_at,"
+                f"MAX(updated_at) newest_updated_at FROM event_fact_jobs {where} "
+                "GROUP BY extractor_version,status ORDER BY extractor_version,status", args,
+            ).fetchall()
+            no_claims = int(self.connection.execute(
+                "SELECT COUNT(*) FROM event_fact_jobs j WHERE j.status='completed' "
+                "AND NOT EXISTS(SELECT 1 FROM event_claim_evidence ce JOIN event_claims c ON c.id=ce.claim_id "
+                "WHERE ce.report_id=j.report_id AND c.producer=? AND c.extractor_version=j.extractor_version)"
+                + (" AND j.extractor_version=?" if version is not None else ""), (FACT_PRODUCER, *args),
+            ).fetchone()[0])
+            versions = [dict(row) for row in self.connection.execute(
+                f"SELECT * FROM event_fact_versions {where} ORDER BY extractor_version", args,
+            )]
+        completed = sum(int(row["count"]) for row in rows if row["status"] == "completed")
+        return {
+            "extractor_version": version, "as_of": current,
+            "active_worker_version": FACT_EXTRACTOR_VERSION,
+            "selected_version_processable": version is None or version == FACT_EXTRACTOR_VERSION,
+            "jobs": [dict(row) for row in rows], "versions": versions,
+            "completed_count": completed, "completed_with_claim": completed - no_claims,
+            "completed_without_claim": no_claims,
+            "worker_batch_limit": 10, "worker_active_pause_seconds": 1,
+            "explanation": "completed_without_claim means the deterministic extractor found no supported fact; it is not a quality verdict",
+        }
+
+    def retry_event_fact_jobs(self, *, version: int, limit: int, actor: str, now: int) -> int:
+        if type(version) is not int or type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("fact retry arguments are invalid")
+        if version != FACT_EXTRACTOR_VERSION:
+            raise ValueError("only the active worker extractor version can be retried")
+        if not actor or len(actor) > 128 or type(now) is not int or now < 0:
+            raise ValueError("fact retry audit metadata is invalid")
+        with self.database.unit_of_work():
+            rows = self.connection.execute(
+                "SELECT report_id FROM event_fact_jobs WHERE extractor_version=? AND status='dead' "
+                "ORDER BY updated_at,report_id LIMIT ?", (version, limit),
+            ).fetchall()
+            ids = [int(row["report_id"]) for row in rows]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                self.connection.execute(
+                    f"UPDATE event_fact_jobs SET status='pending',attempts=0,next_attempt_at=?,"
+                    f"lease_token=NULL,lease_until=NULL,last_error=NULL,updated_at=? "
+                    f"WHERE extractor_version=? AND report_id IN ({placeholders})",
+                    (now, now, version, *ids),
+                )
+            self.connection.execute(
+                "INSERT INTO admin_auth_audit(user_id,action,actor,details_json,created_at) VALUES(NULL,?,?,?,?)",
+                ("event_fact_retry", actor, json.dumps({"version": version, "count": len(ids)}, sort_keys=True), now),
+            )
+        return len(ids)
+
     def claim_event_fact_job(
         self, now: int, *, version: int, lease_seconds: int = 60,
     ) -> EventFactWorkItem | None:
@@ -84,12 +151,20 @@ class SQLiteEventFacts:
             raise ValueError("invalid fact job lease")
         token = uuid.uuid4().hex
         with self.database.unit_of_work():
+            # A new extractor version observes new reports by default.  Reprocessing
+            # all history is an explicit, bounded administration action.
+            self.connection.execute(
+                "INSERT OR IGNORE INTO event_fact_versions(extractor_version,history_highwater,created_at) "
+                "SELECT ?,COALESCE(MAX(id),0),? FROM event_reports", (version, now),
+            )
             self.connection.execute(
                 "INSERT OR IGNORE INTO event_fact_jobs(report_id,extractor_version,status,next_attempt_at,updated_at) "
                 "SELECT er.id,?,'pending',0,? FROM event_reports er "
-                "WHERE NOT EXISTS(SELECT 1 FROM event_fact_jobs j WHERE j.report_id=er.id "
+                "WHERE (er.id>(SELECT history_highwater FROM event_fact_versions WHERE extractor_version=?) "
+                "OR er.created_at >= (SELECT created_at FROM event_fact_versions WHERE extractor_version=?)) "
+                "AND NOT EXISTS(SELECT 1 FROM event_fact_jobs j WHERE j.report_id=er.id "
                 "AND j.extractor_version=?) ORDER BY er.id LIMIT 100",
-                (version, now, version),
+                (version, now, version, version, version),
             )
             self.connection.execute(
                 "UPDATE event_fact_jobs SET status='retry',lease_token=NULL,lease_until=NULL,"
@@ -133,6 +208,31 @@ class SQLiteEventFacts:
             attributes=attributes if isinstance(attributes, dict) else {},
             lease_token=token, extractor_version=version,
         )
+
+    def backfill_event_fact_jobs(self, *, version: int, limit: int, actor: str, now: int) -> int:
+        if type(version) is not int or version < 1 or type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("fact backfill version and limit are invalid")
+        if version != FACT_EXTRACTOR_VERSION:
+            raise ValueError("only the active worker extractor version can be backfilled")
+        if not actor or len(actor) > 128 or now < 0:
+            raise ValueError("fact backfill audit metadata is invalid")
+        with self.database.unit_of_work():
+            self.connection.execute(
+                "INSERT OR IGNORE INTO event_fact_versions(extractor_version,history_highwater,created_at) "
+                "SELECT ?,COALESCE(MAX(id),0),? FROM event_reports", (version, now),
+            )
+            result = self.connection.execute(
+                "INSERT OR IGNORE INTO event_fact_jobs(report_id,extractor_version,status,next_attempt_at,updated_at) "
+                "SELECT er.id,?,'pending',?,? FROM event_reports er WHERE er.id <= "
+                "(SELECT history_highwater FROM event_fact_versions WHERE extractor_version=?) "
+                "AND NOT EXISTS(SELECT 1 FROM event_fact_jobs j WHERE j.report_id=er.id AND j.extractor_version=?) "
+                "ORDER BY er.id LIMIT ?", (version, now, now, version, version, limit),
+            )
+            self.connection.execute(
+                "INSERT INTO admin_auth_audit(user_id,action,actor,details_json,created_at) VALUES(NULL,?,?,?,?)",
+                ("event_fact_backfill", actor, json.dumps({"version": version, "count": result.rowcount}), now),
+            )
+            return result.rowcount
 
     def complete_event_fact_job(
         self, work: EventFactWorkItem, facts: Sequence[EventFactCandidate], now: int,
@@ -214,7 +314,7 @@ class SQLiteEventFacts:
     def _reconcile_slot(self, event_id: int, slot_key: str, now: int) -> None:
         rows = self.connection.execute(
             "SELECT id FROM event_claims WHERE event_id=? AND slot_key=? "
-            "AND producer=? AND EXISTS(SELECT 1 FROM event_claim_evidence ce "
+            "AND producer=? AND status!='superseded' AND EXISTS(SELECT 1 FROM event_claim_evidence ce "
             "WHERE ce.claim_id=event_claims.id) LIMIT 2",
             (event_id, slot_key, FACT_PRODUCER),
         ).fetchall()

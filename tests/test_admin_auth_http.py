@@ -181,6 +181,68 @@ class AdminAuthHttpTests(unittest.TestCase):
                 )
                 with urllib.request.urlopen(weather_write) as response:
                     self.assertEqual("08:00", json.loads(response.read())["subscription"]["daily_time"])
+                provider_policies = urllib.request.Request(
+                    f"{base_url}/api/weather/providers?subscription_id=home",
+                    headers={"Cookie": cookie_values},
+                )
+                with urllib.request.urlopen(provider_policies) as response:
+                    policies_payload = json.loads(response.read())
+                self.assertEqual("home", policies_payload["subscription_id"])
+                self.assertIn(
+                    {"provider": "qweather", "kind": "alerts"},
+                    [{"provider": item["provider"], "kind": item["kind"]}
+                     for item in policies_payload["policies"]],
+                )
+                policy_write = urllib.request.Request(
+                    f"{base_url}/api/weather/providers/qweather/alerts",
+                    data=json.dumps({
+                        "enabled": False, "interval_seconds": 900, "daily_budget": 100,
+                    }).encode(),
+                    headers={"Cookie": cookie_values, "Content-Type": "application/json",
+                             "Origin": base_url, "X-CSRF-Token": csrf}, method="POST",
+                )
+                with urllib.request.urlopen(policy_write) as response:
+                    policy = json.loads(response.read())["policy"]
+                self.assertFalse(bool(policy["enabled"]))
+                fact_diagnostics = urllib.request.Request(
+                    f"{base_url}/api/event-facts/diagnostics", headers={"Cookie": cookie_values}
+                )
+                with urllib.request.urlopen(fact_diagnostics) as response:
+                    diagnostics = json.loads(response.read())
+                self.assertEqual(0, diagnostics["completed_without_claim"])
+                fact_retry = urllib.request.Request(
+                    f"{base_url}/api/event-facts/retry", data=json.dumps({
+                        "version": 1, "limit": 10,
+                    }).encode(),
+                    headers={"Cookie": cookie_values, "Content-Type": "application/json",
+                             "Origin": base_url, "X-CSRF-Token": csrf}, method="POST",
+                )
+                with urllib.request.urlopen(fact_retry) as response:
+                    self.assertEqual(0, json.loads(response.read())["changed"])
+                for operation_path, operation_payload in (
+                    ("/api/event-facts/retry", {"version": 1, "limit": 10}),
+                    ("/api/event-facts/backfill", {"version": 1, "limit": 10}),
+                    ("/api/content-jobs/retry", {"ids": [1], "reason": "parser upgraded"}),
+                    ("/api/event-facts/correction/apply", {}),
+                ):
+                    with self.subTest(operation_path=operation_path):
+                        request = urllib.request.Request(
+                            f"{base_url}{operation_path}", data=json.dumps(operation_payload).encode(),
+                            headers={"Cookie": cookie_values, "Content-Type": "application/json", "Origin": base_url},
+                            method="POST",
+                        )
+                        with self.assertRaises(urllib.error.HTTPError) as missing_csrf:
+                            urllib.request.urlopen(request)
+                        self.assertEqual(403, missing_csrf.exception.code)
+                for operation_path in ("/api/event-facts/retry", "/api/event-facts/backfill"):
+                    request = urllib.request.Request(
+                        f"{base_url}{operation_path}", data=b'{"limit":10}',
+                        headers={"Cookie": cookie_values, "Content-Type": "application/json",
+                                 "Origin": base_url, "X-CSRF-Token": csrf}, method="POST",
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as missing_version:
+                        urllib.request.urlopen(request)
+                    self.assertEqual(400, missing_version.exception.code)
                 diagnostics = urllib.request.Request(
                     f"{base_url}/api/source-health/diagnostic_feed", headers={"Cookie": cookie_values}
                 )
@@ -317,6 +379,24 @@ class AdminAuthHttpTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as failure:
                     urllib.request.urlopen(reader_ack)
                 self.assertEqual(403, failure.exception.code)
+                for path, payload in (
+                    ("/api/weather/providers/qweather/alerts", {"enabled": True, "interval_seconds": 900, "daily_budget": 100}),
+                    ("/api/event-facts/retry", {"version": 1, "limit": 10}),
+                    ("/api/event-facts/backfill", {"version": 1, "limit": 10}),
+                    ("/api/content-jobs/retry", {"ids": [1], "reason": "parser upgraded"}),
+                    ("/api/event-facts/correction/preview", {}),
+                    ("/api/event-facts/correction/apply", {}),
+                    ("/api/news-events/unknown/quality-label", {"label": "false_merge", "reason": "independent decisions"}),
+                ):
+                    with self.subTest(path=path):
+                        denied_write = urllib.request.Request(
+                            f"{base_url}{path}", data=json.dumps(payload).encode(),
+                            headers={"Cookie": reader_cookies, "Content-Type": "application/json", "Origin": base_url},
+                            method="POST",
+                        )
+                        with self.assertRaises(urllib.error.HTTPError) as denied:
+                            urllib.request.urlopen(denied_write)
+                        self.assertEqual(403, denied.exception.code)
                 with self.assertRaises(urllib.error.HTTPError) as failure:
                     urllib.request.urlopen(urllib.request.Request(
                         f"{base_url}/api/users", headers={"Cookie": reader_cookies}

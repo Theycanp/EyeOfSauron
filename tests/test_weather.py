@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import time
 import unittest
 from dataclasses import asdict, replace
 from datetime import datetime
@@ -9,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from argus.database import Database
+from argus.database import Database, SCHEMA_VERSION
 from argus.open_meteo import OpenMeteoProvider, WeatherProviderError
 from argus.weather import (
     ForecastHour, NowcastSlot, OfficialWeatherAlert, WeatherAirQuality, WeatherAstronomy,
@@ -65,7 +66,7 @@ class WeatherTests(unittest.TestCase):
         )]
 
     def test_schema_seed_uses_verified_campus_location(self) -> None:
-        self.assertEqual(27, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(SCHEMA_VERSION, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("北京邮电大学沙河校区", self.subscription.label)
         self.assertAlmostEqual(40.1561163, self.subscription.latitude)
         self.assertAlmostEqual(116.2835626, self.subscription.longitude)
@@ -207,7 +208,7 @@ class WeatherTests(unittest.TestCase):
         connection.commit()
         connection.close()
         self.database = Database(self.path)
-        self.assertEqual(27, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(SCHEMA_VERSION, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("北京邮电大学沙河校区", self.database.get_weather_subscription().label)
 
     def test_schema_twenty_three_migration_preserves_existing_weather_state(self) -> None:
@@ -223,7 +224,7 @@ class WeatherTests(unittest.TestCase):
         connection.close()
         self.database = Database(self.path)
         after = self.database.get_weather_status()
-        self.assertEqual(27, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(SCHEMA_VERSION, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual(before["subscription"], after["subscription"])
         self.assertEqual(before["rain_expected"], after["rain_expected"])
         self.assertEqual(before["latest"]["observed_at"], after["latest"]["observed_at"])
@@ -242,7 +243,7 @@ class WeatherTests(unittest.TestCase):
         connection.commit()
         connection.close()
         self.database = Database(self.path)
-        self.assertEqual(27, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(SCHEMA_VERSION, self.database.connection.execute("PRAGMA user_version").fetchone()[0])
         row = self.database.connection.execute(
             "SELECT moon_phase,solar_elevation,solar_noon_elevation,solar_noon_at "
             "FROM weather_astronomy WHERE subscription_id='home'"
@@ -476,6 +477,49 @@ class WeatherTests(unittest.TestCase):
         with patch("argus.open_meteo._request_json", return_value={"current": payload["current"], "hourly": {"time": iso}}):
             with self.assertRaises(WeatherProviderError):
                 OpenMeteoProvider().fetch(self.subscription)
+
+    def test_provider_policy_seed_and_atomic_daily_budget_survive_restart(self) -> None:
+        policies = self.database.list_weather_provider_policies()
+        self.assertEqual(6, len(policies))
+        forecast_policy = next(item for item in policies
+                               if item["provider"] == "open_meteo" and item["kind"] == "forecast")
+        self.assertEqual(48, forecast_policy["daily_budget"])
+        request_time = int(time.time())
+        for _ in range(48):
+            self.assertTrue(self.database.reserve_weather_provider_request(
+                "open_meteo", "forecast", now=request_time,
+            ))
+        self.assertFalse(self.database.reserve_weather_provider_request(
+            "open_meteo", "forecast", now=request_time,
+        ))
+        self.database.record_weather_provider_error(
+            "open_meteo", "forecast", RuntimeError("upstream unavailable"), now=request_time,
+        )
+        self.database.close()
+        self.database = Database(self.path)
+        usage = next(item for item in self.database.list_weather_provider_policies()
+                     if item["provider"] == "open_meteo" and item["kind"] == "forecast")
+        self.assertEqual(48, usage["requests"])
+        self.assertIn("RuntimeError", usage["last_error"])
+
+    def test_disabled_provider_policy_is_not_reserved_and_updates_are_audited(self) -> None:
+        before = self.database.list_weather_provider_policies()
+        self.database.update_weather_provider_policy(
+            "qweather", "hourly", enabled=False, interval_seconds=3600,
+            daily_budget=24, actor="operator", now=DAY,
+        )
+        self.assertFalse(self.database.reserve_weather_provider_request(
+            "qweather", "hourly", now=DAY,
+        ))
+        current = self.database.list_weather_provider_policies()
+        item = next(row for row in current if row["provider"] == "qweather" and row["kind"] == "hourly")
+        self.assertEqual(0, item["enabled"])
+        audit = self.database.connection.execute(
+            "SELECT action,actor FROM admin_auth_audit WHERE action='weather_policy_updated'"
+        ).fetchone()
+        self.assertIsNotNone(audit)
+        self.assertEqual("operator", audit["actor"])
+        self.assertEqual(6, len(before))
 
 
 if __name__ == "__main__":

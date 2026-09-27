@@ -6,6 +6,7 @@ import type { WeatherHour, WeatherPlace, WeatherStatus, WeatherSubscription } fr
 import { formatDate } from '../../shared/utils'
 import 'leaflet/dist/leaflet.css'
 import './weather.css'
+import { WeatherProvidersPanel } from './WeatherProvidersPanel'
 
 interface Props {
   api: AdminApi
@@ -133,6 +134,7 @@ function WeatherMap({ latitude, longitude, disabled, onPick }: WeatherMapProps) 
 
 export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
   const [status, setStatus] = useState<WeatherStatus | null>(null)
+  const [showProviders, setShowProviders] = useState(false)
   const [draft, setDraft] = useState<WeatherSubscription | null>(null)
   const [query, setQuery] = useState('')
   const [places, setPlaces] = useState<WeatherPlace[]>([])
@@ -306,12 +308,15 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
 
   const forecastHours = latest?.hourly ?? latest?.forecast_hours ?? []
   return <div className="weather-page">
+    <div className="page-actions"><button className="button subtle" aria-expanded={showProviders} onClick={() => setShowProviders(value => !value)}>天气来源与预算</button></div>
+    {showProviders && <WeatherProvidersPanel api={api} canWrite={canWrite} onUnauthorized={onUnauthorized} />}
     <div className="page-actions"><div><h2>本地天气 · {status?.subscription.label || draft.label}</h2><p>{status?.subscription.timezone || draft.timezone}</p></div>
       <button className="icon-button" aria-label="刷新天气状态" title="刷新天气状态" onClick={() => { void load() }}><RefreshCw size={18} /></button></div>
 
     <section className="weather-current" aria-label="最新天气预报">
       <div className="weather-current-icon"><CloudSun size={34} /></div>
       <div><span className="eyebrow">{status?.last_success_at ? `${today ? '今日预报' : '历史预报'} · 上次查询 ${formatDate(status.last_success_at)}` : '等待首次查询'}</span>
+        {latest?.conditions_basis === 'hourly_forecast' && <p>近时段小时预报 · QWeather 兜底</p>}
         <h3>{status?.latest?.condition || '暂无预报'}</h3>
         <p>{latest?.low != null && latest.high != null ? `${Math.round(latest.low)}~${Math.round(latest.high)}℃` : '温度待获取'}
           <span> · </span>{today ? '今日' : '当日'}降水 {latest?.rain_mm ?? '—'} mm<span> · </span>阵风 {latest?.wind_gust_kmh ?? '—'} km/h</p>

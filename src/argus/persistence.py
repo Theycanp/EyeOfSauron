@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import sqlite3
 from types import TracebackType
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
 from .analysis_orchestrator import AnalysisRepository
-from .content import ContentDocumentDraft, ContentFetchWorkItem
-from .events import EventEvidenceRepository, EventPageRepository, EventPoolRepository, EventRepository, EventWorkspaceRepository
-from .event_fact_projection import EventFactWorkRepository
+from .content import ContentAdministrationRepository, ContentDocumentDraft, ContentFetchWorkItem
+from .events import EventEvidenceRepository, EventFactCorrectionRepository, EventPageRepository, EventPoolRepository, EventRepository, EventWorkspaceRepository
+from .event_fact_projection import EventFactAdministrationRepository, EventFactWorkRepository
+from .event_review import EventQualityRepository
 from .digest_operations import DigestRunRepository
 from .digest import (
     DigestInputRepository,
@@ -21,7 +22,7 @@ from .manual_events import ManualEventSpec
 from .reminders import ReminderSpec
 from .rules import RuleSet
 from .source_health import SourceHealthRepository
-from .weather import WeatherRepository
+from .weather import WeatherPolicyRepository, WeatherRepository
 
 
 class RevisionConflictError(RuntimeError):
@@ -66,7 +67,7 @@ class SQLiteUnitOfWork:
 class RuntimeRepository(
     AnalysisRepository, DigestInputRepository, DigestRepository, DigestNotificationRepository,
     DigestRetryRepository, DigestRunRepository, EventRepository, EventPoolRepository,
-    EventWorkspaceRepository, EventFactWorkRepository, WeatherRepository, Protocol
+    EventWorkspaceRepository, EventFactWorkRepository, WeatherRepository, WeatherPolicyRepository, Protocol
 ):
     """Persistence port used by the always-on application service."""
 
@@ -104,7 +105,7 @@ class RuntimeRepository(
     def stop_engine(self, instance_id: str, now: int, *, error: str | None = None) -> None: ...
 
     def list_source_quality(
-        self, *, source_ids: list[str] | None = None, now: int | None = None
+        self, *, source_ids: Sequence[str] | None = None, now: int | None = None
     ) -> list[dict[str, Any]]: ...
 
     def record_source_success(
@@ -239,7 +240,8 @@ class ControlPlaneRepository(
     ManagedConfigRepository, PromptRepository, DigestReaderRepository,
     EventPageRepository, DigestRunRepository,
     EventRepository, EventEvidenceRepository, EventWorkspaceRepository, SourceHealthRepository,
-    WeatherRepository, Protocol
+    WeatherRepository, WeatherPolicyRepository, ContentAdministrationRepository,
+    EventFactAdministrationRepository, EventFactCorrectionRepository, EventQualityRepository, Protocol
 ):
     """Narrow persistence port used by the local administration API."""
 
@@ -289,7 +291,7 @@ class ControlPlaneRepository(
     def cancel_alert(self, alert_id: int, now: int) -> bool: ...
     def discard_alert(self, alert_id: int) -> bool: ...
     def list_source_quality(
-        self, *, source_ids: list[str] | None = None, now: int | None = None
+        self, *, source_ids: Sequence[str] | None = None, now: int | None = None
     ) -> list[dict[str, Any]]: ...
     def record_source_quality_feedback(
         self,

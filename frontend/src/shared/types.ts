@@ -28,7 +28,8 @@ export interface WeatherStatus {
     rain_mm: number
     rain_probability: number
     uv_index_max?: number | null
-    wind_gust_kmh: number
+    wind_gust_kmh: number | null
+    conditions_basis?: 'observation' | 'hourly_forecast'
     temperature_now: number | null
     humidity?: number | null
     wind_speed_kmh?: number | null
@@ -49,6 +50,60 @@ export interface WeatherStatus {
   consecutive_failures: number
   rain_expected: boolean | null
   qweather?: Record<string, { last_success_at: number | null; last_error: string | null; consecutive_failures: number }>
+}
+
+export type WeatherProvider = 'open_meteo' | 'qweather'
+export type WeatherProviderChannel = 'forecast' | 'air_quality' | 'minutely' | 'alerts' | 'astronomy' | 'hourly'
+
+export interface WeatherProviderPolicy extends JsonRecord {
+  subscription_id?: string
+  provider: WeatherProvider
+  kind: WeatherProviderChannel
+  status?: 'disabled' | 'not_configured' | 'budget_exhausted' | 'error' | 'awaiting_engine' | 'conditional_standby' | 'enabled'
+  configured?: number | null
+  configuration_checked_at?: number | null
+  budget_day?: string
+  enabled: boolean | number
+  interval_seconds: number
+  daily_budget: number
+  updated_at: number
+  updated_by: string
+  requests?: number
+  last_request_at?: number | null
+  last_error?: string | null
+}
+
+export interface WeatherProviderPoliciesResponse {
+  subscription_id: string
+  policies: WeatherProviderPolicy[]
+}
+
+export interface EventFactDiagnosticBucket extends JsonRecord {
+  extractor_version: number
+  status: 'pending' | 'leased' | 'retry' | 'completed' | 'dead'
+  count: number
+  oldest_updated_at?: number | null
+  newest_updated_at?: number | null
+}
+
+export interface EventFactDiagnostics extends JsonRecord {
+  extractor_version: number | null
+  as_of: number
+  jobs: EventFactDiagnosticBucket[]
+  completed_without_claim: number
+  explanation: string
+  versions?: Array<{ extractor_version: number; history_highwater: number; created_at: number }>
+  worker_batch_limit?: number
+  worker_active_pause_seconds?: number
+  active_worker_version?: number
+  selected_version_processable?: boolean
+  completed_count?: number
+  completed_with_claim?: number
+}
+
+export interface EventFactRetryResponse extends MutationResponse {
+  changed: number
+  count: number
 }
 
 export interface WeatherHour {
@@ -587,6 +642,12 @@ export interface DigestItem extends JsonRecord {
   source_tiers?: ('primary' | 'secondary' | 'social')[]
   reports?: DigestReport[]
   handling?: 'digest' | 'immediate'
+  facts?: {
+    as_of: number
+    truncated: boolean
+    claims: Array<{ claim_key: string; text: string; status: 'active' | 'superseded' | 'disputed'; supersedes_claim_key?: string | null }>
+    evidence: Array<{ claim_key: string; report_id: number; stance: 'supports' | 'refutes' | 'context'; note: string }>
+  } | null
 }
 
 export interface DigestReport extends JsonRecord {
@@ -728,6 +789,30 @@ export interface EventQuality {
   sample_truncated: boolean
   interpretation: string
   repeated_titles: Array<{ title: string; events: number }>
+  labels?: EventQualityLabel[]
+  window_since?: number
+  window_until?: number
+  label_window_basis?: 'review_created_at'
+  label_sample_limit?: number
+  label_sample_may_be_truncated?: boolean
+  label_metrics?: {
+    sample_count: number
+    by_label: Record<string, number>
+    merge_precision_like: { value: number | null; numerator: number; denominator: number }
+    merge_recall_like: { value: number | null; numerator: number; denominator: number }
+    conflict_rate: { value: number | null; numerator: number; denominator: number }
+    duplicate_support_count: number
+    interpretation: string
+  }
+}
+
+export type EventQualityLabelKind = 'correct_merge' | 'false_merge' | 'missed_merge' | 'duplicate_support' | 'conflict'
+export interface EventQualityLabel extends JsonRecord {
+  event_key: string
+  label: EventQualityLabelKind
+  reason: string
+  actor: string
+  created_at: number
 }
 
 export interface NewsEventResponse {

@@ -15,11 +15,20 @@ from .calendar_zh import calendar_context
 DEFAULT_LOCATION = ("北京邮电大学沙河校区", 40.1561163, 116.2835626)
 EXAMPLE_LOCATION = ("北京市天安门", 39.905, 116.397)
 FORECAST_CREDIT = "Open-Meteo (CC BY 4.0): https://open-meteo.com/"
+QWEATHER_FORECAST_CREDIT = "QWeather: https://developer.qweather.com/attribution.html"
+
+
+def forecast_credit(provider: str) -> str:
+    return QWEATHER_FORECAST_CREDIT if provider == "QWeather" else FORECAST_CREDIT
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
 class WeatherError(ValueError):
     pass
+
+
+class WeatherRequestDenied(RuntimeError):
+    """An operational request limit prevented network access."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +69,11 @@ class WeatherForecast:
     # optional so providers and historical fixtures without UV data remain
     # valid; callers must render the missing value explicitly.
     uv_index_max: float | None = None
+    # Persist provider provenance with the latest forecast.  Defaults preserve
+    # compatibility with historical fixtures and Open-Meteo snapshots.
+    provider: str = "Open-Meteo"
+    units: str = "metric"
+    conditions_basis: str = "current"
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +137,19 @@ class WeatherSignal:
     priority: int
 
 
+class WeatherPolicyRepository(Protocol):
+    def record_weather_provider_availability(self, provider: str, *, configured: bool, now: int) -> None: ...
+    def list_weather_provider_policies(self, subscription_id: str = "home") -> list[dict[str, Any]]: ...
+    def reserve_weather_provider_request(self, provider: str, kind: str, *, now: int,
+                                         subscription_id: str = "home") -> bool: ...
+    def record_weather_provider_error(self, provider: str, kind: str,
+                                     error: BaseException | str, *, now: int,
+                                     subscription_id: str = "home") -> None: ...
+    def update_weather_provider_policy(self, provider: str, kind: str, *, enabled: bool,
+                                       interval_seconds: int, daily_budget: int,
+                                       actor: str, now: int, subscription_id: str = "home") -> dict[str, Any]: ...
+
+
 class WeatherRepository(Protocol):
     def get_weather_subscription(self) -> WeatherSubscription: ...
     def get_weather_status(self) -> dict[str, Any]: ...
@@ -159,6 +186,7 @@ class WeatherProvider(Protocol):
 
 
 class LocalWeatherProvider(Protocol):
+    def fetch_hourly(self, subscription: WeatherSubscription) -> WeatherForecast: ...
     def fetch_minutely(self, subscription: WeatherSubscription) -> WeatherNowcast: ...
     def fetch_alerts(self, subscription: WeatherSubscription) -> tuple[OfficialWeatherAlert, ...]: ...
     def fetch_astronomy(self, subscription: WeatherSubscription, date: str) -> WeatherAstronomy: ...
@@ -193,7 +221,8 @@ def validate_forecast(forecast: WeatherForecast, now: int) -> None:
         raise WeatherError("weather provider current conditions are stale")
     if (forecast.temperature is None or not math.isfinite(forecast.temperature)
             or not -100 <= forecast.temperature <= 70
-            or forecast.weather_code is None or not 0 <= forecast.weather_code <= 99):
+            or (forecast.weather_code is None and forecast.provider != "QWeather")
+            or (forecast.weather_code is not None and not 0 <= forecast.weather_code <= 99)):
         raise WeatherError("weather provider current conditions are invalid")
     for value, low, high, label in (
         (forecast.humidity, 0, 100, "humidity"),
@@ -204,7 +233,8 @@ def validate_forecast(forecast: WeatherForecast, now: int) -> None:
         if value is not None and (not math.isfinite(value) or not low <= value <= high):
             raise WeatherError(f"weather provider current {label} is invalid")
     future = [hour for hour in forecast.hours if hour.at >= now]
-    if not future or future[0].at > now + 3600 or future[-1].at < now + 24 * 3600:
+    minimum_horizon = 23 * 3600 if forecast.provider == "QWeather" else 24 * 3600
+    if not future or future[0].at > now + 3600 or future[-1].at < now + minimum_horizon:
         raise WeatherError("weather provider forecast does not cover the next day")
     previous = future[0].at - 3600
     for hour in future:
@@ -220,10 +250,12 @@ def validate_forecast(forecast: WeatherForecast, now: int) -> None:
         )
         # weather_code is optional for old/provider fixtures.  Numeric weather
         # fields remain mandatory for every hourly point.
-        required = values[:-1]
+        required = values[:-2] if forecast.provider == "QWeather" else values[:-1]
         if any(value is None or not math.isfinite(value) or not low <= value <= high
                for value, low, high in required):
             raise WeatherError("weather provider hourly forecast is incomplete or invalid")
+        if hour.wind_gust is not None and (not math.isfinite(hour.wind_gust) or not 0 <= hour.wind_gust <= 400):
+            raise WeatherError("weather provider hourly gust is invalid")
         code = values[-1][0]
         if code is not None and (type(code) is not int or not 0 <= code <= 99):
             raise WeatherError("weather provider hourly weather code is invalid")
@@ -291,7 +323,9 @@ def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForeca
     temperatures = [hour.temperature for hour in today if hour.temperature is not None]
     rain = sum(max(0, hour.precipitation or 0) for hour in remaining)
     probability = max((hour.rain_probability or 0 for hour in remaining), default=0)
-    gust = max((hour.wind_gust or 0 for hour in remaining), default=0)
+    gusts = [hour.wind_gust for hour in remaining if hour.wind_gust is not None]
+    gust = max(gusts) if gusts else None
+    gust_text = f"阵风最高 {gust:.0f} km/h" if gust is not None else "阵风暂无数据"
     low = min(temperatures) if temperatures else None
     high = max(temperatures) if temperatures else None
     temp_range = f"{low:.0f}~{high:.0f}℃" if low is not None and high is not None else "温度暂无数据"
@@ -304,15 +338,16 @@ def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForeca
            if forecast.sunrise and forecast.sunset else "日出日落暂无数据")
     uv = (f"今日最高紫外线指数 {forecast.uv_index_max:.1f}"
           if forecast.uv_index_max is not None else "今日最高紫外线指数暂无数据")
-    message = (f"{subscription.label}：{weather_description(forecast.weather_code)}，当前 {forecast.temperature:.0f}℃，{temp_range}。"
+    conditions_label = "最近小时预报" if forecast.conditions_basis == "hourly_forecast" else "当前"
+    message = (f"{subscription.label}：{weather_description(forecast.weather_code)}，{conditions_label} {forecast.temperature:.0f}℃，{temp_range}。"
                f"今日剩余时段预计降水 {rain:.1f} mm，最高降雨概率 {probability:.0f}%，"
-               f"阵风最高 {gust:.0f} km/h；{humidity}；{wind}。\n"
+               f"{gust_text}；{humidity}；{wind}。\n"
                f"{sun}；{uv}。\n"
                f"阳历 {local_now.date().isoformat()}，{calendar['lunar']}。{calendar['festivals']}"
-               "\n数据：Open-Meteo 预报，非官方气象预警。")
+               f"\n数据：{forecast.provider} 预报，非官方气象预警。")
     return message, {"condition": weather_description(forecast.weather_code),
                      "low": low, "high": high, "rain_mm": round(rain, 1),
-                     "rain_probability": round(probability), "wind_gust_kmh": round(gust),
+                     "rain_probability": round(probability), "wind_gust_kmh": round(gust) if gust is not None else None,
                      "temperature_now": forecast.temperature,
                      "humidity": forecast.humidity,
                      "wind_speed_kmh": forecast.wind_speed,
@@ -331,7 +366,12 @@ def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForeca
                          if now <= hour.at <= now + 48 * 3600
                      ][:48],
                      "calendar": calendar,
-                     "observed_at": forecast.observed_at}
+                     "observed_at": forecast.observed_at,
+                     "provider": forecast.provider,
+                     "units": forecast.units,
+                     "conditions_basis": forecast.conditions_basis,
+                     "forecast_start_at": forecast.hours[0].at if forecast.hours else None,
+                     "forecast_end_at": forecast.hours[-1].at if forecast.hours else None}
 
 
 def format_clock(timestamp: int | None, timezone: str) -> str:

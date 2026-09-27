@@ -15,14 +15,15 @@ import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from .weather import (
-    NowcastSlot, OfficialWeatherAlert, WeatherAstronomy, WeatherNowcast, WeatherSubscription,
+    ForecastHour, NowcastSlot, OfficialWeatherAlert, WeatherAstronomy, WeatherForecast,
+    WeatherNowcast, WeatherSubscription, WeatherRequestDenied, validate_forecast,
     validate_nowcast,
 )
 
@@ -72,6 +73,38 @@ def _number(value: Any) -> float:
     if not math.isfinite(number) or not 0 <= number <= 100:
         raise QWeatherError("QWeather precipitation is out of range")
     return number
+
+
+def _decimal(value: Any, low: float, high: float) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and low <= number <= high else None
+
+
+def _weather_code(icon: Any) -> int | None:
+    """Map QWeather icon families to the WMO-like codes used by the UI."""
+    if not isinstance(icon, str) or not icon.isdigit():
+        return None
+    code = int(icon)
+    if code == 100:
+        return 0
+    if 101 <= code <= 104:
+        return 2 if code < 104 else 3
+    if code == 150:
+        return 0
+    if 151 <= code <= 154:
+        return 2 if code < 154 else 3
+    if code in {302, 303, 304}:
+        return 95
+    if 300 <= code <= 399:
+        return 61
+    if 400 <= code <= 499:
+        return 71
+    if 500 <= code <= 515:
+        return 45
+    return None
 
 
 def _b64(data: bytes) -> bytes:
@@ -142,7 +175,12 @@ class QWeatherProvider:
             raise QWeatherError(f"QWeather returned HTTP {exc.code}") from exc
         except (OSError, ValueError) as exc:
             raise QWeatherError(f"QWeather request failed: {type(exc).__name__}") from exc
-        if not isinstance(result, dict) or result.get("code", "200") != "200":
+        if not isinstance(result, dict):
+            raise QWeatherError("QWeather returned an invalid payload")
+        code = result.get("code", "200")
+        if code != "200":
+            if isinstance(code, str) and re.fullmatch(r"\d{3}", code):
+                raise QWeatherError(f"QWeather returned provider status {code}")
             raise QWeatherError("QWeather returned an invalid payload")
         return result
 
@@ -167,6 +205,50 @@ class QWeatherProvider:
         result = WeatherNowcast(issued_at=issued_at, slots=tuple(slots))
         validate_nowcast(result, now)
         return result
+
+    def fetch_hourly(self, subscription: WeatherSubscription) -> WeatherForecast:
+        """Fetch the bounded QWeather hourly product for conditional fallback.
+
+        QWeather publishes strings and local ISO timestamps; normalize them to
+        the same metric, epoch based contract as Open-Meteo.  This method is
+        deliberately separate from the always-on near-term and alert channels.
+        """
+        location = urllib.parse.quote(f"{subscription.longitude:.2f},{subscription.latitude:.2f}")
+        payload = self._request(f"/v7/weather/24h?location={location}")
+        values = payload.get("hourly")
+        if not isinstance(values, list) or not 24 <= len(values) <= 48:
+            raise QWeatherError("QWeather hourly series is missing")
+        hours: list[ForecastHour] = []
+        for item in values:
+            if not isinstance(item, dict):
+                raise QWeatherError("QWeather hourly item is invalid")
+            at = _timestamp(item.get("fxTime"))
+            temperature = _decimal(item.get("temp"), -100, 70)
+            precipitation = _decimal(item.get("precip"), 0, 500)
+            probability = _decimal(item.get("pop"), 0, 100)
+            if None in (temperature, precipitation, probability):
+                raise QWeatherError("QWeather hourly item is incomplete")
+            hours.append(ForecastHour(
+                at=at, temperature=temperature, precipitation=precipitation,
+                rain_probability=probability, wind_gust=None,
+                weather_code=_weather_code(item.get("icon")),
+            ))
+        if any(right.at - left.at != 3600 for left, right in zip(hours, hours[1:])):
+            raise QWeatherError("QWeather hourly times are discontinuous")
+        observed_at = _timestamp(payload.get("updateTime"))
+        first = values[0]
+        forecast = WeatherForecast(
+            observed_at=observed_at,
+            temperature=hours[0].temperature,
+            weather_code=hours[0].weather_code,
+            hours=tuple(hours),
+            humidity=_decimal(first.get("humidity"), 0, 100),
+            wind_speed=_decimal(first.get("windSpeed"), 0, 400),
+            wind_direction=_decimal(first.get("wind360"), 0, 360),
+            provider="QWeather", units="metric", conditions_basis="hourly_forecast",
+        )
+        validate_forecast(forecast, int(time.time()))
+        return forecast
 
     def fetch_alerts(self, subscription: WeatherSubscription) -> tuple[OfficialWeatherAlert, ...]:
         payload = self._request(
@@ -203,11 +285,18 @@ class QWeatherProvider:
         return tuple(alerts)
 
     def fetch_astronomy(self, subscription: WeatherSubscription, date: str) -> WeatherAstronomy:
+        return self.fetch_astronomy_budgeted(subscription, date, lambda: None)
+
+    def fetch_astronomy_budgeted(self, subscription: WeatherSubscription, date: str,
+                               before_request: Callable[[], None]) -> WeatherAstronomy:
         if not re.fullmatch(r"\d{8}", date):
             raise QWeatherError("QWeather astronomy date is invalid")
+        def request(path: str) -> dict[str, Any]:
+            before_request()
+            return self._request(path)
         location = urllib.parse.quote(f"{subscription.longitude:.2f},{subscription.latitude:.2f}")
-        sun = self._request(f"/v7/astronomy/sun?location={location}&date={date}")
-        moon = self._request(f"/v7/astronomy/moon?location={location}&date={date}")
+        sun = request(f"/v7/astronomy/sun?location={location}&date={date}")
+        moon = request(f"/v7/astronomy/moon?location={location}&date={date}")
         phases = moon.get("moonPhase")
         if not isinstance(phases, list):
             phases = []
@@ -231,11 +320,11 @@ class QWeatherProvider:
         angle_payload: dict[str, Any] = {}
         if local_now.strftime("%Y%m%d") == date:
             try:
-                angle_payload = self._request(
+                angle_payload = request(
                     f"/v7/astronomy/solar-elevation-angle?location={location}&date={date}"
                     f"&time={local_now:%H%M}&tz={tz}&alt=0"
                 )
-            except QWeatherError:
+            except (QWeatherError, WeatherRequestDenied):
                 pass  # Optional angle data must not hide valid sun/moon times.
         sunrise = _optional_timestamp(sun.get("sunrise"))
         sunset = _optional_timestamp(sun.get("sunset"))
@@ -249,11 +338,11 @@ class QWeatherProvider:
             if noon_offset_minutes < 0:
                 noon_tz = "-" + noon_tz
             try:
-                noon_payload = self._request(
+                noon_payload = request(
                     f"/v7/astronomy/solar-elevation-angle?location={location}&date={date}"
                     f"&time={local_noon:%H%M}&tz={noon_tz}&alt=0"
                 )
-            except QWeatherError:
+            except (QWeatherError, WeatherRequestDenied):
                 pass
         def optional_number(value: Any, low: float, high: float) -> float | None:
             try:
