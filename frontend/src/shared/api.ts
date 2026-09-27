@@ -31,8 +31,15 @@ import type {
   EventRepairPreview,
   EventQuality,
   WeatherPlace,
+  WeatherProvider,
+  WeatherProviderChannel,
+  WeatherProviderPoliciesResponse,
   WeatherStatus,
   WeatherSubscription,
+  EventFactDiagnostics,
+  EventFactRetryResponse,
+  EventQualityLabel,
+  EventQualityLabelKind,
 } from './types'
 
 type ApiErrorPayload = {
@@ -180,6 +187,32 @@ export class AdminApi {
     return this.request(`/api/reminders/occurrences/${id}`)
   }
   weather(): Promise<WeatherStatus> { return this.request('/api/weather') }
+  weatherProviderPolicies(subscriptionId = 'home'): Promise<WeatherProviderPoliciesResponse> {
+    return this.request(`/api/weather/providers?${new URLSearchParams({ subscription_id: subscriptionId })}`)
+  }
+  updateWeatherProviderPolicy(
+    provider: WeatherProvider,
+    kind: WeatherProviderChannel,
+    body: { enabled: boolean; interval_seconds: number; daily_budget: number; subscription_id?: string },
+  ): Promise<{ policy: WeatherProviderPoliciesResponse['policies'][number]; restart_required?: boolean }> {
+    return this.request(`/api/weather/providers/${encodeURIComponent(provider)}/${encodeURIComponent(kind)}`, {
+      method: 'POST', body: JSON.stringify(body),
+    })
+  }
+  eventFactDiagnostics(version?: number): Promise<EventFactDiagnostics> {
+    const query = version === undefined ? '' : `?${new URLSearchParams({ version: String(version) })}`
+    return this.request(`/api/event-facts/diagnostics${query}`)
+  }
+  retryEventFactJobs(version: number, limit = 100): Promise<EventFactRetryResponse> {
+    return this.request('/api/event-facts/retry', {
+      method: 'POST', body: JSON.stringify({ version, limit }),
+    })
+  }
+  backfillEventFactJobs(version: number, limit = 100): Promise<EventFactRetryResponse> {
+    return this.request('/api/event-facts/backfill', {
+      method: 'POST', body: JSON.stringify({ version, limit }),
+    })
+  }
   weatherPlaces(query: string): Promise<{ places: WeatherPlace[] }> {
     return this.request(`/api/weather/places?q=${encodeURIComponent(query)}`, {}, 20_000)
   }
@@ -208,6 +241,11 @@ export class AdminApi {
   }
   prompts(): Promise<PromptResponse> { return this.request('/api/prompts') }
   eventQuality(hours: number): Promise<EventQuality> { return this.request(`/api/news-events/quality?hours=${hours}`) }
+  eventQualityLabel(key: string, label: EventQualityLabelKind, reason: string): Promise<{ label: EventQualityLabel }> {
+    return this.request(`/api/news-events/${encodeURIComponent(key)}/quality-label`, {
+      method: 'POST', body: JSON.stringify({ label, reason }),
+    })
+  }
   eventReview(key: string): Promise<EventReviewDetail> { return this.request(`/api/news-events/${encodeURIComponent(key)}`) }
   eventPreference(key: string, state: EventWorkspaceState): Promise<{ state: EventWorkspaceState }> {
     return this.request(`/api/news-events/${encodeURIComponent(key)}/preference`, { method: 'POST', body: JSON.stringify(state) })

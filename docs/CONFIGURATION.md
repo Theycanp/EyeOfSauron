@@ -37,6 +37,13 @@ creates another revision; it never edits history.
   daily forecast and change alerts enabled; the Weather page can independently
   disable either. Forecast polling continues for the status page. Settings use
   their own compare-and-swap revision and audit trail; see `WEATHER.md`.
+- Weather background provider policies (schema 28) independently control
+  `enabled`, `interval_seconds` and UTC daily HTTP budget for each channel.
+  They are runtime settings outside config revisions and take effect without
+  restarting; see the Weather budget panel and `WEATHER.md` for defaults.
+  Turning off condition notifications does not turn off collection; turning off
+  a provider channel does stop its background requests. Quota/disabled state
+  must not be mistaken for an upstream outage.
 
 New credential-free source features should default on only after a real fetch and
 parser probe succeeds. Credential-dependent and device-control features remain

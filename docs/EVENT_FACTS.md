@@ -34,19 +34,48 @@ Claim 为 5 条；这是历史回填和有限词表的状态，不是通用事�
 
 以下仍是后续实现契约，不能把已有事实投影称为完整事件推理：
 
-1. 已有持久任务和原子写入；仍需独立的历史回填速率和失败任务管理界面，
-   以及从合法保存的正文中抽取，而不只是标题、摘要。
+1. 已有持久任务、原子写入及 0.27.0 的版本诊断、限量重试/历史回填界面；
+   worker 每批最多 10 条、忙时批间隔 1 秒。仍需从合法保存的正文中抽取，
+   而不只是标题、摘要，不因新增诊断面板扩大自动抽取范围。
 2. 自动与人工产出已有 provenance；人工修复能重建自动衍生记录，遇到人工
    Claim 或人工关联报道的 Timeline 仍拒绝，需专门的人工事实迁移工具。
 3. 同 slot 同值追加支持证据、异值保持争议已实现。后续只有明确更正/撤回，或
    审查过的领域单调更新，才 supersede；低层级报道不能覆盖一手事实。
    多来源分歧保持 disputed，不通过选择最高分来源来抹掉冲突。
-4. 日报使用事实时冻结 Claim 与 Evidence 快照。旧日报不得读实时事实，
-   AI 必须呈现争议而非替用户选边，继续使用合法事件编号引用。
-5. 统一更新通知须与事实转换、outbox 同事务保存，并以
+4. schema 28 的新日报已经冻结所选报道关联的 Claim 与 Evidence 快照及可用
+   supersedes 祖先；后续事实更正、证据更新或清理不修改旧日报。AI 重试复用
+   原快照，旧日报无快照时不补读实时事实。AI 必须呈现争议而非替用户选边，
+   继续使用合法事件编号引用，详情见 `DIGESTS.md`。
+5. 已有窄范围人工更正入口（如下）。通用自动更新通知仍须与事实转换、outbox 同事务保存，并以
    event_key + update_kind + fact_signature + topic 去重。
    重复支持、转载、市场反应和社交热度只归档；首次一手确认、重大升级、
    明确更正等按确定性策略判断。dead/cancelled 不能永久阻断新事实。
+
+## 人工确认明确更正（schema 28）
+
+`SQLiteEventCorrections` 是独立持久化适配器。业务端口先调用
+`preview_event_fact_correction`，再以证据 revision 调用
+`apply_event_fact_correction`。管理 API 为
+`POST /api/event-facts/correction/preview` 和 `/apply`；需要事实管理的写权限、
+登录 Cookie 和 CSRF 验证。请求选择事件、旧/新 Claim key 和支持新 Claim 的
+一手 Report ID；apply 还必须带预览 revision 和明确人工原因。
+apply 的 `confirmed_primary_correction` 必须是 JSON 布尔值 `true`，明确表示
+操作者已经阅读一手原文并确认是更正；缺失、false、数字或字符串都拒绝。
+
+此入口只支持两个仍为 active/disputed 的同一已知 slot 的事实；另有第三条
+活跃冲突、不同 slot、二手支持、证据早于旧支持或预览已过期时拒绝。操作者
+必须先阅读一手公告并确认它是明确更正，程序不会从数值变化或 prose 推断
+“官方已经更正”。
+
+确认事务同时把旧 Claim 设为 superseded、新 Claim 设为 active 并关联旧 Claim，
+保留两者原始证据，写 `event_fact_corrections` 和事件审计，再按
+`event_key + correction + old/new fact signature + topic` 入 outbox。重放同一次
+确认不会重复通知；任一写入失败全部回滚。后续重复支持（包括旧值的迟到
+转载）不复活旧 Claim 或重新制造这一对的争议。新第三种值仍保持冲突，不
+被旧人工确认永久压制。
+
+该功能不是通用自动更正检测、自动升级通知或 Claim-aware 人工合并工具。
+这些边界仍留在路线图，不能用人工确认成功外推为通用新闻理解。
 
 ## 发生身份
 

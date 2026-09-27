@@ -116,8 +116,7 @@ class ApiDigestSummarizer:
         evidence_ids = tuple(index_ids or range(1, len(evidence_items) + 1))
         if len(evidence_ids) != len(evidence_items):
             raise AnalyzerError("digest evidence identifiers are inconsistent")
-        items = [{"id": evidence_id, "title": item.title[:min(300, per_item // 2)],
-                  "summary": item.summary[:per_item], "regions": item.regions}
+        items = [ApiDigestSummarizer._item_evidence(item, evidence_id, per_item)
                  for evidence_id, item in zip(evidence_ids, evidence_items, strict=True)]
         payload = json.dumps({
             "stage": "synthesis",
@@ -146,3 +145,33 @@ class ApiDigestSummarizer:
             raise AnalyzerError("digest text references do not match its evidence")
         return (summary.strip() + "\n\nAI 辅助整理，请结合下方编号条目核对。"
                 + f"模型：{client.settings.model}；Prompt：{client.settings.prompt_id}@{client.settings.prompt_version}。")
+
+    @staticmethod
+    def _item_evidence(item, evidence_id: int, budget: int) -> dict[str, object]:
+        result: dict[str, object] = {
+            "id": evidence_id, "title": item.title[:min(300, budget // 2)],
+            "summary": item.summary[:budget], "regions": item.regions,
+        }
+        if item.facts is None or (not item.facts.claims and not item.facts.truncated):
+            return result
+        reports = {report.report_id: report for report in item.reports}
+        facts_budget = max(0, budget // 2)
+        claims = []
+        used = 0
+        for claim in item.facts.claims:
+            proofs = [{"stance": evidence.stance, "tier": reports[evidence.report_id].source_tier}
+                      for evidence in item.facts.evidence
+                      if evidence.claim_key == claim.claim_key and evidence.report_id in reports]
+            candidate = {"key": claim.claim_key, "text": claim.text, "status": claim.status,
+                         "supersedes": claim.supersedes_claim_key, "proofs": proofs}
+            size = len(json.dumps(candidate, ensure_ascii=False))
+            if used + size > facts_budget:
+                break
+            claims.append(candidate)
+            used += size
+        result["summary"] = item.summary[:max(80, budget - used)]
+        result["frozen_facts"] = {
+            "as_of": item.facts.as_of, "claims": claims,
+            "truncated": item.facts.truncated or len(claims) < len(item.facts.claims),
+        }
+        return result

@@ -31,6 +31,16 @@ transaction as the digest items. Later report edits or 90-day observation cleanu
 cannot change those published versions. Versions created before this change may
 still use the legacy live-report reconstruction path.
 
+Schema 28 also freezes a typed `DigestEventFacts` snapshot in
+`digest_items.event_facts_json`: capture time, the selected reports' ClaimEvidence,
+their Claims and any available superseded ancestors, plus a bounded-read
+truncation flag. Facts unsupported by the selected report set are not silently
+imported from the live event. Empty snapshots mean no supported structured facts
+were available at capture time; `null` identifies a legacy item with no snapshot.
+Legacy items never reconstruct facts from current event state. New AI versions
+reuse the original snapshot rather than importing later corrections. Report and
+fact JSON survives deletion of the live event as well as observation retention.
+
 The configured `item_limit` is a hard ceiling, currently 50. The actual count is
 chosen without AI:
 
@@ -73,6 +83,13 @@ text, distinguish facts from inference, avoid external facts and instructions
 embedded in articles, and produce concise Chinese prose of whatever length the
 evidence warrants. Prompt text can be inspected and versioned from the admin API;
 secrets never belong in Prompt text.
+
+When frozen structured facts exist, synthesis receives their text, current-at-
+capture status (`active`, `superseded`, `disputed`), supersedes key and selected
+proof tier/stance. This payload uses the same bounded per-item input allowance;
+truncated facts are marked explicitly. It never reads live Claims while retrying,
+and it does not manufacture evidence for legacy or unextracted items. The model
+must preserve uncertainty instead of resolving a disputed slot by source count.
 
 When `send_full_text` is enabled, the scheduler may substitute up to 4,000 stored
 characters per selected item. It uses only content already retained under the

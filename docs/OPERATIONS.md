@@ -51,6 +51,25 @@ and does not alter the daily/rain alert state; verify delivery in outbox status.
 
 ## Management backend
 
+The Weather page includes per-provider/channel enable, polling interval and UTC
+daily HTTP budget controls. These settings persist immediately without restarting
+Argus or creating a source-config revision. `GET /api/weather/providers` includes
+usage and configuration availability, never credentials; mutations require
+`settings:write`, origin and CSRF checks. Disabled, unconfigured, conditional
+standby and exhausted-budget states are not upstream outages. Open-Meteo air
+quality has its own polling schedule; QWeather hourly fallback is conditional and
+respects a durable cooldown even when the primary forecast repeatedly fails.
+
+The event workspace provides version-scoped fact diagnostics, bounded active-
+version retry/backfill and audited human quality labels. Historical versions are
+read-only because the worker runs the active extractor only. See `EVENT_FACTS.md`
+for the denominator and manual correction preview/apply contract. Content parser
+repair is available through the authenticated API documented in `CONTENT.md`;
+it does not revive blocked or dead upstream URLs. Manual fact correction requires
+primary proof, explicit reading confirmation and a revision-bound preview. It
+is not automatic semantic correction. These two repair operations currently use
+the API rather than a dedicated browser editor.
+
 Install the unit from `deploy/argus-admin.service`, then check that `[admin]` is
 enabled in `/etc/argus/config.toml`. Keep the application listener on loopback:
 

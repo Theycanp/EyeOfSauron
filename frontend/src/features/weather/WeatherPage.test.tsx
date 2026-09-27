@@ -16,6 +16,16 @@ const status: WeatherStatus = {
 }
 
 describe('WeatherPage', () => {
+  it('labels hourly fallback conditions as forecast and leaves unknown gusts blank', async () => {
+    const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
+      condition: '多云', low: 12, high: 25, rain_mm: 0, rain_probability: 0,
+      wind_gust_kmh: null, temperature_now: 20, observed_at: 1790395200,
+      is_today: true, conditions_basis: 'hourly_forecast',
+    } }) } as unknown as AdminApi
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    expect(await screen.findByText('近时段小时预报 · QWeather 兜底')).toBeInTheDocument()
+    expect(screen.getByText(/阵风 — km\/h/)).toBeInTheDocument()
+  })
   it('distinguishes the approximate noon angle from the current angle', async () => {
     const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
       condition: '晴', low: 12, high: 25, rain_mm: 0, rain_probability: 0,

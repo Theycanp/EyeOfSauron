@@ -11,7 +11,7 @@ from argus.database import Database
 from argus.digest import DigestBuilder
 from argus.event_clustering import cluster_events, event_match_score
 from argus.event_pool import EventPoolProjector
-from argus.event_review import event_quality
+from argus.event_review import event_quality, event_quality_label_metrics
 from argus.events import EVENT_CLOSED_SECONDS, EVENT_QUIET_SECONDS, EventWorkspaceConflict, PersistedEventClaim, event_lifecycle
 
 
@@ -179,6 +179,87 @@ class EventWorkspaceTests(unittest.TestCase):
         result = event_quality(self.database, since=0, until=1500)
         self.assertEqual(2, result["single_publisher_events"])
         self.assertIn("不代表聚类错误率", result["interpretation"])
+
+    def test_quality_label_metrics_keep_merge_denominators_explicit(self):
+        metrics = event_quality_label_metrics([
+            {"event_key": "correct", "label": "correct_merge"},
+            {"event_key": "false", "label": "false_merge"},
+            {"event_key": "missed", "label": "missed_merge"},
+            {"event_key": "duplicate", "label": "duplicate_support"},
+            {"event_key": "conflict", "label": "conflict"},
+        ])
+        self.assertEqual(5, metrics["sample_count"])
+        self.assertEqual({
+            "correct_merge": 1, "false_merge": 1, "missed_merge": 1,
+            "duplicate_support": 1, "conflict": 1,
+        }, metrics["by_label"])
+        self.assertEqual({"value": 0.5, "numerator": 1, "denominator": 2}, metrics["merge_precision_like"])
+        self.assertEqual({"value": 0.5, "numerator": 1, "denominator": 2}, metrics["merge_recall_like"])
+        self.assertEqual({"value": 0.25, "numerator": 1, "denominator": 4}, metrics["conflict_rate"])
+        self.assertEqual(1, metrics["duplicate_support_count"])
+
+    def test_quality_labels_are_bounded_audited_and_do_not_change_event(self):
+        self.add_report("review", 100, publisher="publisher")
+        original = self.database.get_event("review")
+        self.database.save_event_quality_label(
+            "review", label="false_merge", reason="Different occurrences in this container",
+            actor="operator", now=200,
+        )
+        self.database.save_event_quality_label(
+            "review", label="false_merge", reason="Reviewed again", actor="operator", now=201,
+        )
+        labels = self.database.list_event_quality_labels(since=200, until=202)
+        self.assertEqual(1, len(labels))
+        self.assertEqual("Reviewed again", labels[0]["reason"])
+        self.assertEqual(original, self.database.get_event("review"))
+        self.assertEqual([], self.database.list_event_quality_labels(since=202, until=300))
+        self.assertEqual(2, self.database.connection.execute(
+            "SELECT COUNT(*) FROM admin_auth_audit WHERE action='event_quality_label'"
+        ).fetchone()[0])
+        with self.assertRaises(ValueError):
+            self.database.save_event_quality_label(
+                "missing", label="correct_merge", reason="test", actor="operator", now=202,
+            )
+
+    def test_quality_label_metrics_reject_invalid_or_duplicate_labels(self):
+        with self.assertRaisesRegex(ValueError, "label is invalid"):
+            event_quality_label_metrics([{"event_key": "x", "label": "guess"}])
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            event_quality_label_metrics([
+                {"event_key": "x", "label": "conflict"},
+                {"event_key": "x", "label": "conflict"},
+            ])
+
+    def test_quality_merge_outcome_transition_replaces_prior_and_preserves_support(self):
+        import json
+        self.add_report("review", 100)
+        for label in ("correct_merge", "duplicate_support", "conflict", "false_merge"):
+            self.database.save_event_quality_label(
+                "review", label=label, reason=label, actor="operator", now=200,
+            )
+        labels = self.database.list_event_quality_labels(since=200, until=201)
+        self.assertEqual({"duplicate_support", "conflict", "false_merge"}, {row["label"] for row in labels})
+        audit = self.database.connection.execute(
+            "SELECT details_json FROM admin_auth_audit WHERE action='event_quality_label' ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+        self.assertEqual("correct_merge", json.loads(audit)["replaced_outcomes"][0]["label"])
+        metrics = event_quality_label_metrics(labels)
+        self.assertEqual(1, metrics["reviewed_event_count"])
+        self.assertEqual(0, metrics["contradictory_event_count"])
+        self.assertEqual({"value": 1.0, "numerator": 1, "denominator": 1}, metrics["conflict_rate"])
+
+    def test_quality_legacy_contradiction_withholds_merge_ratios(self):
+        metrics = event_quality_label_metrics([
+            {"event_key": "x", "label": "correct_merge"},
+            {"event_key": "x", "label": "false_merge"},
+            {"event_key": "x", "label": "conflict"},
+            {"event_key": "y", "label": "correct_merge"},
+        ])
+        self.assertEqual(2, metrics["reviewed_event_count"])
+        self.assertEqual(1, metrics["contradictory_event_count"])
+        self.assertIsNone(metrics["merge_precision_like"]["value"])
+        self.assertIsNone(metrics["merge_recall_like"]["value"])
+        self.assertEqual(2, metrics["conflict_rate"]["denominator"])
 
     def test_stale_projector_cannot_resurrect_merged_alias(self):
         self.add_report("A", 100, source_tier="primary")

@@ -15,6 +15,15 @@ conflict relationships. The event repository is enabled in the digest path;
 the legacy digest fields remain a compatibility projection for older readers.
 Matching and scoring belong to the event domain, not the React client or HTTP adapter.
 
+Schema 28 composes content parser administration, fact-job administration,
+manual fact correction, human quality review and weather policy/accounting
+through feature repository protocols at the control-plane boundary. SQLite is
+the current adapter; the React/API and Argus service do not query those tables
+directly. Digest facts are immutable selected-report snapshots rather than live
+Claim references. A manual correction updates the live graph, audit and outbox
+atomically while historical digest snapshots remain unchanged. See `DATA.md`,
+`EVENT_FACTS.md`, and `WEATHER.md` for migration, fact, and provider details.
+
 ```text
 collectors -> normalized observations -> triage -> rules -> incidents -> SQLite outbox -> notifiers
                      |                       |

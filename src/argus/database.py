@@ -25,14 +25,19 @@ from .content import (
     content_host_backoff_seconds,
 )
 from .digest import (
-    DIGEST_RETRY_INTERVAL_SECONDS, DigestCluster, DigestDocument, DigestRetryState, SourceCoverage,
+    DIGEST_RETRY_INTERVAL_SECONDS, DigestCluster, DigestDocument, DigestEventFacts,
+    DigestRetryState, SourceCoverage, freeze_digest_event_facts,
 )
 from .event_clustering import cluster_events, event_aggregate_score, event_evidence_score
 from .digest_operations import digest_run_state
 from .event_identity import EventOccurrenceIdentity, identify_semantic_event
 from .event_fact_projection import EventFactWorkItem, SQLiteEventFacts
-from .event_facts import EventFactCandidate
+from .event_facts import FACT_EXTRACTOR_VERSION, EventFactCandidate
 from .sqlite_weather import SQLiteWeather
+from .sqlite_weather_policy import SQLiteWeatherPolicy
+from .sqlite_event_quality import SQLiteEventQuality
+from .sqlite_content_admin import SQLiteContentAdministration
+from .sqlite_event_corrections import SQLiteEventCorrections
 from .weather import OfficialWeatherAlert, WeatherAirQuality, WeatherAstronomy, WeatherForecast, WeatherNowcast, WeatherSubscription
 from .events import (
     EventEvidenceGraph,
@@ -62,7 +67,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 
 _DIGEST_PROVIDER_TRACE_FIELDS = frozenset({
@@ -1678,6 +1683,96 @@ class Database:
                 )
                 self.connection.execute("PRAGMA user_version=27")
             version = 27
+
+        if version < 28:
+            with self.unit_of_work():
+                if "event_facts_json" not in {str(row[1]) for row in self.connection.execute("PRAGMA table_info(digest_items)")}:
+                    self.connection.execute("ALTER TABLE digest_items ADD COLUMN event_facts_json TEXT")
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS event_fact_versions (
+                        extractor_version INTEGER PRIMARY KEY CHECK(extractor_version > 0),
+                        history_highwater INTEGER NOT NULL CHECK(history_highwater >= 0),
+                        created_at INTEGER NOT NULL
+                    )
+                """)
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO event_fact_versions(extractor_version,history_highwater,created_at) "
+                    "SELECT DISTINCT extractor_version,0,? FROM event_fact_jobs", (int(time.time()),),
+                )
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO event_fact_versions VALUES(?,0,?)", (FACT_EXTRACTOR_VERSION, int(time.time())),
+                )
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS event_quality_labels (
+                        event_key TEXT NOT NULL REFERENCES events(event_key) ON DELETE CASCADE,
+                        label TEXT NOT NULL CHECK(label IN ('correct_merge','false_merge','missed_merge','duplicate_support','conflict')),
+                        reason TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        PRIMARY KEY(event_key,label)
+                    )
+                """)
+                self.connection.execute(
+                    "CREATE INDEX IF NOT EXISTS event_quality_labels_window_idx ON event_quality_labels(created_at)"
+                )
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS event_fact_corrections (
+                        event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                        old_claim_id INTEGER NOT NULL REFERENCES event_claims(id) ON DELETE CASCADE,
+                        new_claim_id INTEGER NOT NULL REFERENCES event_claims(id) ON DELETE CASCADE,
+                        report_id INTEGER NOT NULL REFERENCES event_reports(id) ON DELETE CASCADE,
+                        actor TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        PRIMARY KEY(event_id,old_claim_id,new_claim_id),
+                        CHECK(old_claim_id != new_claim_id)
+                    )
+                """)
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS weather_provider_policy (
+                        subscription_id TEXT NOT NULL REFERENCES weather_subscriptions(id) ON DELETE CASCADE,
+                        provider TEXT NOT NULL CHECK(provider IN ('open_meteo','qweather')),
+                        kind TEXT NOT NULL CHECK(kind IN ('forecast','air_quality','minutely','alerts','astronomy','hourly')),
+                        enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+                        interval_seconds INTEGER NOT NULL CHECK(interval_seconds BETWEEN 60 AND 86400),
+                        daily_budget INTEGER NOT NULL CHECK(daily_budget BETWEEN 1 AND 10000),
+                        configured INTEGER CHECK(configured IN (0,1)),
+                        configuration_checked_at INTEGER,
+                        updated_at INTEGER NOT NULL,
+                        updated_by TEXT NOT NULL,
+                        PRIMARY KEY(subscription_id,provider,kind)
+                    )
+                """)
+                self.connection.execute("""
+                    CREATE TABLE IF NOT EXISTS weather_provider_usage (
+                        subscription_id TEXT NOT NULL REFERENCES weather_subscriptions(id) ON DELETE CASCADE,
+                        provider TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        budget_day TEXT NOT NULL,
+                        requests INTEGER NOT NULL DEFAULT 0 CHECK(requests >= 0),
+                        last_request_at INTEGER,
+                        last_error TEXT,
+                        PRIMARY KEY(subscription_id,provider,kind,budget_day)
+                    )
+                """)
+                seed = (
+                    ("open_meteo", "forecast", 1, 3600, 48),
+                    ("open_meteo", "air_quality", 1, 3600, 48),
+                    ("qweather", "minutely", 1, 600, 288),
+                    ("qweather", "alerts", 1, 600, 288),
+                    ("qweather", "astronomy", 1, 21600, 24),
+                    ("qweather", "hourly", 1, 3600, 24),
+                )
+                now = int(time.time())
+                self.connection.executemany(
+                    "INSERT OR IGNORE INTO weather_provider_policy "
+                    "(subscription_id,provider,kind,enabled,interval_seconds,daily_budget,updated_at,updated_by) "
+                    "VALUES('home',?,?,?,?,?,?,?)",
+                    [(provider, kind, enabled, interval, budget, now, "migration")
+                     for provider, kind, enabled, interval, budget in seed],
+                )
+                self.connection.execute("PRAGMA user_version=28")
+            version = 28
 
     def record_digest_preparation_failure(
         self, digest_key: str, *, stage: str, error: BaseException | str, now: int,
@@ -5165,6 +5260,70 @@ class Database:
     def get_weather_status(self) -> dict[str, Any]:
         return SQLiteWeather(self).get_weather_status()
 
+    def list_content_fetch_jobs(self, source_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        return SQLiteContentAdministration(self).list(source_id, limit=limit)
+
+    def retry_content_parser_jobs(self, ids: Sequence[int], *, reason: str, actor: str, now: int) -> int:
+        return SQLiteContentAdministration(self).retry(ids, reason=reason, actor=actor, now=now)
+
+    def preview_event_fact_correction(
+        self, event_key: str, old_claim_key: str, new_claim_key: str, report_id: int,
+    ) -> dict[str, Any]:
+        with self.unit_of_work(immediate=False):
+            return SQLiteEventCorrections(self).preview(event_key, old_claim_key, new_claim_key, report_id)
+
+    def apply_event_fact_correction(
+        self, event_key: str, old_claim_key: str, new_claim_key: str, report_id: int, *,
+        expected_revision: str, actor: str, reason: str, topic: str, now: int,
+    ) -> dict[str, Any]:
+        return SQLiteEventCorrections(self).apply(
+            event_key, old_claim_key, new_claim_key, report_id, expected_revision=expected_revision,
+            actor=actor, reason=reason, topic=topic, now=now,
+        )
+
+    def save_event_quality_label(
+        self, event_key: str, *, label: str, reason: str, actor: str, now: int,
+    ) -> dict[str, Any]:
+        return SQLiteEventQuality(self).save(event_key, label=label, reason=reason, actor=actor, now=now)
+
+    def list_event_quality_labels(self, *, since: int, until: int, limit: int = 1000) -> list[dict[str, Any]]:
+        return SQLiteEventQuality(self).list(since=since, until=until, limit=limit)
+
+    def list_weather_provider_policies(self, subscription_id: str = "home") -> list[dict[str, Any]]:
+        return SQLiteWeatherPolicy(self).list(subscription_id)
+
+    def update_weather_provider_policy(
+        self, provider: str, kind: str, *, enabled: bool, interval_seconds: int,
+        daily_budget: int, actor: str, now: int, subscription_id: str = "home",
+    ) -> dict[str, Any]:
+        return SQLiteWeatherPolicy(self).update(
+            provider, kind, enabled=enabled, interval_seconds=interval_seconds,
+            daily_budget=daily_budget, actor=actor, now=now, subscription_id=subscription_id,
+        )
+
+    def reserve_weather_provider_request(
+        self, provider: str, kind: str, *, now: int, subscription_id: str = "home",
+    ) -> bool:
+        return SQLiteWeatherPolicy(self).reserve(provider, kind, now=now, subscription_id=subscription_id)
+
+    def record_weather_provider_error(
+        self, provider: str, kind: str, error: BaseException | str, *, now: int,
+        subscription_id: str = "home",
+    ) -> None:
+        SQLiteWeatherPolicy(self).record_error(provider, kind, error, now=now, subscription_id=subscription_id)
+
+    def record_weather_provider_availability(self, provider: str, *, configured: bool, now: int) -> None:
+        SQLiteWeatherPolicy(self).record_availability(provider, configured=configured, now=now)
+
+    def event_fact_diagnostics(self, *, version: int | None = None, now: int | None = None) -> dict[str, Any]:
+        return SQLiteEventFacts(self).event_fact_diagnostics(version=version, now=now)
+
+    def retry_event_fact_jobs(self, *, version: int, limit: int, actor: str, now: int) -> int:
+        return SQLiteEventFacts(self).retry_event_fact_jobs(version=version, limit=limit, actor=actor, now=now)
+
+    def backfill_event_fact_jobs(self, *, version: int, limit: int, actor: str, now: int) -> int:
+        return SQLiteEventFacts(self).backfill_event_fact_jobs(version=version, limit=limit, actor=actor, now=now)
+
     def update_weather_subscription(
         self, data: Mapping[str, Any], *, actor: str, now: int,
     ) -> WeatherSubscription:
@@ -5593,6 +5752,7 @@ class Database:
                         "SELECT id FROM events WHERE event_key = ?", (item.event_id,)
                     ).fetchone()
                 frozen_reports = None
+                frozen_facts = None
                 if event_row is not None:
                     if item.reports and all(isinstance(report, PersistedEventReport) for report in item.reports):
                         reports = item.reports
@@ -5606,6 +5766,18 @@ class Database:
                         )
                         reports = tuple(self._event_report_from_row(row) for row in rows)
                     frozen_reports = json.dumps([asdict(report) for report in reports], ensure_ascii=False)
+                    facts = item.facts
+                    if facts is None and digest.generation_kind == "algorithm":
+                        graph = self.read_event_evidence(item.event_id)
+                        facts = (freeze_digest_event_facts(graph, reports, as_of=digest.created_at)
+                                 if graph is not None else DigestEventFacts(as_of=digest.created_at))
+                    frozen_facts = (json.dumps(asdict(facts), ensure_ascii=False)
+                                    if facts is not None else None)
+                elif item.facts is not None:
+                    # AI retries may retain evidence after its live event was
+                    # removed; saved snapshots remain authoritative.
+                    frozen_reports = json.dumps([asdict(report) for report in item.reports], ensure_ascii=False)
+                    frozen_facts = json.dumps(asdict(item.facts), ensure_ascii=False)
                 self.connection.execute(
                     """
                     INSERT INTO digest_items(
@@ -5613,8 +5785,8 @@ class Database:
                         importance, urgency, relevance, confidence, published_at,
                         regions_json, topics_json, source_ids_json,
                         observation_ids_json, links_json, handling, source_tiers_json,
-                        event_id, event_reports_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        event_id, event_reports_json, event_facts_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         digest_id,
@@ -5637,6 +5809,7 @@ class Database:
                         json.dumps(item.source_tiers, ensure_ascii=False),
                         (int(event_row["id"]) if event_row is not None else None),
                         frozen_reports,
+                        frozen_facts,
                     ),
                 )
             for item in digest.coverage:
@@ -5941,6 +6114,8 @@ class Database:
             try:
                 event_key = None
                 event_reports: tuple[PersistedEventReport, ...] = ()
+                frozen_reports_data = (json.loads(item["event_reports_json"])
+                                       if item["event_reports_json"] is not None else None)
                 if item["event_id"] is not None:
                     event_row = self.connection.execute(
                         "SELECT event_key FROM events WHERE id = ?", (int(item["event_id"]),)
@@ -5957,8 +6132,8 @@ class Database:
                             (int(item["event_id"]), str(item["observation_ids_json"])),
                         )
                         frozen_reports = (
-                            [PersistedEventReport(**report) for report in json.loads(item["event_reports_json"])]
-                            if item["event_reports_json"] is not None
+                            [PersistedEventReport(**report) for report in frozen_reports_data]
+                            if frozen_reports_data is not None
                             else [self._event_report_from_row(report) for report in report_rows]
                         )
                         representative_sources: set[str] = set()
@@ -5969,6 +6144,18 @@ class Database:
                             ))
                             representative_sources.add(report.source_id)
                         event_reports = tuple(reconstructed)
+                if not event_reports and frozen_reports_data is not None:
+                    event_reports = tuple(PersistedEventReport(**report) for report in frozen_reports_data)
+                    event_key = event_reports[0].event_key if event_reports else event_key
+                facts = None
+                if item["event_facts_json"] is not None:
+                    raw_facts = json.loads(item["event_facts_json"])
+                    facts = DigestEventFacts(
+                        as_of=raw_facts["as_of"],
+                        claims=tuple(PersistedEventClaim(**claim) for claim in raw_facts["claims"]),
+                        evidence=tuple(PersistedEventClaimEvidence(**entry) for entry in raw_facts["evidence"]),
+                        truncated=raw_facts["truncated"],
+                    )
                 items.append(
                     DigestCluster(
                         cluster_key=str(item["cluster_key"]),
@@ -5989,9 +6176,10 @@ class Database:
                         handling=str(item["handling"]),
                         event_id=event_key,
                         reports=event_reports,
+                        facts=facts,
                     )
                 )
-            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise RuntimeError(f"digest item {item['id']} is corrupt") from exc
         coverage = tuple(
             SourceCoverage(
@@ -6137,6 +6325,7 @@ class Database:
         dead_cutoff: int | None = None,
     ) -> tuple[int, int]:
         with self.connection:
+            SQLiteWeatherPolicy(self).cleanup(cutoff)
             deleted_alerts = self.connection.execute(
                 "DELETE FROM alerts WHERE status = 'delivered' AND delivered_at < ?", (cutoff,)
             ).rowcount

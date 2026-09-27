@@ -126,6 +126,140 @@ class EventFactProjectionTests(unittest.TestCase):
             self.database.list_event_claims("A")[0].claim_key, event_key="A"
         )))
 
+    def test_fact_diagnostics_explains_empty_completion_and_retries_dead_jobs_by_version(self) -> None:
+        report = self.add_report("diagnostic", 1_790_000_000, title="No deterministic fact here")
+        work = self.database.claim_event_fact_job(1_790_000_100, version=FACT_EXTRACTOR_VERSION)
+        assert work is not None
+        self.assertTrue(self.database.complete_event_fact_job(work, (), 1_790_000_101))
+        diagnostics = self.database.event_fact_diagnostics(version=FACT_EXTRACTOR_VERSION, now=1_790_000_102)
+        self.assertEqual(1, diagnostics["completed_without_claim"])
+        self.assertEqual(1, diagnostics["completed_count"])
+        self.assertEqual(0, diagnostics["completed_with_claim"])
+        self.assertEqual(FACT_EXTRACTOR_VERSION, diagnostics["active_worker_version"])
+        self.assertTrue(diagnostics["selected_version_processable"])
+        self.assertEqual([FACT_EXTRACTOR_VERSION], [row["extractor_version"] for row in diagnostics["versions"]])
+        self.assertIn("not a quality verdict", diagnostics["explanation"])
+        self.database.connection.execute(
+            "UPDATE event_fact_jobs SET status='dead',attempts=5,updated_at=? "
+            "WHERE report_id=? AND extractor_version=?",
+            (1_790_000_103, report.report_id, FACT_EXTRACTOR_VERSION),
+        )
+        self.database.connection.commit()
+        retried = self.database.retry_event_fact_jobs(
+            version=FACT_EXTRACTOR_VERSION, limit=1, actor="operator", now=1_790_000_104,
+        )
+        self.assertEqual(1, retried)
+        row = self.database.connection.execute(
+            "SELECT status,attempts,next_attempt_at FROM event_fact_jobs WHERE report_id=?",
+            (report.report_id,),
+        ).fetchone()
+        self.assertEqual("pending", row["status"])
+        self.assertEqual(0, row["attempts"])
+        self.assertEqual(1_790_000_104, row["next_attempt_at"])
+        audit = self.database.connection.execute(
+            "SELECT action,actor FROM admin_auth_audit WHERE action='event_fact_retry'"
+        ).fetchone()
+        self.assertEqual(("event_fact_retry", "operator"), (audit["action"], audit["actor"]))
+
+    def test_new_extractor_does_not_reprocess_history_without_bounded_backfill(self) -> None:
+        old = self.add_report("old", 1_790_000_000, title="Old report")
+        next_version = FACT_EXTRACTOR_VERSION + 1
+        self.assertIsNone(self.database.claim_event_fact_job(1_790_000_100, version=next_version))
+        fresh = self.add_report("new", 1_790_000_200, title="New report")
+        work = self.database.claim_event_fact_job(1_790_000_201, version=next_version)
+        assert work is not None
+        self.assertEqual(fresh.report_id, work.report_id)
+        with patch("argus.event_fact_projection.FACT_EXTRACTOR_VERSION", next_version):
+            self.assertEqual(1, self.database.backfill_event_fact_jobs(
+                version=next_version, limit=1, actor="operator", now=1_790_000_202,
+            ))
+        backfilled = self.database.claim_event_fact_job(1_790_000_203, version=next_version)
+        assert backfilled is not None
+        self.assertEqual(old.report_id, backfilled.report_id)
+        with patch("argus.event_fact_projection.FACT_EXTRACTOR_VERSION", next_version):
+            self.assertEqual(0, self.database.backfill_event_fact_jobs(
+                version=next_version, limit=1, actor="operator", now=1_790_000_204,
+            ))
+
+    def test_fact_admin_rejects_inert_versions_without_enqueuing_or_auditing(self) -> None:
+        self.add_report("old", 1_790_000_000, title="Old report")
+        for operation in (self.database.backfill_event_fact_jobs, self.database.retry_event_fact_jobs):
+            for version in (0, FACT_EXTRACTOR_VERSION + 1, True):
+                with self.subTest(operation=operation.__name__, version=version):
+                    with self.assertRaises(ValueError):
+                        operation(version=version, limit=1, actor="operator", now=1_790_000_100)
+        self.assertEqual(0, self.database.connection.execute("SELECT COUNT(*) FROM event_fact_jobs").fetchone()[0])
+        self.assertEqual(0, self.database.connection.execute(
+            "SELECT COUNT(*) FROM admin_auth_audit WHERE action IN ('event_fact_retry','event_fact_backfill')"
+        ).fetchone()[0])
+        diagnostics = self.database.event_fact_diagnostics(version=FACT_EXTRACTOR_VERSION + 1, now=1_790_000_101)
+        self.assertFalse(diagnostics["selected_version_processable"])
+        self.assertEqual([], diagnostics["versions"])
+
+    def test_completed_denominator_and_claim_match_are_version_scoped(self) -> None:
+        self.add_report("fact", 1_790_000_000, title="Fed raises interest rates by 25 bps")
+        self.assertTrue(self.projector.process_once(1_790_000_100))
+        report = self.database.connection.execute("SELECT report_id FROM event_fact_jobs").fetchone()[0]
+        next_version = FACT_EXTRACTOR_VERSION + 1
+        with self.database.unit_of_work():
+            self.database.connection.execute(
+                "INSERT INTO event_fact_versions VALUES(?,0,?)", (next_version, 1_790_000_101),
+            )
+            self.database.connection.execute(
+                "INSERT INTO event_fact_jobs(report_id,extractor_version,status,updated_at) VALUES(?,?,'completed',?)",
+                (report, next_version, 1_790_000_101),
+            )
+        current = self.database.event_fact_diagnostics(version=FACT_EXTRACTOR_VERSION)
+        future = self.database.event_fact_diagnostics(version=next_version)
+        self.assertEqual((1, 1, 0), (current["completed_count"], current["completed_with_claim"], current["completed_without_claim"]))
+        self.assertEqual((1, 0, 1), (future["completed_count"], future["completed_with_claim"], future["completed_without_claim"]))
+        self.assertEqual([next_version], [row["extractor_version"] for row in future["versions"]])
+
+    def test_new_report_is_enqueued_when_retention_reuses_history_report_id(self) -> None:
+        old = self.add_report("old", 1_790_000_000)
+        next_version = FACT_EXTRACTOR_VERSION + 1
+        self.assertIsNone(self.database.claim_event_fact_job(1_790_000_100, version=next_version))
+        with self.database.unit_of_work():
+            self.database.connection.execute("DELETE FROM observations WHERE id=?", (old.observation_id,))
+        fresh = self.add_report("new", 1_790_000_200)
+        self.assertEqual(old.report_id, fresh.report_id)
+        work = self.database.claim_event_fact_job(1_790_000_201, version=next_version)
+        assert work is not None
+        self.assertEqual("new", work.event_key)
+
+    def test_same_second_report_projection_is_included_without_history_backfill(self) -> None:
+        older = self.add_report("older", 1_790_000_000)
+        overlap = self.add_report("overlap", 1_790_000_100)
+        next_version = FACT_EXTRACTOR_VERSION + 1
+        work = self.database.claim_event_fact_job(1_790_000_100, version=next_version)
+        assert work is not None
+        self.assertEqual(overlap.report_id, work.report_id)
+        self.assertNotEqual(older.report_id, work.report_id)
+        self.assertTrue(self.database.complete_event_fact_job(work, (), 1_790_000_101))
+        self.assertIsNone(self.database.claim_event_fact_job(1_790_000_102, version=next_version))
+
+    def test_diagnostic_counts_use_one_snapshot_during_concurrent_completion(self) -> None:
+        self.add_report("diagnostic", 1_790_000_000)
+        work = self.database.claim_event_fact_job(1_790_000_100, version=FACT_EXTRACTOR_VERSION)
+        assert work is not None
+        writer = Database(Path(self.temp.name) / "facts.db")
+        completed = False
+        def interleave(sql: str) -> None:
+            nonlocal completed
+            if "SELECT COUNT(*) FROM event_fact_jobs j" in sql and not completed:
+                completed = True
+                writer.complete_event_fact_job(work, (), 1_790_000_101)
+        self.database.connection.set_trace_callback(interleave)
+        try:
+            diagnostics = self.database.event_fact_diagnostics(version=FACT_EXTRACTOR_VERSION)
+        finally:
+            self.database.connection.set_trace_callback(None)
+            writer.close()
+        self.assertTrue(completed)
+        self.assertEqual((0, 0, 0), (diagnostics["completed_count"], diagnostics["completed_with_claim"], diagnostics["completed_without_claim"]))
+        refreshed = self.database.event_fact_diagnostics(version=FACT_EXTRACTOR_VERSION)
+        self.assertEqual((1, 0, 1), (refreshed["completed_count"], refreshed["completed_with_claim"], refreshed["completed_without_claim"]))
+
 
 if __name__ == "__main__":
     unittest.main()

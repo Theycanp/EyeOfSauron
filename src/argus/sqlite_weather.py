@@ -13,10 +13,11 @@ from zoneinfo import ZoneInfo
 from .models import AlertCandidate
 from .util import sanitize_error
 from .weather import (
-    FORECAST_CREDIT, OfficialWeatherAlert, WeatherAirQuality, WeatherAstronomy,
+    OfficialWeatherAlert, WeatherAirQuality, WeatherAstronomy,
     WeatherError, WeatherForecast, WeatherNowcast,
     WeatherSubscription, daily_due, nowcast_signal, parse_weather_subscription,
     remaining_day_rain, summarize_weather, validate_forecast, validate_nowcast, weather_signals,
+    forecast_credit,
     air_quality_text, astronomy_text, format_clock,
 )
 
@@ -166,9 +167,9 @@ class SQLiteWeather:
                     daily_message += "\n空气质量暂无数据"
                 queued += int(self.database._insert_alert(AlertCandidate(
                     rule_id="weather.daily", dedupe_key=f"weather:{subscription.id}:daily:{day}",
-                    title=f"今日天气 · {subscription.label}", message=daily_message + "\n" + FORECAST_CREDIT,
+                    title=f"今日天气 · {subscription.label}", message=daily_message + "\n" + forecast_credit(forecast.provider),
                     priority=3, tags=("sunny",), click_url=click_url, topic=topic,
-                    confidence=0.7, evidence=("Open-Meteo forecast; not an official warning",),
+                    confidence=0.7, evidence=(f"{forecast.provider} forecast; not an official warning",),
                 ), None, now))
             prior: dict[str, Any] = json.loads(state["hazard_state_json"])
             active = {signal.kind: signal for signal in signals}
@@ -187,7 +188,8 @@ class SQLiteWeather:
                     title=f"今日预报转为有雨 · {subscription.label}",
                     message=(f"最新逐小时预报显示今日剩余时间可能降雨约 {remaining_rain:.1f} mm，"
                              f"最高概率 {rain_probability:.0f}%。持续有雨不会重复提醒。\n"
-                             "数据：Open-Meteo 模型预报，非官方气象预警。\n" + FORECAST_CREDIT),
+                             f"数据：{forecast.provider} 模型预报，非官方气象预警。\n"
+                             + forecast_credit(forecast.provider)),
                     priority=3, tags=("umbrella",), click_url=click_url, topic=topic,
                     confidence=0.65,
                 ), None, now))
@@ -208,10 +210,11 @@ class SQLiteWeather:
                         rule_id=f"weather.{kind}",
                         dedupe_key=f"weather:{subscription.id}:{kind}:{signal.priority}:{now // (6 * 3600)}",
                         title=f"{signal.title} · {subscription.label}",
-                        message=signal.message + "\n数据：Open-Meteo 模型预报，非官方气象预警。\n" + FORECAST_CREDIT,
+                        message=signal.message + f"\n数据：{forecast.provider} 模型预报，非官方气象预警。\n"
+                        + forecast_credit(forecast.provider),
                         priority=signal.priority, tags=("warning",), click_url=click_url,
                         topic=topic, confidence=0.65,
-                        evidence=("Open-Meteo forecast; not an official warning",),
+                        evidence=(f"{forecast.provider} forecast; not an official warning",),
                     ), None, now))
                 next_state[kind] = {
                     "active": bool(subscription.alerts_enabled),

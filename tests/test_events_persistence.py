@@ -225,6 +225,8 @@ class EventPersistenceTests(unittest.TestCase):
 
     def test_event_schema_migrates_additively_from_version_16(self) -> None:
         path = self.config.service.database_path
+        self.database.connection.execute("DROP TABLE event_fact_corrections")
+        self.database.connection.execute("DROP TABLE event_quality_labels")
         self.database.connection.execute("DROP TABLE event_claim_evidence")
         self.database.connection.execute("DROP TABLE event_timeline")
         self.database.connection.execute("DROP TABLE event_claims")

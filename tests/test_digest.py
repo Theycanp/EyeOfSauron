@@ -21,7 +21,10 @@ from argus.digest import (
     DigestScheduler,
     adaptive_digest_item_count,
 )
-from argus.events import EventListItem, EventPage, PersistedEvent, PersistedEventReport
+from argus.events import (
+    EventListItem, EventPage, PersistedEvent, PersistedEventClaim,
+    PersistedEventClaimEvidence, PersistedEventReport,
+)
 import test_event_page_consistency as event_fixtures
 
 
@@ -426,6 +429,88 @@ class DigestDatabaseTests(unittest.TestCase):
         self.assertEqual(published.items[0].reports, self.database.get_digest(
             ai.digest_key, ai.version,
         ).items[0].reports)
+
+    def test_digest_facts_freeze_selected_evidence_and_survive_correction_and_cleanup(self) -> None:
+        report = self.add_report("event-facts", START + 100, title="Original report")
+        claim = self.database.save_event_claim(PersistedEventClaim(
+            event_key="event-facts", claim_key="initial", text="Initial official fact",
+            status="active", confidence=0.9, first_seen_at=START + 100,
+            last_seen_at=START + 100, created_at=START + 100, updated_at=START + 100,
+        ))
+        evidence = self.database.save_claim_evidence(PersistedEventClaimEvidence(
+            claim_key="initial", report_id=report.report_id, stance="supports", note="Original proof",
+            created_at=START + 100,
+        ))
+        draft = DigestBuilder(self.database).build(
+            digest_key="daily:frozen-facts", period_start=START,
+            period_end=END, timezone="UTC", created_at=END,
+        )
+        self.assertEqual((claim,), draft.items[0].facts.claims)
+        self.assertEqual((evidence,), draft.items[0].facts.evidence)
+        saved = self.database.save_digest(draft)
+        published = self.database.publish_digest(saved.digest_key, saved.version, END)
+        self.database.save_event_claim(PersistedEventClaim(
+            event_key="event-facts", claim_key="corrected", text="Corrected official fact",
+            status="active", confidence=0.9, first_seen_at=END + 1,
+            last_seen_at=END + 1, created_at=END + 1, updated_at=END + 1,
+            supersedes_claim_key="initial",
+        ))
+        current = self.database.get_digest(published.digest_key, published.version)
+        self.assertEqual(published.items[0].facts, current.items[0].facts)
+        self.assertEqual("active", current.items[0].facts.claims[0].status)
+        ai = self.database.save_digest(with_api_summary(current, "AI summary", created_at=END + 2))
+        self.assertEqual(published.items[0].facts, ai.items[0].facts)
+        self.database.cleanup(END + 3)
+        with self.database.unit_of_work():
+            self.database.connection.execute("DELETE FROM events WHERE event_key='event-facts'")
+        current = self.database.get_digest(published.digest_key, published.version)
+        self.assertEqual(published.items[0].facts, current.items[0].facts)
+        self.assertEqual(published.items[0].reports, current.items[0].reports)
+        retry = self.database.save_digest(with_api_summary(current, "AI retry", created_at=END + 4))
+        self.assertEqual(published.items[0].facts, retry.items[0].facts)
+
+    def test_legacy_digest_does_not_reconstruct_live_facts(self) -> None:
+        report = self.add_report("legacy-event", START + 100, title="Original report")
+        saved = self.database.save_digest(DigestBuilder(self.database).build(
+            digest_key="daily:legacy-facts", period_start=START,
+            period_end=END, timezone="UTC", created_at=END,
+        ))
+        with self.database.unit_of_work():
+            self.database.connection.execute("UPDATE digest_items SET event_facts_json=NULL")
+        self.database.save_event_claim(PersistedEventClaim(
+            event_key="legacy-event", claim_key="late", text="Later fact",
+            status="active", confidence=0.9, first_seen_at=END + 1,
+            last_seen_at=END + 1, created_at=END + 1, updated_at=END + 1,
+        ))
+        self.database.save_claim_evidence(PersistedEventClaimEvidence(
+            claim_key="late", report_id=report.report_id, stance="supports", created_at=END + 1,
+        ))
+        loaded = self.database.get_digest(saved.digest_key, saved.version)
+        self.assertIsNone(loaded.items[0].facts)
+        retry = self.database.save_digest(with_api_summary(loaded, "AI retry", created_at=END + 2))
+        self.assertIsNone(retry.items[0].facts)
+
+    def test_more_than_two_hundred_live_claims_create_bounded_digest_snapshot(self) -> None:
+        report = self.add_report("many-facts", START + 100, title="Official fact report")
+        for index in range(201):
+            key = f"claim-{index}"
+            self.database.save_event_claim(PersistedEventClaim(
+                event_key="many-facts", claim_key=key, text=f"Official fact {index}",
+                status="active", confidence=0.9, first_seen_at=START + 100,
+                last_seen_at=START + 100, created_at=START + 100, updated_at=START + 100,
+            ))
+            self.database.save_claim_evidence(PersistedEventClaimEvidence(
+                claim_key=key, report_id=report.report_id, stance="supports", created_at=START + 100,
+            ))
+        draft = DigestBuilder(self.database).build(
+            digest_key="daily:many-facts", period_start=START,
+            period_end=END, timezone="UTC", created_at=END,
+        )
+        saved = self.database.save_digest(draft)
+        facts = saved.items[0].facts
+        self.assertEqual(200, len(facts.claims))
+        self.assertEqual(200, len(facts.evidence))
+        self.assertTrue(facts.truncated)
 
     def test_source_coverage_distinguishes_quiet_degraded_and_unknown(self) -> None:
         self.database.sync_source_runtime(

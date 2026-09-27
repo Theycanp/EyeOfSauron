@@ -5,6 +5,7 @@ import { ApiError } from '../../shared/api'
 import type { EventQuality, NewsEvent, NewsEventReport, NewsEventResponse, NewsEventSort } from '../../shared/types'
 import { formatDate } from '../../shared/utils'
 import { EventRepairDialog, EventReviewPanel } from './EventReviewPanel'
+import { EventFactDiagnosticsPanel } from './EventFactDiagnosticsPanel'
 
 const PAGE_SIZE = 50
 const DEFAULT_HOURS = 28
@@ -74,6 +75,7 @@ export function DailyEventsPage({ api, onUnauthorized, canWrite = false }: Daily
   const [qualityLoading, setQualityLoading] = useState(false)
   const [selected, setSelected] = useState<string[]>([])
   const [merging, setMerging] = useState(false)
+  const [showFacts, setShowFacts] = useState(false)
   const requestSequence = useRef(0)
   const activeRequest = useRef<AbortController | null>(null)
   const loadedFilters = useRef<string | null>(null)
@@ -222,11 +224,16 @@ export function DailyEventsPage({ api, onUnauthorized, canWrite = false }: Daily
         }).finally(() => setQualityLoading(false))
       }}>查看聚合质量</button>
       {canWrite && <button className="button subtle" disabled={selected.length < 2 || selected.length > 20} onClick={() => setMerging(true)}>合并所选（{selected.length}）</button>}
+      <button className="button subtle" aria-expanded={showFacts} onClick={() => setShowFacts(value => !value)}>事实任务诊断</button>
     </section>
+
+    {showFacts && <EventFactDiagnosticsPanel api={api} canWrite={canWrite} onUnauthorized={onUnauthorized} />}
 
     {quality && <section className="event-quality-summary" aria-label="聚合质量">
       <p>抽样 {quality.event_count} 个事件 / {quality.report_count} 篇报道 · 单一出版方 {quality.single_publisher_events} 个 · 多出版方 {quality.multi_publisher_events} 个 · 栏目标题 {quality.generic_title_events} 个{quality.sample_truncated ? '（最多 1000 个，结果已截断）' : ''}</p>
       <p>{quality.interpretation}</p>
+      {quality.label_metrics && <p>人工标注 {quality.label_metrics.sample_count} 条 · 正确合并 {quality.label_metrics.merge_precision_like.numerator} / 已评估合并 {quality.label_metrics.merge_precision_like.denominator} · 重复支持 {quality.label_metrics.duplicate_support_count} 条。{quality.label_metrics.interpretation}</p>}
+      {quality.label_window_basis === 'review_created_at' && <p>标注样本按评估提交时间计入当前 {hours} 小时时间窗。{quality.label_sample_may_be_truncated ? `最多读取 ${quality.label_sample_limit ?? 1000} 条标注，样本可能已截断。` : ''}</p>}
       {quality.repeated_titles.length > 0 && <details><summary>重复标题抽查线索</summary><ul>{quality.repeated_titles.map(item => <li key={item.title}>{item.title}：{item.events} 个事件</li>)}</ul></details>}
     </section>}
 

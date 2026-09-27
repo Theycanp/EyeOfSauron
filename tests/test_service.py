@@ -102,10 +102,215 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         service = self._service(None, None)
         service.weather_provider = Mock()
         service.weather_provider.fetch.return_value = WeatherForecast(0, 20, 2, ())
+        self.database.record_weather_provider_availability("open_meteo", configured=True, now=int(time.time()))
         self.assertFalse(await service.process_weather_once())
         status = self.database.get_weather_status()
         self.assertEqual(1, status["consecutive_failures"])
         self.assertIsNone(status["rain_expected"])
+
+    async def test_weather_uses_budgeted_hourly_only_after_primary_failure(self) -> None:
+        from dataclasses import asdict
+        from unittest.mock import Mock
+        from test_weather import forecast
+        now = int(time.time())
+        editable = {key: value for key, value in asdict(self.database.get_weather_subscription()).items() if key != "id"}
+        self.database.update_weather_subscription({**editable, "daily_time": "00:00"}, actor="tester", now=now)
+        service = self._service(None, None)
+        service.weather_provider = Mock()
+        service.weather_provider.fetch.return_value = forecast(now)
+        service.local_weather_provider = Mock()
+        service.local_weather_provider.fetch_hourly.return_value = replace(
+            forecast(now), provider="QWeather", conditions_basis="hourly_forecast"
+        )
+        self.database.record_weather_provider_availability("open_meteo", configured=True, now=now)
+        self.database.record_weather_provider_availability("qweather", configured=True, now=now)
+        self.assertTrue(await service.process_weather_once())
+        service.local_weather_provider.fetch_hourly.assert_not_called()
+        service.weather_provider.fetch.side_effect = RuntimeError("HTTP 429")
+        self.assertTrue(await service.process_weather_once())
+        service.local_weather_provider.fetch_hourly.assert_called_once()
+        status = self.database.get_weather_status()
+        self.assertEqual("QWeather", status["latest"]["provider"])
+        self.assertEqual(0, status["consecutive_failures"])
+        self.assertEqual(1, self.database.connection.execute(
+            "SELECT COUNT(*) FROM alerts WHERE rule_id='weather.daily'"
+        ).fetchone()[0])
+        policies = self.database.list_weather_provider_policies()
+        primary = next(item for item in policies if item["kind"] == "forecast")
+        hourly = next(item for item in policies if item["kind"] == "hourly")
+        self.assertEqual(2, primary["requests"])
+        self.assertIn("429", primary["last_error"])
+        self.assertEqual(1, hourly["requests"])
+
+    async def test_weather_air_quality_failure_and_budget_do_not_suppress_forecast(self) -> None:
+        from unittest.mock import Mock
+        from test_weather import forecast
+        now = int(time.time())
+        service = self._service(None, None)
+        service.weather_provider = Mock()
+        service.weather_provider.fetch.return_value = forecast(now)
+        service.weather_provider.fetch_air_quality.side_effect = RuntimeError("HTTP 429")
+        self.database.record_weather_provider_availability("open_meteo", configured=True, now=now)
+        self.database.update_weather_provider_policy(
+            "open_meteo", "air_quality", enabled=True, interval_seconds=3600,
+            daily_budget=1, actor="tester", now=now,
+        )
+        self.assertTrue(await service.process_weather_once())
+        self.assertTrue(await service.process_weather_once())
+        service.weather_provider.fetch_air_quality.assert_called_once()
+        self.assertEqual(0, self.database.get_weather_status()["consecutive_failures"])
+        row = next(item for item in self.database.list_weather_provider_policies()
+                   if item["kind"] == "air_quality")
+        self.assertEqual(1, row["requests"])
+        self.assertIn("429", row["last_error"])
+
+    async def test_weather_disabled_channels_do_not_count_as_provider_outage(self) -> None:
+        from unittest.mock import Mock
+        service = self._service(None, None)
+        service.weather_provider = Mock()
+        service.local_weather_provider = Mock()
+        for provider, kind in (("open_meteo", "forecast"), ("qweather", "hourly")):
+            self.database.update_weather_provider_policy(
+                provider, kind, enabled=False, interval_seconds=3600,
+                daily_budget=1, actor="tester", now=int(time.time()),
+            )
+        self.assertFalse(await service.process_weather_once())
+        service.weather_provider.fetch.assert_not_called()
+        service.local_weather_provider.fetch_hourly.assert_not_called()
+        self.assertEqual(0, self.database.get_weather_status()["consecutive_failures"])
+
+    async def test_hourly_cooldown_and_budget_persist_across_service_restart(self) -> None:
+        from unittest.mock import Mock
+        now = int(time.time()) // 86400 * 86400 + 12 * 3600
+        service = self._service(None, None)
+        service.weather_provider = Mock()
+        service.weather_provider.fetch.side_effect = RuntimeError("primary unavailable")
+        service.local_weather_provider = Mock()
+        service.local_weather_provider.fetch_hourly.side_effect = RuntimeError("fallback unavailable")
+        for provider in ("open_meteo", "qweather"):
+            self.database.record_weather_provider_availability(provider, configured=True, now=now)
+        self.database.update_weather_provider_policy(
+            "qweather", "hourly", enabled=True, interval_seconds=3600,
+            daily_budget=1, actor="tester", now=now,
+        )
+        with patch("argus.service.now_epoch", return_value=now):
+            self.assertFalse(await service.process_weather_once())
+        with patch("argus.service.now_epoch", return_value=now + 60):
+            self.assertFalse(await service.process_weather_once())
+        service.local_weather_provider.fetch_hourly.assert_called_once()
+        path = self.config.service.database_path
+        self.database.close()
+        self.database = Database(path)
+        restarted = self._service(None, None)
+        restarted.weather_provider = service.weather_provider
+        restarted.local_weather_provider = service.local_weather_provider
+        for provider in ("open_meteo", "qweather"):
+            self.database.record_weather_provider_availability(provider, configured=True, now=now)
+        with patch("argus.service.now_epoch", return_value=now + 3600):
+            self.assertFalse(await restarted.process_weather_once())
+        service.local_weather_provider.fetch_hourly.assert_called_once()
+        row = next(item for item in self.database.list_weather_provider_policies() if item["kind"] == "hourly")
+        self.assertEqual(1, row["requests"])
+
+    async def test_primary_quota_uses_fresh_cache_before_conditional_hourly_fallback(self) -> None:
+        from unittest.mock import Mock
+        from test_weather import forecast
+        now = int(time.time()) // 86400 * 86400 + 12 * 3600
+        service = self._service(None, None)
+        service.weather_provider = Mock()
+        service.weather_provider.fetch.return_value = forecast(now)
+        service.local_weather_provider = Mock()
+        service.local_weather_provider.fetch_hourly.return_value = replace(
+            forecast(now + 7201), provider="QWeather", conditions_basis="hourly_forecast"
+        )
+        for provider in ("open_meteo", "qweather"):
+            self.database.record_weather_provider_availability(provider, configured=True, now=now)
+        self.database.update_weather_provider_policy(
+            "open_meteo", "forecast", enabled=True, interval_seconds=3600,
+            daily_budget=1, actor="tester", now=now,
+        )
+        with patch("argus.service.now_epoch", return_value=now):
+            self.assertTrue(await service.process_weather_once())
+        with patch("argus.service.now_epoch", return_value=now + 60):
+            self.assertTrue(await service.process_weather_once())
+        service.local_weather_provider.fetch_hourly.assert_not_called()
+        with patch("argus.service.now_epoch", return_value=now + 7201):
+            self.assertTrue(await service.process_weather_once())
+        service.weather_provider.fetch.assert_called_once()
+        service.local_weather_provider.fetch_hourly.assert_called_once()
+
+    async def test_air_quality_continues_after_primary_and_fallback_failure(self) -> None:
+        from unittest.mock import Mock
+        from argus.weather import WeatherAirQuality
+        now = int(time.time())
+        service = self._service(None, None)
+        service.weather_provider = Mock()
+        service.weather_provider.fetch.side_effect = RuntimeError("primary unavailable")
+        service.weather_provider.fetch_air_quality.return_value = WeatherAirQuality(now, 10, 20, 30, 40)
+        self.database.record_weather_provider_availability("open_meteo", configured=True, now=now)
+        self.assertFalse(await service.process_weather_once())
+        service.weather_provider.fetch_air_quality.assert_called_once()
+        self.assertEqual(10, self.database.connection.execute("SELECT pm2_5 FROM weather_air_quality").fetchone()[0])
+
+    async def test_air_quality_shorter_interval_runs_between_forecast_polls(self) -> None:
+        from unittest.mock import Mock
+        from argus.weather import WeatherAirQuality
+        from test_weather import forecast
+        now = int(time.time())
+        service = self._service(None, None)
+        service.weather_provider = Mock()
+        service.weather_provider.fetch.return_value = forecast(now)
+        service.weather_provider.fetch_air_quality.return_value = WeatherAirQuality(now, 10, 20, 30, 40)
+        self.database.record_weather_provider_availability("open_meteo", configured=True, now=now)
+        self.database.update_weather_provider_policy(
+            "open_meteo", "air_quality", enabled=True, interval_seconds=60,
+            daily_budget=48, actor="tester", now=now,
+        )
+        clock = now
+        async def advance(awaitable, *, timeout):
+            nonlocal clock
+            awaitable.close()
+            clock += 60
+            if service.weather_provider.fetch_air_quality.call_count >= 2:
+                service.stop_event.set()
+                return True
+            raise TimeoutError
+        with (patch("argus.service.now_epoch", side_effect=lambda: clock),
+              patch("argus.service.asyncio.wait_for", side_effect=advance)):
+            await service._weather_loop()
+        service.weather_provider.fetch.assert_called_once()
+        self.assertEqual(2, service.weather_provider.fetch_air_quality.call_count)
+
+    async def test_astronomy_per_request_reservation_runs_on_service_thread(self) -> None:
+        from unittest.mock import Mock
+        from argus.weather import WeatherAstronomy
+        service = self._service(None, None)
+        main_thread = threading.get_ident()
+        class Provider:
+            def fetch_minutely(self, subscription):
+                return Mock()
+            def fetch_alerts(self, subscription):
+                return ()
+            def fetch_astronomy_budgeted(self, subscription, date, before_request):
+                for _ in range(4):
+                    before_request()
+                return WeatherAstronomy(date, None, None, None, None, None, None)
+        service.local_weather_provider = Provider()
+        self.database.record_weather_provider_availability("qweather", configured=True, now=int(time.time()))
+        original = self.database.reserve_weather_provider_request
+        threads = []
+        def reserve(*args, **kwargs):
+            threads.append(threading.get_ident())
+            return original(*args, **kwargs)
+        with (patch.object(self.database, "reserve_weather_provider_request", side_effect=reserve),
+              patch.object(self.database, "record_weather_nowcast", return_value=0),
+              patch.object(self.database, "record_weather_astronomy", side_effect=lambda *_args, **_kwargs: service.stop_event.set()),
+              patch("argus.service.nowcast_signal", return_value=None)):
+            await asyncio.wait_for(service._local_weather_loop(), timeout=3)
+        self.assertEqual([main_thread] * 6, threads)
+        astronomy = next(item for item in self.database.list_weather_provider_policies()
+                         if item["kind"] == "astronomy")
+        self.assertEqual(4, astronomy["requests"])
 
     async def test_weather_location_revision_wakes_hourly_worker(self) -> None:
         from dataclasses import asdict
@@ -133,6 +338,94 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(service._weather_loop(), timeout=3)
         self.assertEqual(2, calls)
 
+    async def test_hourly_fallback_policy_revision_wakes_forecast_worker(self) -> None:
+        from unittest.mock import AsyncMock, Mock
+        service = self._service(None, None)
+        service.weather_provider = Mock()
+        calls = 0
+        primary_polls = []
+        async def poll(*, poll_primary=True) -> bool:
+            nonlocal calls
+            calls += 1
+            primary_polls.append(poll_primary)
+            if calls == 1:
+                self.database.update_weather_provider_policy(
+                    "qweather", "hourly", enabled=False, interval_seconds=900,
+                    daily_budget=10, actor="operator", now=int(time.time()),
+                )
+            else:
+                service.stop_event.set()
+            return True
+        service.process_weather_once = AsyncMock(side_effect=poll)
+        await asyncio.wait_for(service._weather_loop(), timeout=3)
+        self.assertEqual(2, calls)
+        self.assertEqual([True, False], primary_polls)
+
+    async def test_fallback_clock_does_not_advance_long_interval_primary(self) -> None:
+        from unittest.mock import Mock
+        from test_weather import forecast
+
+        now = int(time.time()) // 86400 * 86400 + 12 * 3600
+        for scenario, expected_primary, expected_hourly in (
+            ("disabled", 0, 2), ("exhausted", 0, 2), ("failure", 1, 2),
+            ("quota", 1, 1), ("healthy", 1, 0), ("recovery", 2, 6),
+        ):
+            with self.subTest(scenario=scenario):
+                database = Database(self.root / f"weather-{scenario}.db")
+                try:
+                    service = ArgusService(self.config, database, {}, self.rules, None)
+                    service.weather_provider = Mock()
+                    service.local_weather_provider = Mock()
+                    clock = now
+
+                    def short_forecast(provider):
+                        candidate = forecast(clock)
+                        horizon = 24 if provider == "QWeather" else 25
+                        return replace(candidate, provider=provider, hours=tuple(
+                            replace(hour, at=clock + index * 3600)
+                            for index, hour in enumerate(candidate.hours[:horizon])
+                        ))
+
+                    def fetch_primary(_subscription):
+                        if scenario == "failure" or scenario == "recovery" and clock < now + 21600:
+                            raise RuntimeError("primary unavailable")
+                        return short_forecast("Open-Meteo")
+
+                    service.weather_provider.fetch.side_effect = fetch_primary
+                    service.local_weather_provider.fetch_hourly.side_effect = (
+                        lambda _subscription: short_forecast("QWeather")
+                    )
+                    for provider in ("open_meteo", "qweather"):
+                        database.record_weather_provider_availability(provider, configured=True, now=now)
+                    database.update_weather_provider_policy(
+                        "open_meteo", "forecast", enabled=scenario != "disabled",
+                        interval_seconds=21600, daily_budget=1 if scenario in {"exhausted", "quota"} else 24,
+                        actor="tester", now=now,
+                    )
+                    database.update_weather_provider_policy(
+                        "qweather", "hourly", enabled=True, interval_seconds=3600,
+                        daily_budget=24, actor="tester", now=now,
+                    )
+                    if scenario == "exhausted":
+                        self.assertTrue(database.reserve_weather_provider_request("open_meteo", "forecast", now=now))
+
+                    async def advance(awaitable, *, timeout):
+                        nonlocal clock
+                        awaitable.close()
+                        clock += 3601
+                        if clock >= now + (25207 if scenario == "recovery" else 7202):
+                            service.stop_event.set()
+                            return True
+                        raise TimeoutError
+
+                    with (patch("argus.service.now_epoch", side_effect=lambda: clock),
+                          patch("argus.service.asyncio.wait_for", side_effect=advance)):
+                        await service._weather_loop()
+                    self.assertEqual(expected_primary, service.weather_provider.fetch.call_count)
+                    self.assertEqual(expected_hourly, service.local_weather_provider.fetch_hourly.call_count)
+                finally:
+                    database.close()
+
     async def test_local_weather_revision_starts_all_three_channels(self) -> None:
         from unittest.mock import Mock
         from argus.weather import WeatherAstronomy
@@ -143,6 +436,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         provider.fetch_alerts.return_value = ()
         provider.fetch_astronomy.return_value = WeatherAstronomy("20260926", None, None, None, None, None, None)
         service.local_weather_provider = provider
+        self.database.record_weather_provider_availability("qweather", configured=True, now=int(time.time()))
         with (patch.object(self.database, "record_weather_nowcast", return_value=0),
               patch.object(self.database, "record_official_weather_alerts", return_value=0),
               patch.object(self.database, "record_weather_astronomy", side_effect=lambda *_args, **_kwargs: service.stop_event.set()),

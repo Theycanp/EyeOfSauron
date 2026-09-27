@@ -23,7 +23,10 @@ from .config import DigestConfig
 from .digest_operations import DigestRunRepository
 from .event_clustering import cluster_events, event_match_score
 from .event_pool import EventPoolProjector
-from .events import EventPoolRepository, EventRepository, PersistedEvent, PersistedEventReport
+from .events import (
+    EventEvidenceGraph, EventEvidenceRepository, EventPoolRepository, EventRepository,
+    PersistedEvent, PersistedEventClaim, PersistedEventClaimEvidence, PersistedEventReport,
+)
 from .reminders import next_daily_occurrence
 from .regions import effective_region_weights, region_weight
 from .runtime_io import run_network_call
@@ -37,6 +40,57 @@ _COVERAGE_STATUSES = frozenset(
 )
 DIGEST_RETRY_INTERVAL_SECONDS = 3600
 DIGEST_RETRY_WINDOW_SECONDS = 5 * 3600
+
+
+@dataclass(frozen=True, slots=True)
+class DigestEventFacts:
+    """Immutable, selected-report facts, never reconstructed from live claims."""
+
+    as_of: int
+    claims: tuple[PersistedEventClaim, ...] = ()
+    evidence: tuple[PersistedEventClaimEvidence, ...] = ()
+    truncated: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.as_of) is not int or self.as_of < 0 or type(self.truncated) is not bool:
+            raise ValueError("digest fact snapshot metadata is invalid")
+        if len(self.claims) > 200 or len(self.evidence) > 1000:
+            raise ValueError("digest fact snapshot exceeds its bounds")
+        if (any(not isinstance(claim, PersistedEventClaim) for claim in self.claims)
+                or any(not isinstance(item, PersistedEventClaimEvidence) for item in self.evidence)):
+            raise ValueError("digest fact snapshot must contain typed facts and evidence")
+        keys = {claim.claim_key for claim in self.claims}
+        if len(keys) != len(self.claims) or any(item.claim_key not in keys for item in self.evidence):
+            raise ValueError("digest fact snapshot evidence is inconsistent")
+
+
+def freeze_digest_event_facts(
+    graph: EventEvidenceGraph, reports: Sequence[PersistedEventReport], *, as_of: int,
+) -> DigestEventFacts:
+    """Freeze selected evidence and its claim ancestry inside bounded graph reads."""
+    report_ids = {report.report_id for report in reports if report.report_id is not None}
+    claims_by_key = {claim.claim_key: claim for claim in graph.claims}
+    selected_evidence = tuple(item for item in graph.evidence if item.report_id in report_ids)
+    # Repository implementations may bound claims and evidence independently.
+    # Keep only relationships we can prove inside this finite graph snapshot.
+    evidence = tuple(item for item in selected_evidence if item.claim_key in claims_by_key)
+    keys = {item.claim_key for item in evidence}
+    missing_ancestor = False
+    pending = list(keys)
+    while pending:
+        key = pending.pop()
+        parent = claims_by_key[key].supersedes_claim_key if key in claims_by_key else None
+        if parent and parent not in keys and parent in claims_by_key:
+            keys.add(parent)
+            pending.append(parent)
+        elif parent and parent not in claims_by_key:
+            missing_ancestor = True
+    claims = tuple(claim for claim in graph.claims if claim.claim_key in keys)
+    return DigestEventFacts(
+        as_of=as_of, claims=claims, evidence=evidence,
+        truncated=bool(graph.truncated.get("claims") or graph.truncated.get("claim_evidence")
+                       or len(evidence) != len(selected_evidence) or missing_ancestor),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +115,7 @@ class DigestCluster:
     handling: str = "digest"
     event_id: str | None = None
     reports: tuple[Any, ...] = ()
+    facts: DigestEventFacts | None = None
 
     def __post_init__(self) -> None:
         if not self.cluster_key or len(self.cluster_key) > 128:
@@ -81,6 +136,14 @@ class DigestCluster:
             raise ValueError("digest cluster source tier is invalid")
         if self.handling not in {"digest", "immediate"}:
             raise ValueError("digest cluster handling is invalid")
+        if self.facts is not None:
+            if not isinstance(self.facts, DigestEventFacts):
+                raise ValueError("digest cluster fact snapshot is invalid")
+            report_ids = {report.report_id for report in self.reports if isinstance(report, PersistedEventReport)}
+            if any(item.report_id not in report_ids for item in self.facts.evidence):
+                raise ValueError("digest cluster fact evidence is outside selected reports")
+            if self.event_id and any(claim.event_key != self.event_id for claim in self.facts.claims):
+                raise ValueError("digest cluster fact evidence belongs to another event")
 
 
 @dataclass(frozen=True, slots=True)
@@ -696,6 +759,15 @@ class DigestBuilder:
                 adaptive=True,
             )
             clusters = self._persist_events(clusters, created_at=created_at)
+        if isinstance(self.repository, EventEvidenceRepository):
+            frozen = []
+            for cluster in clusters:
+                graph = (self.repository.read_event_evidence(cluster.event_id)
+                         if cluster.event_id else None)
+                frozen.append(replace(
+                    cluster, facts=freeze_digest_event_facts(graph, cluster.reports, as_of=created_at),
+                ) if graph is not None else cluster)
+            clusters = tuple(frozen)
         coverage = source_coverage_from_rows(
             self.repository.list_source_coverage(
                 period_start, period_end, source_ids=source_ids

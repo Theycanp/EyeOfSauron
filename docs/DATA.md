@@ -76,6 +76,21 @@ message snapshot and survive parent deletion so delivered links stay readable;
 unreferenced old occurrences are removed by normal retention cleanup. Code supporting only schema 26
 requires the matching pre-release backup for rollback.
 
+Schema 28 adds weather provider policy and UTC-day request accounting, extractor
+version history boundaries, human event-quality labels, manual fact-correction
+audit, and nullable frozen facts on digest items. New storage operations live in
+feature adapters behind repository protocols. The control-plane port composes
+the content, fact-job, quality, correction and weather-policy contracts without
+requiring administration code to know the SQLite adapter. Persistence/event
+contracts are included in the strict type gate. Existing digests retain NULL
+facts rather than importing present-day claims on read or AI retry. New extractor
+versions process new reports by default; bounded history backfill is explicit.
+Weather HTTP reservations are durable and atomic before each request, including
+individual astronomy calls. Usage older than 90 days is eligible for cleanup.
+Concurrent startup migration is covered by regression tests. Rollback to schema
+27 code requires the matching pre-release database backup; a code switch alone
+is not supported.
+
 ## Retention and backup
 
 Observations and delivered alerts are normally retained for 90 days; operational

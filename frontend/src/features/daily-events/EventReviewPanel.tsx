@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AdminApi } from '../../shared/api'
 import { ApiError } from '../../shared/api'
-import type { EventRepairPreview, EventRepairRequest, EventReviewDetail, EventWorkspaceState, NewsEvent } from '../../shared/types'
+import type { EventQualityLabelKind, EventRepairPreview, EventRepairRequest, EventReviewDetail, EventWorkspaceState, NewsEvent } from '../../shared/types'
 import { formatDate } from '../../shared/utils'
 import { Modal } from '../../shared/ui/Modal'
 
@@ -57,6 +57,9 @@ export function EventReviewPanel({ api, event, canWrite, onChange, onUnauthorize
   const [choice, setChoice] = useState(state.digest_choice)
   const [selected, setSelected] = useState<number[]>([])
   const [repair, setRepair] = useState(false)
+  const [qualityLabel, setQualityLabel] = useState<EventQualityLabelKind>('correct_merge')
+  const [qualityReason, setQualityReason] = useState('')
+  const [qualitySaved, setQualitySaved] = useState('')
   const run = async (action: () => Promise<void>) => {
     setBusy(true); setError('')
     try { await action() } catch (failure) {
@@ -84,6 +87,17 @@ export function EventReviewPanel({ api, event, canWrite, onChange, onUnauthorize
       <p>只影响以后生成的、时间窗内的日报；仍受容量上限约束，旧日报不变。{state.digest_reason && `当前原因：${state.digest_reason}`}</p>
     </form>}
     {detail && <div>
+      {canWrite && <form className="event-editorial" onSubmit={submission => {
+        submission.preventDefault(); void run(async () => {
+          await api.eventQualityLabel(event.event_key, qualityLabel, qualityReason)
+          setQualityReason(''); setQualitySaved('人工评估已记录')
+        })
+      }}>
+        <label>人工聚合评估<select aria-label="人工聚合评估" value={qualityLabel} onChange={e => setQualityLabel(e.target.value as EventQualityLabelKind)}><option value="correct_merge">聚合正确</option><option value="false_merge">误合并</option><option value="missed_merge">漏合并</option><option value="duplicate_support">重复支持报道</option><option value="conflict">事实冲突</option></select></label>
+        <label>评估原因<input aria-label="聚合评估原因" maxLength={1000} value={qualityReason} onChange={e => setQualityReason(e.target.value)} /></label>
+        <button className="button subtle" disabled={busy || !qualityReason.trim()}>保存人工评估</button>
+        {qualitySaved && <p role="status">{qualitySaved}</p>}
+      </form>}
       <h4>事实与证据</h4>
       {detail.claims?.length ? <ul>{detail.claims.map(claim => <li key={claim.claim_key}>
         <strong>{claim.status === 'disputed' ? '有争议' : claim.status === 'superseded' ? '已被更正' : '当前记录'}</strong>：{claim.text}
