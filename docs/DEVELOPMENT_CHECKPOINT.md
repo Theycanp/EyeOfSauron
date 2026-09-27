@@ -1,8 +1,10 @@
-# N1-N6 delivery checkpoint
+# N1-N6 delivery record
 
-Development resumed at the user's request on 2026-09-27. This records the release
-candidate, not a claim that unfinished work is deployed. Actual production
-acceptance and recovery paths belong in the server handover.
+Development resumed and was accepted on 2026-09-27. PR #69 passed the required
+GitHub backend/frontend checks and merged as
+`0b485b070c6fead2368d82bce15c4ed98a382208`. Release
+`v0.27.0-0b485b0` was activated after an immutable-package preflight.
+The server handover retains the live version and recovery path.
 
 ## Scope
 
@@ -38,8 +40,14 @@ broker, new database or second clustering pipeline was added.
   new adapter; no production state or notification was written.
 - Runtime Python and frontend production dependency audits found no known
   vulnerabilities.
+- Activation created a schema-27 pre-release backup, then migrated live SQLite
+  to schema 28. Both services were active, desired/applied revision 22, all 45
+  enabled sources had zero consecutive failures, outbox pending/sending was
+  zero, database integrity was `ok` and foreign-key violations were zero.
+- First production polls succeeded for Open-Meteo forecast/AQ and QWeather
+  minute, alerts and astronomy. Conditional QWeather hourly remained at zero
+  calls because the primary forecast was valid. Authenticated loopback reads
+  of new weather/fact APIs succeeded; anonymous public weather API returned 401.
 
-Required GitHub backend/frontend checks must pass on the committed candidate
-before merge. Activation uses the immutable release scripts;
-verify precise main commit, schema, revision, services, actual provider polls,
-queues, public authentication boundary and logs before reporting completion.
+Rollback to pre-0.27 code requires the matching schema-27 pre-release backup,
+not a code-only symlink switch. No test notification was sent in production.
