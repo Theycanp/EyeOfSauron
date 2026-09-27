@@ -88,7 +88,9 @@ configuration were written by the probe.
 On 2026-09-27 the same official PDF was captured as
 `tests/fixtures/ec-ip-26-1900.pdf`. The offline regression runs the production
 bounded `pdftotext` extractor and verifies document identity and substantive text.
-CI therefore detects extraction regressions without relying on live networking.
+CI installs and verifies `poppler-utils` (`pdftotext`) and `util-linux`
+(`prlimit`) before running this regression, detecting extraction regressions
+without relying on live networking.
 
 ## Verification and limitations
 
