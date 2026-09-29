@@ -81,6 +81,22 @@ afterEach(() => {
 })
 
 describe('EventsPage detail reader', () => {
+  it('opens a weather notification as saved content with a weather-home link', async () => {
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    const weather = { ...detail, alert: { ...detail.alert, rule_id: 'weather.daily',
+      observation_id: null, incident_id: null, title: '今日天气 · 易县',
+      message: '当时预报：明晨降雨 2 mm。', source_url: '/#/weather' },
+      observation: null, incident: null, documents: [] }
+    const api = { alert: vi.fn().mockResolvedValue(weather) } as unknown as AdminApi
+    render(<EventsPage api={api} onUnauthorized={vi.fn()} initialAlertId="17" incidents={[]}
+      managedSources={[]} health={health} openCount={0} />)
+    expect(await screen.findByRole('article', { name: '天气通知详情' })).toBeVisible()
+    expect(screen.getByText('当时预报：明晨降雨 2 mm。')).toBeVisible()
+    expect(screen.getByRole('link', { name: '天气主页' })).toHaveAttribute('href', '/#/weather')
+    expect(screen.queryByText('通知说明')).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '查看原文' })).not.toBeInTheDocument()
+  })
+
   it('loads a notification deep link and keeps the original article secondary', async () => {
     window.history.replaceState(null, '', '/events/17')
     vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)

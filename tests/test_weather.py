@@ -90,6 +90,76 @@ class WeatherTests(unittest.TestCase):
         self.assertGreaterEqual(len(summary["forecast_hours"]), 24)
         self.assertLessEqual(len(summary["forecast_hours"]), 48)
 
+    def test_daily_weather_window_covers_midnight_to_next_day_six_without_counting_past_rain(self) -> None:
+        current = DAY + 7 * 3600
+        base = forecast(current)
+        hours = tuple(replace(hour,
+            temperature=12 if hour.at == DAY + 29 * 3600 else 20,
+            precipitation=3 if hour.at == DAY + 2 * 3600 else
+                          2 if hour.at == DAY + 27 * 3600 else 0,
+            rain_probability=80 if hour.at in {DAY + 2 * 3600, DAY + 27 * 3600} else 0,
+        ) for hour in base.hours)
+        message, summary = summarize_weather(self.subscription, replace(base, hours=hours), current)
+        self.assertEqual(DAY, summary["window_start_at"])
+        self.assertEqual(DAY + 30 * 3600, summary["window_end_at"])
+        self.assertTrue(summary["window_complete"])
+        self.assertEqual(30, len(summary["forecast_hours"]))
+        self.assertEqual(DAY, summary["forecast_hours"][0]["at"])
+        self.assertEqual(DAY + 29 * 3600, summary["forecast_hours"][-1]["at"])
+        self.assertEqual(12, summary["low"])
+        self.assertEqual(2, summary["rain_mm"])
+        self.assertEqual(2, summary["tomorrow_early_rain_mm"])
+        self.assertIn("今天 00:00 至明天 06:00", message)
+        self.assertIn("已过去小时的模型数据不是实测", message)
+
+    def test_hourly_fallback_reports_partial_daily_window(self) -> None:
+        current = DAY + 7 * 3600
+        base = forecast(current)
+        hours = tuple(hour for hour in base.hours if hour.at >= current)
+        message, summary = summarize_weather(self.subscription, replace(base, hours=hours), current)
+        self.assertFalse(summary["window_complete"])
+        self.assertEqual(current, summary["forecast_hours"][0]["at"])
+        self.assertIn("缺失时段不补算", message)
+
+    def test_daily_window_uses_local_boundaries_across_daylight_saving_changes(self) -> None:
+        timezone = ZoneInfo("America/New_York")
+        subscription = replace(self.subscription, timezone="America/New_York")
+        for month, day, expected_hours in ((3, 8, 29), (11, 1, 31)):
+            with self.subTest(month=month):
+                start = int(datetime(2026, month, day, tzinfo=timezone).timestamp())
+                end = int(datetime(2026, month, day + 1, 6, tzinfo=timezone).timestamp())
+                now = int(datetime(2026, month, day, 7, tzinfo=timezone).timestamp())
+                hours = tuple(ForecastHour(at=at, temperature=20, precipitation=0,
+                                          rain_probability=0, wind_gust=10)
+                              for at in range(start, end, 3600))
+                value = replace(forecast(now), hours=hours)
+                _, summary = summarize_weather(subscription, value, now)
+                self.assertEqual(start, summary["window_start_at"])
+                self.assertEqual(end, summary["window_end_at"])
+                self.assertEqual(expected_hours, len(summary["forecast_hours"]))
+                self.assertTrue(summary["window_complete"])
+
+    def test_after_midnight_status_uses_window_date_not_previous_current_sample_date(self) -> None:
+        current = DAY + 60
+        value = replace(forecast(current), observed_at=DAY - 60)
+        self.database.record_weather_forecast(self.subscription, value, now=current,
+                                             topic="eos", click_url="")
+        with patch("argus.sqlite_weather.time.time", return_value=current):
+            self.assertTrue(self.database.get_weather_status()["latest"]["is_today"])
+
+    def test_weather_notification_detail_preserves_original_content_after_forecast_update(self) -> None:
+        now = DAY + 7 * 3600
+        self.record(now)
+        message = self.database.claim_due_alert(now, lease_seconds=60)
+        assert message is not None
+        self.assertEqual("weather.daily", message.rule_id)
+        self.record(now + 3600, tomorrow_temperature=9)
+        detail = self.database.get_alert_detail(message.id)
+        assert detail is not None
+        self.assertEqual("weather.daily", detail["alert"]["rule_id"])
+        self.assertEqual(message.message, detail["alert"]["message"])
+        self.assertIsNone(detail["observation"])
+
     def test_open_meteo_parses_daily_uv_and_hourly_weather_codes(self) -> None:
         times = [f"2026-09-26T{hour:02d}:00" for hour in range(24)] + [
             f"2026-09-{27 + index // 24:02d}T{index % 24:02d}:00" for index in range(48)

@@ -53,7 +53,7 @@ first successful fetch after that sends one recovery alert.
 
 At or after the configured local time (default 07:00), the first successful fetch
 on that same local calendar day queues one daily forecast per date. It reports current
-condition, today's temperature range, remaining-day predicted precipitation,
+condition, the local midnight-to-next-day-06:00 temperature range, remaining-window predicted precipitation,
 maximum rain probability, gusts, humidity, wind, sunrise/sunset, the day's
 maximum UV index when Open-Meteo supplies it, Gregorian and lunar dates, and a
 small verified set of fixed-date festivals. Fresh optional
@@ -215,10 +215,53 @@ resolves a map click to an IANA timezone using Open-Meteo's fixed-host forecast
 endpoint with `timezone=auto` and a single current field. Coordinates are
 strictly bounded before network access; an unavailable or invalid provider
 timezone is an explicit failure and never silently reuses the previous zone.
-The latest snapshot stores at most 48 hours of hourly records, and the page puts a 24-hour
-precipitation timeline before the metrics. Bars identify rain, snow or sleet and
-the overlaid line shows hourly temperature; absence of hourly records is shown
-explicitly rather than inferred from the daily total.
+New snapshots store the hourly window from the subscription's local calendar
+day at 00:00 through the next day at 06:00 (end exclusive). This is 30 hours in
+Asia/Shanghai; a daylight-saving transition can make the elapsed window 29 or
+31 hours. `window_start_at`, `window_end_at` and `window_complete` describe the
+same typed summary projection as `forecast_hours`, not a separate persistent
+schedule or subscription. No schema change or additional API polling is needed.
+The daily message and temperature reference lines use this window's available
+hours; future precipitation/gust totals exclude hours before the current query.
+Tomorrow 00:00-06:00 precipitation is separately summarized in the daily message.
+Forecast hours before the current time are model data, not observations. They
+are shown with muted precipitation bars and a query-time marker. Missing past
+hours, especially with the future-only QWeather fallback, remain blank with a
+partial-coverage label; they are not filled from zero or another provider.
+The axis uses actual timestamps and distinguishes tomorrow's hours; missing
+temperature hours break the line instead of inventing a connecting trajectory.
+On narrow screens the timeline scrolls horizontally at a readable fixed plot
+width rather than shrinking all 30 hours and labels into tiny text.
+Older snapshots without window metadata retain the legacy rolling-24-hour view
+until the next successful poll; existing notifications are not rewritten.
+Rain-change alerts still use the remaining local calendar day, severe-weather
+detectors still use their near-term horizons, and official/minute warnings are
+unchanged. UV maxima, calendar and astronomy remain scoped to today's date.
+Displayed times use the saved subscription timezone, never an unsaved form edit;
+the date label uses the summary window date, not a near-midnight current sample.
+
+## Saved notification details (0.28.0)
+
+New weather notifications open `/events/<alert-id>` instead of the live weather
+homepage. The authenticated notification API exposes the existing `rule_id`;
+`weather.*` uses a dedicated weather-message reader. It shows the saved title,
+complete body, creation/delivery times and delivery status once, with a
+`天气主页` link to `/#/weather`. The ntfy secondary action uses the same label.
+Both daily reports and temporary rain/snow, forecast-change, warning, outage,
+recovery and test messages use this behavior. Login retains the detail URL.
+
+The saved outbox/alert body is the source of truth, not the latest forecast or
+new provider requests. Location changes and later forecasts do not overwrite
+it. No new store, table, public API or duplicated notification history is added;
+the normal alert retention policy (90 days by default) still applies. Removed
+messages return the existing authenticated not-found response. A missing public
+admin URL retains the existing weather-home target. Already-delivered ntfy
+notifications retain their old link and are not resent merely to change it.
+
+Rollback to 0.27.0 requires no schema downgrade: new summary metadata is
+additive and old alert rows are unchanged. That version returns to the old
+weather-home notification click and legacy hourly display. Existing reminder
+repeat intervals remain unchanged in either direction.
 
 ## Upgrade plan and boundaries
 
@@ -251,6 +294,8 @@ would increase requests and failure surfaces without demonstrated benefit.
 
 ## Follow-up Work (Not Implemented)
 
+- Detailed place search, reverse geocoding and browser accuracy UX: deferred
+  until the operator supplies a map Key; see the location upgrade plan below.
 - QWeather daily enrichment and disagreement cross-check: hourly fallback is
   implemented, but routine dual querying and forecast averaging are not.
 - Full precipitation lifecycle: extend current near-term episode state with
@@ -269,6 +314,74 @@ would increase requests and failure surfaces without demonstrated benefit.
 - Air-quality/heat/UV/visibility alerts and multiple locations: add typed
   detector/routing contracts with operator controls and tests. Air-quality
   display exists, but no such alert is currently generated by its estimate.
+
+## Location Search Upgrade (Planned, Awaiting Key)
+
+Research date: 2026-09-29. This is a deferred plan, not implemented or enabled.
+The operator will obtain a Key later; do not purchase services, replace the map,
+or change the active subscription as part of recording this plan.
+
+Current search uses Open-Meteo's settlement-oriented geocoding API. A read-only
+query for Beijing University of Posts and Telecommunications Shahe campus in
+Chinese returned no results, while `Beijing` returned city results. The current
+Leaflet/OpenStreetMap picker supports manual coordinates, but does not provide
+detailed reverse geocoding. Browser location requests currently allow a
+ten-minute cached result and do not request high accuracy.
+
+Prefer a Tencent proof of concept for personal use; keep Amap as an alternative.
+Both document school/shop POI search and detailed address resolution, but neither
+has been tested with a map Key for this project. Do not claim a coverage winner.
+
+| Reviewed personal-developer allowance | Tencent | Amap |
+| --- | --- | --- |
+| Place search | 200/day | Search-category pool: 5,000/month |
+| Input suggestions | 6,000/day | Shares the search-category pool |
+| Forward/reverse geocoding | 6,000/day each | Basic-service pool: 150,000/month |
+| Web map | Free for non-commercial use | Free quota subject to account terms |
+
+Amap's reviewed terms specify one year of free monthly allowances from personal
+verification. Tencent's reviewed page does not state that one-year limit;
+neither snapshot guarantees permanent rights or an individual account's quota.
+Verify current console limits, use eligibility, attribution, privacy, allowed
+storage and use of place data with other weather providers before integration.
+Use one provider's map and place results together unless cross-provider display
+is explicitly permitted. Public Nominatim is not a drop-in autocomplete option:
+its policy prohibits autocomplete and limits aggregate application traffic to
+one request/second. Do not self-host a large POI database for this scope.
+
+Implementation and acceptance:
+
+1. Obtain the chosen provider's required browser-map and server API credentials
+   as applicable. Keep secrets outside Git and admin responses; restrict browser
+   credentials to the EOS origin and backend calls to authenticated users.
+2. Test the Shahe campus, a shop, same-name places in different cities and an
+   empty query result. Show candidate names, addresses and city context; never
+   silently select the first match. Set explicit search/request limits.
+3. Separate place search/reverse-geocoding adapters from `WeatherProvider`.
+   Define coordinate-system metadata and a verified conversion path before
+   mixing browser/OSM WGS84 with domestic-map GCJ-02. Preserve existing locations
+   with explicit migration rules; do not guess their coordinate system.
+4. Resolve map clicks to an address without snapping the user's pin to a nearby
+   POI. Request fresh high-accuracy browser coordinates and show accuracy radius
+   and timestamp for confirmation. A prior denial needs site-permission guidance,
+   not a promise that the website can force another permission prompt. Never
+   silently replace the chosen position with an IP-derived location.
+5. Call place services only for user actions, with debouncing and allowed caching,
+   not on weather polls. On quota exhaustion, timeout or blocked tiles, retain
+   manual coordinates and the last saved location. Keep current RBAC, CSRF,
+   revision checks and audit boundaries; do not add continuous location tracking.
+6. Verify coordinate alignment, rapid-selection stale-response protection,
+   save-triggered forecast refresh, failure states and secret redaction. Inspect
+   actual desktop/mobile screenshots before PR. More precise place selection
+   does not improve the forecast product's underlying spatial resolution.
+
+Official references: [Tencent quotas and authorization](https://lbs.qq.com/quotaImprove),
+[Tencent POI search](https://lbs.qq.com/service/webService/webServiceGuide/search/webServiceSearch),
+[Tencent reverse geocoding](https://lbs.qq.com/service/webService/webServiceGuide/webServiceGcoder),
+[Amap pricing](https://lbs.amap.com/upgrade),
+[Amap terms](https://lbs.amap.com/home/terms/),
+[Amap coordinate conversion](https://lbs.amap.com/api/webservice/guide/api/convert),
+[Nominatim policy](https://operations.osmfoundation.org/policies/nominatim/).
 
 ## Provider Controls and Conditional Fallback (0.27.0)
 

@@ -7,6 +7,7 @@ import { formatDate, incidentMeta, knownSources, pageSlice } from '../../shared/
 import { Pagination } from '../../shared/ui/Pagination'
 import { ManualEventDialog } from './ManualEventDialog'
 import { emptyManualEventDraft } from './manualEventModel'
+import { WeatherNotificationReader } from '../weather/WeatherNotificationReader'
 
 type EventFilter = 'all' | IncidentStatus
 
@@ -111,6 +112,7 @@ export function EventsPage({ api, onUnauthorized, initialAlertId, incidents, man
     }
   }
 
+  if (selected?.alert.rule_id?.startsWith('weather.')) return <WeatherNotificationReader alert={selected.alert} onBack={closeDetail} />
   if (selected) return <EventReader detail={selected} onBack={closeDetail} sourceName={sourceName} />
 
   return <>

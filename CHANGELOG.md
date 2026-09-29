@@ -5,6 +5,29 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-29
+
+### Added
+
+- Open weather notifications in an authenticated, saved-message detail view,
+  with a separate weather-home link; later forecasts do not replace sent content.
+
+### Fixed
+
+- Match weather temperature references to the displayed hourly window; leave
+  missing hours blank and do not connect temperature lines across gaps.
+- Keep the mobile hourly chart readable with a horizontally scrollable timeline.
+- Keep displayed weather timestamps tied to the saved subscription timezone,
+  not unsaved location edits; use the forecast-window date after midnight.
+
+### Changed
+
+- Show and summarize weather from local midnight through next-day 06:00, with
+  separate early-morning precipitation and explicit partial coverage. Past model
+  hours are not observations and do not count as future rain.
+- Default new acknowledgement-reminder drafts to five-minute repeats, preserving
+  existing reminder intervals and the opt-in acknowledgement setting.
+
 ## [0.27.0] - 2026-09-27
 
 ### Added

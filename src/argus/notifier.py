@@ -168,10 +168,11 @@ class NtfyNotifier:
             "priority": alert.priority,
             "tags": list(alert.tags),
         }
+        is_weather = alert.rule_id.startswith("weather.")
         detail_url = (
             f"{self.detail_base_url}/events/{alert.id}"
             if self.detail_base_url
-            and (alert.observation_id is not None or alert.incident_id is not None)
+            and (alert.observation_id is not None or alert.incident_id is not None or is_weather)
             else ""
         )
         target_url = detail_url or alert.click_url
@@ -181,7 +182,7 @@ class NtfyNotifier:
             payload["actions"] = [
                 {
                     "action": "view",
-                    "label": "查看原文",
+                    "label": "天气主页" if is_weather else "查看原文",
                     "url": alert.click_url,
                     "clear": False,
                 }
