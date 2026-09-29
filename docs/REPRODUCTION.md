@@ -27,6 +27,12 @@ checks, frontend type/unit tests, responsive Playwright tests, and reproducible
 build/package checks. The generated React bundle under `src/argus/admin_web/`
 must match the frontend source.
 
+On a small host shared with production services, set `EOS_E2E_WORKERS=1` when
+running the gate and use a lower scheduler priority, for example
+`EOS_E2E_WORKERS=1 nice -n 10 scripts/ci/check.sh all`. This changes browser-test
+concurrency only, not coverage or production source polling; CI keeps Playwright's
+default concurrency when the variable is absent.
+
 ## Configure a host
 
 1. Create a dedicated `argus` system user and private `/var/lib/argus` state path.

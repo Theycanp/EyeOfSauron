@@ -60,6 +60,30 @@ parser probe succeeds. Credential-dependent and device-control features remain
 off until explicitly configured. The admin UI exposes supported switches and
 labels the digest item value as a maximum, not a target.
 
+## Host load alerts
+
+Host-source `settings.load1` is an absolute one-minute Linux load-average
+threshold, not CPU utilization; runnable and uninterruptible tasks contribute.
+`settings.load_sustain_seconds` defaults to 300 (integer, 0--86400). A new load
+incident is emitted only after successive known over-threshold samples span
+that duration. Brief spikes produce neither an alert nor a recovery message.
+Disk, memory, unit and listener checks keep their existing immediate behavior.
+
+Pending progress belongs to the collector cursor and is saved even when no
+observation is produced, so restarting Argus does not lose a valid streak.
+A below-threshold or unknown sample, collector failure, backward clock jump,
+policy change, or sampling gap larger than the greater of three poll intervals
+and the probe timeout resets pending evidence. Samples do not prove continuous
+utilization between polls. An already reported incident still remains open
+while a probe is unknown and recovers on a known below-threshold sample.
+
+The source's administrator-managed settings can override the duration; setting
+zero explicitly restores the old immediate mode. Existing thresholds are not
+raised or disabled during upgrade; missing duration settings get the new default.
+No schema migration or system telemetry agent is required. Code rollback uses
+the normal release procedure and restores immediate load checks; an explicit
+new setting should be removed when rolling back provider configuration.
+
 ## Regional taxonomy and weighting
 
 New source templates should use macro-region codes: `EAST_ASIA`,

@@ -5,6 +5,17 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-09-29
+
+### Fixed
+
+- Require five minutes of successive over-threshold host load samples before
+  notifying, suppressing brief build/browser-test spikes and their recovery noise.
+- Persist pending load evidence across engine restarts; reset it after unknown
+  samples, failed collection, stale sampling, clock rollback or policy changes.
+- Treat invalid load readings as unknown, never as proof of incident recovery.
+  Keep disk, memory, service and listening-port checks immediate.
+
 ## [0.29.0] - 2026-09-29
 
 ### Added

@@ -420,6 +420,7 @@ DEFAULT_PROVIDER_REGISTRY = ProviderRegistry((
             _field("inode_used_percent", "number", default=90.0, minimum=0.1, maximum=100.0),
             _field("memory_used_percent", "number", default=90.0, minimum=0.1, maximum=100.0),
             _field("load1", "number", minimum=0.01, maximum=1000000.0),
+            _field("load_sustain_seconds", "integer", default=300, minimum=0, maximum=86400),
             _field("allowed_listen_ports", "listen_endpoint_array", default=()),
             _field("required_listen_ports", "listen_endpoint_array", default=()),
         ),

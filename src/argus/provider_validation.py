@@ -246,6 +246,9 @@ def _validate_host(settings: Mapping[str, Any], location: str) -> dict[str, Any]
         0.01,
         1000000.0,
     )
+    normalized["load_sustain_seconds"] = _setting_int(
+        settings, "load_sustain_seconds", 300, location, 0, 86400,
+    )
     return normalized
 
 
