@@ -26,7 +26,7 @@ class RuleTests(unittest.TestCase):
         alerts = self.rules.evaluate(item, NOW)
         self.assertEqual(1, len(alerts))
         self.assertEqual(5, alerts[0].priority)
-        self.assertEqual("eos", alerts[0].topic)
+        self.assertEqual("eos-news", alerts[0].topic)
 
     def test_routine_market_wrap_does_not_match(self) -> None:
         item = observation("wrap", "Stocks Rise as Buyers Return: Markets Wrap")

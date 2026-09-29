@@ -166,7 +166,7 @@ class SQLiteWeather:
                 else:
                     daily_message += "\n空气质量暂无数据"
                 queued += int(self.database._insert_alert(AlertCandidate(
-                    rule_id="weather.daily", dedupe_key=f"weather:{subscription.id}:daily:{day}",
+                    rule_id="weather.daily", category="weather", dedupe_key=f"weather:{subscription.id}:daily:{day}",
                     title=f"今日天气 · {subscription.label}", message=daily_message + "\n" + forecast_credit(forecast.provider),
                     priority=3, tags=("sunny",), click_url=click_url, topic=topic,
                     confidence=0.7, evidence=(f"{forecast.provider} forecast; not an official warning",),
@@ -183,7 +183,7 @@ class SQLiteWeather:
             if (subscription.alerts_enabled and previous_rain is False and rain_expected
                     and "rain" not in active):
                 queued += int(self.database._insert_alert(AlertCandidate(
-                    rule_id="weather.rain_change",
+                    rule_id="weather.rain_change", category="weather",
                     dedupe_key=f"weather:{subscription.id}:rain-change:{local_date}",
                     title=f"今日预报转为有雨 · {subscription.label}",
                     message=(f"最新逐小时预报显示今日剩余时间可能降雨约 {remaining_rain:.1f} mm，"
@@ -207,7 +207,7 @@ class SQLiteWeather:
                 )
                 if should_alert:
                     queued += int(self.database._insert_alert(AlertCandidate(
-                        rule_id=f"weather.{kind}",
+                        rule_id=f"weather.{kind}", category="weather",
                         dedupe_key=f"weather:{subscription.id}:{kind}:{signal.priority}:{now // (6 * 3600)}",
                         title=f"{signal.title} · {subscription.label}",
                         message=signal.message + f"\n数据：{forecast.provider} 模型预报，非官方气象预警。\n"
@@ -223,7 +223,7 @@ class SQLiteWeather:
                 }
             if state["outage_alerted"]:
                 queued += int(self.database._insert_alert(AlertCandidate(
-                    rule_id="weather.provider_recovered",
+                    rule_id="weather.provider_recovered", category="system",
                     dedupe_key=f"weather:{subscription.id}:provider-recovered:{now // 3600}",
                     title=f"天气数据恢复 · {subscription.label}", message=f"{subscription.label} 的天气预报获取已恢复。",
                     priority=3, tags=("white_check_mark",), click_url=click_url, topic=topic,
@@ -319,7 +319,7 @@ class SQLiteWeather:
                 message += f"阳历 {datetime.fromtimestamp(now, ZoneInfo(subscription.timezone)).date().isoformat()}，{calendar.get('lunar', '')}。{calendar.get('festivals', '')}\n"
             message += "这是测试通知，不代表官方气象预警。"
             inserted = self.database._insert_alert(AlertCandidate(
-                rule_id="weather.test", dedupe_key=f"weather:{subscription.id}:test:{now}",
+                rule_id="weather.test", category="weather", dedupe_key=f"weather:{subscription.id}:test:{now}",
                 title=f"天气测试通知 · {subscription.label}", message=message,
                 priority=3, tags=("test", "cloud"), click_url=click_url, topic=topic,
                 confidence=1.0, evidence=("operator-requested weather snapshot",),
@@ -343,7 +343,7 @@ class SQLiteWeather:
             alerted = bool(row["outage_alerted"])
             if failures >= 3 and not alerted:
                 self.database._insert_alert(AlertCandidate(
-                    rule_id="weather.provider_outage",
+                    rule_id="weather.provider_outage", category="system",
                     dedupe_key=f"weather:{subscription.id}:provider-outage:{subscription.revision}:{row['last_success_at'] or 0}",
                     title=f"本地天气数据连续获取失败 · {subscription.label}",
                     message=f"{subscription.label} 已连续 {failures} 次无法获取天气预报。天气提醒可能延迟，请检查后台。",
@@ -366,7 +366,7 @@ class SQLiteWeather:
         queued = 0
         if row["outage_alerted"]:
             queued = int(self.database._insert_alert(AlertCandidate(
-                rule_id="weather.qweather_recovered",
+                rule_id="weather.qweather_recovered", category="system",
                 dedupe_key=f"weather:{subscription.id}:qweather:{kind}:recovered:{now // 3600}",
                 title=f"和风天气数据恢复 · {subscription.label}", message=f"{subscription.label} 的{kind}数据获取已恢复。",
                 priority=3, tags=("white_check_mark",), click_url=click_url,
@@ -410,7 +410,7 @@ class SQLiteWeather:
                     label = "降雪" if phase == "snow" else "降雨"
                     minutes = max(0, round((start - now) / 300) * 5)
                     queued += int(self.database._insert_alert(AlertCandidate(
-                        rule_id="weather.nowcast",
+                        rule_id="weather.nowcast", category="weather",
                         dedupe_key=f"weather:{subscription.id}:nowcast:{phase}:{now // (4 * 3600)}",
                         title=f"短时{label}预报 · {subscription.label}",
                         message=(f"和风天气临近预报显示未来两小时有{label}，最早约 {minutes} 分钟后开始。"
@@ -490,7 +490,7 @@ class SQLiteWeather:
                                "经 QWeather 转发；数据可能延迟，请以发布机构最新公告为准。\n"
                                "https://developer.qweather.com/attribution.html")
                     queued += int(self.database._insert_alert(AlertCandidate(
-                        rule_id="weather.official_warning",
+                        rule_id="weather.official_warning", category="weather",
                         dedupe_key=f"weather:{subscription.id}:official:{alert.alert_id}",
                         title=("官方天气预警取消 · " if cancelled else "官方天气预警 · ")
                               + (alert.headline or alert.kind or "天气") + f" · {subscription.label}",
@@ -536,7 +536,7 @@ class SQLiteWeather:
             alerted = bool(row["outage_alerted"])
             if failures >= 3 and not alerted:
                 self.database._insert_alert(AlertCandidate(
-                    rule_id="weather.qweather_outage",
+                    rule_id="weather.qweather_outage", category="system",
                     dedupe_key=f"weather:{subscription.id}:qweather:{kind}:outage:{row['last_success_at'] or 0}",
                     title=f"和风天气数据连续获取失败 · {subscription.label}",
                     message=f"{subscription.label} 的{kind}接口已连续 {failures} 次失败；相应天气提醒可能延迟。",

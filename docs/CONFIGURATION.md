@@ -7,7 +7,7 @@ Configuration has three layers:
 1. `/etc/argus/config.toml` contains host-level paths, listener addresses,
    notifier endpoint, and bootstrap settings.
 2. The active immutable `config_revisions` row in SQLite contains managed
-   sources, rules, analysis policy, and digest policy. It is the authority after
+   sources, rules, analysis policy, digest policy and notification routing. It is the authority after
    the one-time legacy JSON import.
 3. Root-owned environment files contain secret values. Configuration contains
    only the environment-variable names.
@@ -18,6 +18,16 @@ status 75, and systemd restarts it with the new validated snapshot. Rollback
 creates another revision; it never edits history.
 
 ## Feature switches
+
+- `notifications.routes`: news/weather/reminders/system map to destination IDs;
+  `null` mutes newly generated notifications of that category, not collection.
+- `notifications.destinations`: ID, provisioned ntfy topic, display label and
+  notes; topics and IDs must be unique. Referenced entries cannot be deleted.
+- `notifications.fallback`: required destination ID for future/unclassified
+  categories. Severity remains the message priority, not a routing category.
+- `ntfy.allowed_topics`: root-controlled exact publisher capabilities. The
+  application cannot change ntfy ACLs; provision matching write-only permissions
+  first. The default topic must be in this list. See `NOTIFICATIONS.md`.
 
 - `[digest].enabled`: daily digest scheduler.
 - `[digest].api_summary`: optional remote AI synthesis after deterministic

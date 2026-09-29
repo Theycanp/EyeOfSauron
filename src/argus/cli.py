@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
@@ -250,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
                 {source.id for source in base_config.sources},
                 {rule.id for rule in base_config.rules},
                 database,
+                notification_topics=base_config.ntfy.allowed_topics,
             )
             active_revision = database.get_active_config_revision()
             config = (
@@ -260,6 +262,12 @@ def main(argv: list[str] | None = None) -> int:
                 if active_revision is not None
                 else base_config
             )
+            from .notifications import NotificationRoutingService, public_subscription_base_url
+            routing = NotificationRoutingService(
+                database, allowed_topics=base_config.ntfy.allowed_topics,
+                default_topic=base_config.ntfy.default_topic, base_policy=base_config.notifications,
+            )
+            database.configure_notification_router(routing)
             if arguments.command == "status":
                 _print_status(database.status(), arguments.json)
                 return 0
@@ -288,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
                         60, config.service.heartbeat_interval_seconds * 4
                     ),
                     notification_topic=config.ntfy.default_topic,
+                    notification_routing=routing,
+                    notification_base_url=public_subscription_base_url(os.environ.get(config.ntfy.base_url_env, "")),
                 )
                 return 0
 

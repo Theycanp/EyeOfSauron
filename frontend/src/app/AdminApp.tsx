@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BellRing, CircleAlert, CloudSun, FileText, Gauge, Inbox, LayoutDashboard, LockKeyhole, LogOut, Menu, Moon, Newspaper, Radar, RefreshCw, Settings2, ShieldCheck, Sun, UserRoundCog, X } from 'lucide-react'
+import { BellRing, CircleAlert, CloudSun, FileText, Gauge, Inbox, LayoutDashboard, LockKeyhole, LogOut, Menu, Moon, Newspaper, Radar, RefreshCw, Send, Settings2, ShieldCheck, Sun, UserRoundCog, X } from 'lucide-react'
 import { AdminApi, ApiError } from '../shared/api'
 import type { AdminIdentity, AdminResourceName, AnalysisConfig, ConfigRevision, DigestConfig, ManagedSource, NewsCatalogEntry, NewsCatalogFeed, OutboxAlert, Reminder, SourceKind, SourceQualityProfile } from '../shared/types'
 import { deriveHealth, formatDate } from '../shared/utils'
@@ -16,6 +16,7 @@ import { DigestsPage } from '../features/digests/DigestsPage'
 import { DailyEventsPage } from '../features/daily-events/DailyEventsPage'
 import { OutboxPanel } from '../features/settings/OutboxPanel'
 import { SettingsPage } from '../features/settings/SettingsPage'
+import { NotificationTopicsPanel } from '../features/settings/NotificationTopicsPanel'
 import { SourceQualityPage } from '../features/source-quality/SourceQualityPage'
 import { UsersPage } from '../features/users/UsersPage'
 import { WeatherPage } from '../features/weather/WeatherPage'
@@ -30,6 +31,7 @@ const pages = [
   { id: 'digests', label: '日报', subtitle: '阅读每日汇总的重要信息', icon: FileText },
   { id: 'source-quality', label: '信源质量', subtitle: '长期校准来源可信度', icon: Gauge },
   { id: 'users', label: '用户与权限', subtitle: '管理后台访问和登录会话', icon: UserRoundCog },
+  { id: 'notifications', label: '通知管理', subtitle: '主题、订阅与消息路由', icon: Send },
   { id: 'settings', label: '设置', subtitle: '通知渠道、运行事实和高级选项', icon: Settings2 },
 ] as const
 
@@ -56,7 +58,11 @@ export default function AdminApp() {
   useEffect(() => {
     const restore = () => setPage(pageFromLocation())
     window.addEventListener('popstate', restore)
-    return () => window.removeEventListener('popstate', restore)
+    window.addEventListener('hashchange', restore)
+    return () => {
+      window.removeEventListener('popstate', restore)
+      window.removeEventListener('hashchange', restore)
+    }
   }, [])
   const [theme, setTheme] = useState(() => localStorage.getItem('eosTheme') || (window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
@@ -513,6 +519,7 @@ export default function AdminApp() {
         {page === 'overview' && <OverviewPage health={health} pending={pending} observations={Number(status.observations || 0)} sourceStates={sourceStates} managedSources={managedSources} incidents={incidents} reminders={reminders} go={(value) => go(value as PageId)} onCreateReminder={() => openReminder()} />}
         {page === 'reminders' && <RemindersPage api={api} reminders={reminders} total={resources.reminders.data?.pagination?.total} busy={busy || !can('reminders:write')} onOpen={openReminder} onToggle={(item) => { void toggleReminder(item) }} onDelete={deleteReminder} acknowledgementId={Number(new URLSearchParams(window.location.hash.split('?')[1] || '').get('occurrence')) || null} acknowledgementBusy={busy || !can('reminders:write')} onAcknowledge={(id) => { void acknowledgeReminder(id) }} />}
         {page === 'weather' && <WeatherPage api={api} canWrite={can('settings:write')} onUnauthorized={logout} />}
+        {page === 'notifications' && <NotificationTopicsPanel api={api} canWrite={can('settings:write')} onUnauthorized={logout} onSaved={() => { void refresh(true) }} />}
         {page === 'sources' && <SourcesPage api={api} sources={managedSources} sourceStates={sourceStates} busy={busy || !can('sources:write')} query={sourceQuery} onQuery={setSourceQuery} onCreate={openSource} catalog={newsCatalog} catalogError={resources.newsCatalog.error} onCatalogFeed={prepareCatalogFeed} onEdit={editSource} onToggle={(source) => { void toggleSource(source) }} onDelete={deleteSource} />}
         {page === 'events' && <EventsPage api={api} onUnauthorized={logout} initialAlertId={/^\/events\/([1-9]\d*)$/.exec(window.location.pathname)?.[1]} incidents={incidents} managedSources={managedSources} total={resources.incidents.data?.pagination?.total} health={health} openCount={openIncidents} canCreate={can('events:write')} onCreated={() => { void refresh(true) }} notify={notify} />}
         {page === 'daily-events' && <DailyEventsPage api={api} onUnauthorized={logout} canWrite={can('events:write')} />}

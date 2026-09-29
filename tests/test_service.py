@@ -501,7 +501,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await service.poll_source_once(self.source.id))
         self.assertTrue(await service.deliver_one())
         self.assertEqual(1, len(notifier.sent))
-        self.assertEqual("eos", notifier.sent[0].topic)
+        self.assertEqual("eos-news", notifier.sent[0].topic)
 
     async def test_poll_attaches_configured_information_metadata(self) -> None:
         self.source = replace(

@@ -6,7 +6,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from argus.database import Database
+from argus.database import SCHEMA_VERSION, Database
 from argus.event_facts import FACT_EXTRACTOR_VERSION
 
 
@@ -33,7 +33,7 @@ class Schema28ControlsTests(unittest.TestCase):
 
             with ThreadPoolExecutor(max_workers=6) as workers:
                 results = list(workers.map(open_database, range(12)))
-            self.assertEqual([(28, 6)] * 12, results)
+            self.assertEqual([(SCHEMA_VERSION, 6)] * 12, results)
             database = Database(path)
             try:
                 self.assertEqual("ok", database.connection.execute("PRAGMA integrity_check").fetchone()[0])

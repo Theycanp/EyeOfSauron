@@ -69,7 +69,7 @@ export function SettingsPage({ status, health, revisions, revisionTotal, busy, a
   return <>
     <div className="page-actions"><div><h2>设置</h2><p>控制分析策略、来源分层和通知基础设施。</p></div></div>
     <section className="settings-grid">
-      <article className="settings-card"><div className="settings-icon"><Send size={21} /></div><div><h3>通知渠道</h3><p>ntfy / <strong>eos</strong>；待发 {Number(status.outbox?.pending || 0)} 条，重试 {retrying} 条，死信 {deadLetters} 条。</p><span className={`status-pill ${deliveryTone}`}>{deliveryLabel}</span></div></article>
+      <article className="settings-card"><div className="settings-icon"><Send size={21} /></div><div><h3>通知渠道</h3><p>ntfy；待发 {Number(status.outbox?.pending || 0)} 条，重试 {retrying} 条，死信 {deadLetters} 条。</p><span className={`status-pill ${deliveryTone}`}>{deliveryLabel}</span></div></article>
       <article className="settings-card"><div className="settings-icon"><Database size={21} /></div><div><h3>状态数据库</h3><p>SQLite schema {status.database_schema || '—'}，共 {Number(status.observations || 0).toLocaleString('zh-CN')} 条观察记录。</p><span className="status-pill positive">通过仓储接口访问</span></div></article>
       <article className="settings-card"><div className="settings-icon"><ShieldCheck size={21} /></div><div><h3>访问保护</h3><p>管理端点由服务认证保护，凭据只保存在当前会话。</p><span className="status-pill positive">已认证</span></div></article>
       <article className="settings-card config-state-card"><div className="settings-icon"><History size={21} /></div><div><h3>配置应用状态</h3><p>期望修订 {desired ?? '—'}；引擎已应用 {applied ?? '后端未报告'}。</p><span className={`status-pill ${health.configPending ? 'warning' : applied !== null ? 'positive' : 'neutral'}`}>{health.configPending ? '等待 Argus 应用' : applied !== null ? '已验证应用' : '无法验证'}</span></div></article>

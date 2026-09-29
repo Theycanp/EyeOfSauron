@@ -505,8 +505,35 @@ export interface AdminStatus extends JsonRecord {
   heartbeat_at?: number | null
 }
 
+export type NotificationCategory = 'news' | 'weather' | 'reminders' | 'system'
+
+export interface NotificationDestination {
+  id: string
+  topic: string
+  label: string
+  description: string
+}
+
+export interface NotificationPolicy {
+  destinations: NotificationDestination[]
+  routes: Record<NotificationCategory, string | null>
+  fallback: string
+}
+
+export interface NotificationSettings {
+  policy: NotificationPolicy
+  allowed_topics: string[]
+  revision: number
+  base_url: string
+  topics: Array<{
+    topic: string
+    counts: Record<string, number>
+    latest: { id: number; status: string; created_at: number; delivered_at: number | null; last_error: string | null } | null
+  }>
+}
+
 export interface ConfigResponse {
-  managed: { sources?: ManagedSource[]; rules?: ManagedRule[]; analysis?: AnalysisConfig; digest?: DigestConfig }
+  managed: { sources?: ManagedSource[]; rules?: ManagedRule[]; analysis?: AnalysisConfig; digest?: DigestConfig; notifications?: NotificationPolicy }
   revision?: { revision?: number; updated_at?: number | null; updated_by?: string | null; reason?: string | null }
   status?: AdminStatus
 }

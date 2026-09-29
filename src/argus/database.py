@@ -60,6 +60,7 @@ from .models import (
     SourceState,
 )
 from .rules import RuleSet
+from .notifications import NotificationRouter, notification_test_candidate
 from .reminders import ReminderError, ReminderSpec, next_daily_occurrence
 from .source_quality import SourceQualityPolicy, calculate_quality
 from .sqlite_event_workspace import SQLiteEventWorkspace, migrate_event_workspace
@@ -67,7 +68,7 @@ from .util import sanitize_error, to_epoch
 from .persistence import RevisionConflictError, SQLiteUnitOfWork
 from .prompts import BUILTIN_PROMPTS, BUILTIN_PROMPT_VERSIONS, PromptTemplate, TRIAGE_V1
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 
 _DIGEST_PROVIDER_TRACE_FIELDS = frozenset({
@@ -131,6 +132,7 @@ def read_active_config(path: Path) -> dict[str, Any] | None:
 
 class Database:
     def __init__(self, path: Path) -> None:
+        self.notification_router: NotificationRouter | None = None
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         # Serialize the version read and the complete migration sequence. SQLite
@@ -1773,6 +1775,53 @@ class Database:
                 )
                 self.connection.execute("PRAGMA user_version=28")
             version = 28
+        if version < 29:
+            with self.unit_of_work():
+                columns = {row[1] for row in self.connection.execute("PRAGMA table_info(alerts)")}
+                if "notification_category" not in columns:
+                    self.connection.execute(
+                        "ALTER TABLE alerts ADD COLUMN notification_category TEXT NOT NULL DEFAULT 'news' "
+                        "CHECK(notification_category IN ('news','weather','reminders','system'))"
+                    )
+                    self.connection.execute("""
+                    UPDATE alerts SET notification_category = CASE
+                        WHEN rule_id LIKE 'system.%' OR rule_id = 'digest.ai_failure'
+                          OR rule_id IN ('weather.provider_outage','weather.provider_recovered',
+                                         'weather.qweather_outage','weather.qweather_recovered') THEN 'system'
+                        WHEN rule_id LIKE 'reminder.%' THEN 'reminders'
+                        WHEN rule_id LIKE 'weather.%' THEN 'weather'
+                        ELSE 'news' END
+                    """)
+                if "routing_revision" not in columns:
+                    self.connection.execute("ALTER TABLE alerts ADD COLUMN routing_revision INTEGER")
+                self.connection.execute("CREATE INDEX IF NOT EXISTS alerts_topic_id_idx ON alerts(topic,id)")
+                self.connection.execute("PRAGMA user_version=29")
+
+    def configure_notification_router(self, router: NotificationRouter) -> None:
+        self.notification_router = router
+
+    def notification_topic_status(self, topics: tuple[str, ...]) -> list[dict[str, Any]]:
+        result = []
+        for topic in topics:
+            latest = self.connection.execute(
+                "SELECT id,status,created_at,delivered_at,last_error FROM alerts WHERE topic=? ORDER BY id DESC LIMIT 1",
+                (topic,),
+            ).fetchone()
+            counts = self.connection.execute(
+                "SELECT status,COUNT(*) AS total FROM alerts WHERE topic=? GROUP BY status", (topic,),
+            ).fetchall()
+            result.append({"topic": topic, "latest": dict(latest) if latest else None,
+                           "counts": {row["status"]: row["total"] for row in counts}})
+        return result
+
+    def enqueue_notification_test(self, topic: str, actor: str, now: int) -> int:
+        candidate = notification_test_candidate(topic, actor, now)
+        with self.unit_of_work():
+            if not self._insert_alert(candidate, None, now):
+                raise ValueError("notification test was not enqueued")
+            row = self.connection.execute("SELECT id FROM alerts WHERE dedupe_key=?", (candidate.dedupe_key,)).fetchone()
+            assert row is not None
+            return int(row["id"])
 
     def record_digest_preparation_failure(
         self, digest_key: str, *, stage: str, error: BaseException | str, now: int,
@@ -2500,9 +2549,18 @@ class Database:
         reminder_id: str | None = None,
         reminder_occurrence_id: int | None = None,
     ) -> bool:
+        routing_revision = None
+        muted = False
+        if self.notification_router is not None:
+            route = self.notification_router.resolve(candidate)
+            candidate = replace(candidate, topic=route.topic, category=route.category)
+            routing_revision = route.revision
+            muted = route.topic is None
         incident_id: int | None = None
         if candidate.incident_key:
             incident_id = self._upsert_incident(candidate, observation_id, now)
+            if muted:
+                return False
             semantic_news = candidate.incident_kind == "event" and candidate.incident_key.startswith("news-event:")
             persistent_weather = candidate.incident_kind == "event" and candidate.incident_key.startswith("weather-event:")
             if semantic_news:
@@ -2539,13 +2597,15 @@ class Database:
                 ).fetchone()
                 if existing is not None and not candidate.recovery:
                     return False
+        if muted:
+            return False
         cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO alerts(
                 observation_id, incident_id, reminder_id, reminder_occurrence_id, rule_id, dedupe_key, topic, title, message,
                 priority, confidence, evidence_json, incident_key, tags_json, click_url,
-                status, next_attempt_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                status, next_attempt_at, created_at, notification_category, routing_revision
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
             """,
             (
                 observation_id,
@@ -2565,6 +2625,8 @@ class Database:
                 candidate.click_url,
                 now,
                 now,
+                candidate.category,
+                routing_revision,
             ),
         )
         return cursor.rowcount == 1
@@ -2730,7 +2792,7 @@ class Database:
             if state.outage_alerted:
                 outage_identity = state.outage_started_at or now
                 recovery = AlertCandidate(
-                    rule_id="system.source_recovery",
+                    rule_id="system.source_recovery", category="system",
                     dedupe_key=f"source-recovery:{source_id}:{outage_identity}",
                     title="Argus 数据源已恢复",
                     message=f"数据源 {source_id} 已恢复正常采集。",
@@ -2808,7 +2870,7 @@ class Database:
             alert_inserted = False
             if should_alert:
                 candidate = AlertCandidate(
-                    rule_id="system.source_failure",
+                    rule_id="system.source_failure", category="system",
                     dedupe_key=f"source-failure:{source_id}:{outage_started}",
                     title="Argus 数据源异常",
                     message=(
@@ -2857,7 +2919,7 @@ class Database:
 
     def enqueue_test_alert(self, topic: str, now: int) -> bool:
         candidate = AlertCandidate(
-            rule_id="system.test",
+            rule_id="system.test", category="system",
             dedupe_key=f"system-test:{now}",
             title="Argus 测试通知",
             message="采集、规则、SQLite outbox 与 ntfy 通知链路已就绪。",
@@ -3220,7 +3282,7 @@ class Database:
                 assert occurrence is not None
                 occurrence_id = int(occurrence["id"])
                 candidate = AlertCandidate(
-                    rule_id="reminder.manual",
+                    rule_id="reminder.manual", category="reminders",
                     dedupe_key=f"reminder:{row['id']}:{scheduled_for}",
                     title=str(row["title"]),
                     message=str(row["message"]),
@@ -3282,7 +3344,7 @@ class Database:
                     continue
                 scheduled_for = int(occurrence["scheduled_for"])
                 candidate = AlertCandidate(
-                    rule_id="reminder.manual.repeat",
+                    rule_id="reminder.manual.repeat", category="reminders",
                     dedupe_key=f"reminder:{occurrence['reminder_id']}:{scheduled_for}:r{repeat_count}",
                     title=str(occurrence["title"]),
                     message=str(occurrence["message"]),
@@ -3370,6 +3432,8 @@ class Database:
             evidence=evidence,
             created_at=int(row["created_at"]),
             rule_id=str(row["rule_id"]),
+            category=str(row["notification_category"]),
+            routing_revision=row["routing_revision"],
         )
 
     def mark_delivered(self, alert_id: int, now: int) -> None:
@@ -3577,7 +3641,7 @@ class Database:
         row = self.connection.execute(
             """
             SELECT id, rule_id, observation_id, incident_id, reminder_id, reminder_occurrence_id,
-                   title, message, priority,
+                   title, message, priority, topic, notification_category, routing_revision,
                    confidence, evidence_json, tags_json, click_url, status,
                    created_at, delivered_at
             FROM alerts WHERE id = ?
@@ -5899,7 +5963,7 @@ class Database:
         if not digest_key or not 1 <= streak <= 10000 or not topic or now < 0:
             raise ValueError("digest failure notification request is invalid")
         candidate = AlertCandidate(
-            rule_id="digest.ai_failure",
+            rule_id="digest.ai_failure", category="system",
             dedupe_key=f"digest:ai-failure:{digest_key}:{streak}",
             title="日报 AI 连续生成失败",
             message=(

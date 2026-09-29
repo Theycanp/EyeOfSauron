@@ -25,6 +25,7 @@ Start here:
     boundaries, and acceptance criteria.
 12. `WEATHER.md` — local-weather source research, forecast validation, polling,
     notification state, operational limits, and official-warning gaps.
+13. `NOTIFICATIONS.md` — 消息分类、主题路由、后台管理、权限、迁移与回滚。
 
 Reference documents:
 

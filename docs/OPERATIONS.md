@@ -25,8 +25,9 @@ sudo -u argus env PYTHONPATH=/opt/eyeofsauron/current/src \
   /usr/bin/python3 -m argus --config /etc/argus/config.toml status
 ```
 
-The ntfy topic is `eos`. Subscribe to it on the existing ntfy server as
-the existing `joker` account. The service uses a separate write-only ntfy user;
+The ntfy topics are `eos-news`, `eos-weather`, `eos-reminders`, and `eos-system`.
+Subscribe to the desired topics on the existing ntfy server as the existing
+`joker` account. The service uses a separate write-only ntfy user;
 its token cannot subscribe or access other topics.
 
 Local weather is managed at `/#/weather` on the same public admin origin.
@@ -241,7 +242,7 @@ files from `src/argus/admin_web/`. Keep the admin listener loopback-only.
 The reminders panel writes directly to SQLite and does not require a service
 restart. It supports a specific future date/time, a relative countdown, and a
 daily time in an IANA timezone such as `Asia/Shanghai`. Reminder messages publish
-to the configured `eos` ntfy topic. API routes are `GET/POST
+to the configured reminder destination (normally `eos-reminders`). API routes are `GET/POST
 /api/reminders`, `GET/DELETE /api/reminders/<id>`, and `POST
 /api/reminders/<id>/enable|disable`. One-time reminders missed while the host is
 offline are sent after recovery; daily downtime is coalesced to one missed

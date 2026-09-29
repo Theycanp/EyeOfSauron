@@ -93,6 +93,14 @@ is not supported.
 
 ## Retention and backup
 
+Schema 29 adds typed `alerts.notification_category` and nullable
+`alerts.routing_revision`, plus a topic/id index. Existing destinations, dedupe
+keys, message bodies and delivery states are unchanged; recognizable historical
+rule families are classified, with unknown historical messages left as news and
+no fabricated routing revision. Notification routing is audited configuration,
+stored in immutable managed revisions rather than a separate policy authority.
+Rollback to schema-28 code requires its matching pre-release recovery point.
+
 Observations and delivered alerts are normally retained for 90 days; operational
 audit and configuration history have their own cleanup rules. Cleanup never
 removes an active outbox lease or current runtime state.
