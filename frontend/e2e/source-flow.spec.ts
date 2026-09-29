@@ -204,6 +204,53 @@ async function openSources(page: Page) {
   await page.getByRole('button', { name: '监测来源' }).click()
 }
 
+test('notification topics route, mute and test safely on desktop and mobile', async ({ page }, testInfo) => {
+  await mockAdminApi(page)
+  const destinations = [
+    { id: 'news', topic: 'eos-news', label: '新闻与日报', description: '' },
+    { id: 'weather', topic: 'eos-weather', label: '天气', description: '' },
+    { id: 'reminders', topic: 'eos-reminders', label: '提醒', description: '' },
+    { id: 'system', topic: 'eos-system', label: '系统运行', description: '' },
+  ]
+  let policy = { destinations, routes: { news: 'news', weather: 'weather' as string | null, reminders: 'reminders', system: 'system' }, fallback: 'news' }
+  let revision = 22
+  let tests = 0
+  await page.route('**/api/notifications', async route => {
+    if (route.request().method() === 'POST') {
+      expect(route.request().headers()['if-match']).toBe('"22"')
+      policy = route.request().postDataJSON() as typeof policy
+      revision += 1
+      await route.fulfill({ json: { revision, restart_required: false } })
+      return
+    }
+    await route.fulfill({ json: { policy, revision, allowed_topics: destinations.map(item => item.topic),
+      base_url: 'https://ntfy.example.com:10008', topics: destinations.map(item => ({ topic: item.topic, counts: { delivered: 3 },
+        latest: { id: 17, status: 'delivered', created_at: 1790668800, delivered_at: 1790668801, last_error: null } })) } })
+  })
+  await page.route('**/api/notifications/test', async route => {
+    expect(route.request().postDataJSON()).toEqual({ topic: 'eos-weather' })
+    tests += 1
+    await route.fulfill({ status: 202, json: { alert_id: 17, queued: true } })
+  })
+  await login(page)
+  const menu = page.getByRole('button', { name: '打开导航' })
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('button', { name: '通知管理', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '通知主题与路由' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '删除 eos-weather 目的地' })).toBeDisabled()
+  await expect(page.getByRole('link', { name: '订阅' }).first()).toHaveAttribute('href', 'https://ntfy.example.com:10008/eos-news')
+  await page.getByLabel('天气目的地').selectOption('')
+  await page.getByRole('button', { name: '保存通知设置' }).click()
+  await expect(page.getByRole('status')).toHaveText('通知设置已保存')
+  expect(policy.routes.weather).toBeNull()
+  await page.getByRole('button', { name: '发送 eos-weather 测试' }).click()
+  await expect(page.getByRole('link', { name: /查看测试消息/ })).toHaveAttribute('href', '/events/17')
+  expect(tests).toBe(1)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.evaluate(() => window.scrollTo(0, 0))
+  await page.screenshot({ path: testInfo.outputPath('notification-topics.png'), fullPage: true })
+})
+
 test('weather budgets and fact retries fit desktop and mobile', async ({ page }, testInfo) => {
   await mockAdminApi(page)
   const now = Math.floor(Date.now() / 1000)

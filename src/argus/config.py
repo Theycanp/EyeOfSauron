@@ -17,6 +17,7 @@ from .providers import (
 )
 from .safe_regex import UnsafeRegexError, compile_safe_regex
 from .regions import normalize_region
+from .notifications import NotificationPolicy, parse_notification_policy, validate_notification_topics
 
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
@@ -56,6 +57,7 @@ class NtfyConfig:
     token_env: str
     default_topic: str
     timeout_seconds: int
+    allowed_topics: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +178,7 @@ class AppConfig:
     admin: AdminConfig = AdminConfig(False, "127.0.0.1", 18080, None)
     analysis: AnalysisConfig = AnalysisConfig()
     digest: DigestConfig = DigestConfig()
+    notifications: NotificationPolicy | None = None
 
 
 def _mapping(value: Any, location: str) -> Mapping[str, Any]:
@@ -275,7 +278,7 @@ def _parse_service(raw: Any) -> ServiceConfig:
 
 def _parse_ntfy(raw: Any) -> NtfyConfig:
     data = _mapping(raw, "ntfy")
-    allowed = {"enabled", "base_url_env", "token_env", "default_topic", "timeout_seconds"}
+    allowed = {"enabled", "base_url_env", "token_env", "default_topic", "timeout_seconds", "allowed_topics"}
     _reject_unknown(data, allowed, "ntfy")
     base_env = _required(data, "base_url_env", str, "ntfy")
     token_env = _required(data, "token_env", str, "ntfy")
@@ -284,12 +287,18 @@ def _parse_ntfy(raw: Any) -> NtfyConfig:
         raise ConfigError("ntfy environment variable names are invalid")
     if not _TOPIC_RE.fullmatch(topic):
         raise ConfigError("ntfy.default_topic is invalid")
+    topics = data.get("allowed_topics", [topic])
+    if (not isinstance(topics, list) or not 1 <= len(topics) <= 16
+            or any(not isinstance(item, str) or not _TOPIC_RE.fullmatch(item) for item in topics)
+            or len(set(topics)) != len(topics) or topic not in topics):
+        raise ConfigError("ntfy.allowed_topics must be unique valid topics and include default_topic")
     return NtfyConfig(
         enabled=_required(data, "enabled", bool, "ntfy"),
         base_url_env=base_env,
         token_env=token_env,
         default_topic=topic,
         timeout_seconds=_bounded_int(data, "timeout_seconds", "ntfy", 1, 120),
+        allowed_topics=tuple(topics),
     )
 
 
@@ -652,7 +661,7 @@ def load_config(
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"cannot load configuration: {exc}") from exc
 
-    _reject_unknown(data, {"schema_version", "service", "ntfy", "sources", "rules", "admin", "analysis", "digest"}, "top-level")
+    _reject_unknown(data, {"schema_version", "service", "ntfy", "sources", "rules", "admin", "analysis", "digest", "notifications"}, "top-level")
     version = _required(data, "schema_version", int, "top-level")
     if version not in {1, 2}:
         raise ConfigError(f"unsupported schema_version: {version}")
@@ -667,6 +676,7 @@ def load_config(
     rule_rows = list(raw_rules)
     analysis_raw = data.get("analysis")
     digest_raw = data.get("digest")
+    notifications_raw = data.get("notifications")
     base_service = _parse_service(data.get("service"))
     managed_path = base_service.managed_sources_path
     managed: Mapping[str, Any] | None = None
@@ -694,17 +704,19 @@ def load_config(
         if managed is not None and not isinstance(managed, Mapping):
             raise ConfigError("managed configuration must be an object")
         if isinstance(managed.get("sources", []), list):
-            overrides = {item.get("id"): item for item in managed["sources"] if isinstance(item, Mapping)}
+            overrides = {item.get("id"): item for item in managed.get("sources", []) if isinstance(item, Mapping)}
             source_rows = [overrides.pop(item.get("id"), item) if isinstance(item, Mapping) else item for item in source_rows]
             source_rows.extend(overrides.values())
         if isinstance(managed.get("rules", []), list):
-            overrides = {item.get("id"): item for item in managed["rules"] if isinstance(item, Mapping)}
+            overrides = {item.get("id"): item for item in managed.get("rules", []) if isinstance(item, Mapping)}
             rule_rows = [overrides.pop(item.get("id"), item) if isinstance(item, Mapping) else item for item in rule_rows]
             rule_rows.extend(overrides.values())
         if isinstance(managed.get("analysis"), Mapping):
             analysis_raw = managed["analysis"]
         if isinstance(managed.get("digest"), Mapping):
             digest_raw = managed["digest"]
+        if "notifications" in managed:
+            notifications_raw = managed["notifications"]
     sources = tuple(
         _parse_source(source, index, provider_registry=provider_registry)
         for index, source in enumerate(source_rows)
@@ -720,13 +732,23 @@ def load_config(
     if unknown_rule_sources:
         raise ConfigError(f"rules reference unknown sources: {', '.join(unknown_rule_sources)}")
 
+    ntfy = _parse_ntfy(data.get("ntfy"))
+    try:
+        notifications = parse_notification_policy(notifications_raw) if notifications_raw is not None else None
+        if notifications is not None:
+            validate_notification_topics(notifications, ntfy.allowed_topics)
+        if any(rule.topic is not None and rule.topic not in ntfy.allowed_topics for rule in rules):
+            raise ValueError("rule topic is not provisioned for this publisher")
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     return AppConfig(
         schema_version=version,
         service=base_service,
-        ntfy=_parse_ntfy(data.get("ntfy")),
+        ntfy=ntfy,
         sources=sources,
         rules=rules,
         admin=_parse_admin(data.get("admin")),
         analysis=_parse_analysis(analysis_raw),
         digest=_parse_digest(digest_raw),
+        notifications=notifications,
     )

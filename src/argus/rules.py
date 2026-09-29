@@ -95,11 +95,13 @@ class WeightedTextRule:
             tags=self.config.tags,
             click_url=observation.url,
             topic=self.config.topic or self.default_topic,
+            topic_override=self.config.topic is not None,
             confidence=max(0.0, min(1.0, score / max(self.config.threshold * 2, 1.0))),
             evidence=tuple(dict.fromkeys(reasons)),
             incident_key=incident_key,
             incident_kind="stateful" if stateful else "event",
             recovery=stateful and bool(attributes.get("recovery")),
+            category="system" if attributes.get("check") else "news",
         )
 
 

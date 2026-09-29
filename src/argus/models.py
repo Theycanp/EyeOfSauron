@@ -58,6 +58,8 @@ class AlertCandidate:
     incident_key: str | None = None
     incident_kind: str = "event"
     recovery: bool = False
+    category: str = "news"
+    topic_override: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +110,8 @@ class OutboxMessage:
     confidence: float = 0.5
     evidence: tuple[str, ...] = ()
     rule_id: str = ""
+    category: str = "news"
+    routing_revision: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

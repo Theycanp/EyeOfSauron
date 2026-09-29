@@ -1,0 +1,23 @@
+.notification-topics { min-width: 0; }
+.notification-body { padding: 20px; }
+.notification-body label { display: grid; gap: 6px; min-width: 0; color: var(--text-soft); font-size: 12px; font-weight: 600; }
+.notification-body label > span { color: var(--text); }
+.notification-body > p { margin: 0 0 18px; font-size: 13px; }
+.notification-route-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.notification-route-grid label > span { display: flex; align-items: center; gap: 8px; }
+.notification-fallback { display: block; margin: 18px 0; max-width: 480px; }
+.notification-destination { padding: 18px 0; border-top: 1px solid var(--border); min-width: 0; }
+.notification-topic-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.notification-topic-heading strong { overflow-wrap: anywhere; }
+.notification-topic-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+.notification-topic-footer > div:first-child { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.notification-topic-footer small { color: var(--text-soft); }
+.notification-add { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+.notification-add select { min-width: 0; flex: 1; }
+.notification-add .button { flex-shrink: 0; }
+.notification-test-link { display: inline-flex; gap: 4px; align-items: center; margin-left: 12px; }
+@media (max-width: 640px) {
+  .notification-route-grid { grid-template-columns: minmax(0, 1fr); }
+  .notification-body { padding: 16px; }
+  .notification-topic-footer { align-items: flex-start; flex-direction: column; }
+}

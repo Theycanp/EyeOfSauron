@@ -13,6 +13,8 @@ import type {
   ManualEventDraft,
   MutationResponse,
   NewsCatalogResponse,
+  NotificationPolicy,
+  NotificationSettings,
   NewsEventResponse,
   NewsEventSort,
   OutboxResponse,
@@ -163,6 +165,13 @@ export class AdminApi {
   }
 
   config(): Promise<ConfigResponse> { return this.request('/api/config') }
+  notifications(): Promise<NotificationSettings> { return this.request('/api/notifications') }
+  saveNotifications(policy: NotificationPolicy, revision: number): Promise<MutationResponse> {
+    return this.configMutate('/api/notifications', 'POST', revision, policy)
+  }
+  testNotificationTopic(topic: string): Promise<{ alert_id: number; queued: boolean }> {
+    return this.request('/api/notifications/test', { method: 'POST', body: JSON.stringify({ topic }) })
+  }
   session(): Promise<AuthResponse> { return this.request('/api/auth/session') }
   login(username: string, password: string): Promise<AuthResponse> {
     return this.request('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) })

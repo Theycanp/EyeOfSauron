@@ -127,7 +127,7 @@ h1, h2, h3, p { margin-top: 0; }
 
 .brand-mark.large { width: 48px; height: 48px; border-radius: 15px; }
 
-.main-nav { display: grid; gap: 5px; margin-top: 28px; }
+.main-nav { display: grid; gap: 5px; margin: 28px 0 12px; min-height: 0; overflow-y: auto; flex: 1; align-content: start; }
 
 .main-nav button {
   width: 100%;
@@ -153,6 +153,7 @@ h1, h2, h3, p { margin-top: 0; }
 .main-nav button.active .nav-chevron { opacity: .7; transform: none; }
 
 .sidebar-health {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 11px;
@@ -171,6 +172,7 @@ h1, h2, h3, p { margin-top: 0; }
 .health-dot.warning { background: #f0b55f; box-shadow: 0 0 0 4px rgba(240, 181, 95, .12); }
 
 .sidebar-logout {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -808,7 +810,7 @@ input:disabled { background: var(--surface-soft); color: var(--text-faint); }
 .brand { padding: 0; }
 .brand-copy strong { display: block; color: #fff8f2; font-size: 15px; font-weight: 680; letter-spacing: .015em; }
 .brand-copy span { display: block; color: #b49a90; font-size: 11px; letter-spacing: .04em; }
-.sidebar-brand { min-height: 46px; display: flex; align-items: center; padding: 0 9px; }
+.sidebar-brand { min-height: 46px; flex-shrink: 0; display: flex; align-items: center; padding: 0 9px; }
 .sidebar-brand .mobile-close { margin-left: auto; }
 .eye-mark { flex: 0 0 auto; display: inline-grid; place-items: center; border-radius: 14px; background: radial-gradient(circle at 50% 48%, rgba(255, 167, 86, .18), rgba(125, 42, 25, .08) 55%, transparent 72%); filter: drop-shadow(0 8px 18px rgba(196, 83, 35, .22)); }
 .eye-mark.small { width: 34px; height: 34px; }

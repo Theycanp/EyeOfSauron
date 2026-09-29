@@ -30,7 +30,7 @@ export function RemindersPage({ reminders, total, busy, onOpen, onToggle, onDele
   return <>
     <div className="page-actions"><div><h2>定时提醒</h2><p>保存后立即生效，不需要重启服务。</p></div><button className="button primary" onClick={() => onOpen()}><Plus size={18} />新建提醒</button></div>
     {acknowledgementId && <ReminderOccurrenceNotice key={acknowledgementId} api={api} id={acknowledgementId} busy={acknowledgementBusy} onAcknowledge={onAcknowledge} />}
-    <div className="notice-card"><Send size={19} /><div><strong>通知渠道：ntfy / eos</strong><span>所有已经订阅 eos 主题的客户端都会收到。</span></div></div>
+    <div className="notice-card"><Send size={19} /><div><strong>通知渠道：ntfy</strong><a href="/#/notifications">通知主题与路由</a></div></div>
     <div className="filter-row"><div className="segmented" role="group" aria-label="提醒状态筛选">
       {([['active', '运行中'], ['paused', '已暂停'], ['completed', '已完成'], ['all', '全部']] as const).map(([value, label]) => <button key={value} aria-pressed={filter === value} className={filter === value ? 'active' : ''} onClick={() => { setFilter(value); setPage(1) }}>{label}</button>)}
     </div><span className="result-count">{filtered.length} 条</span></div>

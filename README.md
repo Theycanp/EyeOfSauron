@@ -36,7 +36,8 @@ source health.
   timeouts, and a size cap.
 - Source failures alert only after a threshold; recovery is also reported.
 - The service runs as a dedicated unprivileged account with systemd hardening.
-- Its ntfy identity has write-only access to the single `eos` topic.
+- Its ntfy identity has exact write-only access to managed notification topics;
+  news, weather, reminders and operational alerts have separate default topics.
 - No secret is stored in this repository, SQLite, or application logs.
 - Daily digests are clustered across sources, versioned, and published through
   the same durable notification outbox.
@@ -102,7 +103,8 @@ newly delivered notifications; previously delivered ntfy messages are immutable.
 - **EyeOfSauron** is the product and whole system; **EOS** is its short name.
 - **Argus** is the core watcher engine, Python package, CLI, daemon, and service
   namespace (`argus`, `argus.service`, and `argus-admin.service`).
-- **eos** is the shared ntfy topic used by system events and manual reminders.
+- **eos-news**, **eos-weather**, **eos-reminders**, **eos-system** are the default
+  notification topics; routes and subscriptions are managed in the admin UI.
 
 Incidents have explicit semantics: ordinary news and one-off intelligence are
 stored as `event / recorded`; conditions that can clear, such as source, host,

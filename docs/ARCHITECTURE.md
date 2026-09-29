@@ -6,7 +6,12 @@ EyeOfSauron (EOS) is an event system, not a scraper dedicated to one website.
 Argus is its always-on watcher engine. Inputs produce immutable `Observation`
 records. Rules turn observations into
 `AlertCandidate` records. SQLite stores source cursors, deduplication state,
-rule output, and the notification outbox. Notifiers deliver outbox entries.
+rule output, and the notification outbox. A `NotificationRouter` port resolves
+message categories to authorized destinations inside the enqueue transaction;
+schema 29 preserves both category and configuration revision. Notifiers deliver
+the frozen outbox destination without reevaluating current routes. Routing policy
+uses the managed-configuration authority, never ntfy administration credentials.
+See `NOTIFICATIONS.md` for permissions and subscription migration.
 
 For multi-source intelligence, the durable direction is
 `Observation -> Event -> EventReport -> Claim/Timeline`. An event is a stable

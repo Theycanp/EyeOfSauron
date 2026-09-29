@@ -21,8 +21,38 @@ public_base_url = "https://eos.example.com"
 enabled = false
 base_url_env = "NTFY_BASE_URL"
 token_env = "NTFY_TOKEN"
-default_topic = "eos"
+default_topic = "eos-news"
+allowed_topics = ["eos-news", "eos-weather", "eos-reminders", "eos-system"]
 timeout_seconds = 15
+
+[notifications]
+fallback = "news"
+
+[notifications.routes]
+news = "news"
+weather = "weather"
+reminders = "reminders"
+system = "system"
+
+[[notifications.destinations]]
+id = "news"
+topic = "eos-news"
+label = "News and digests"
+
+[[notifications.destinations]]
+id = "weather"
+topic = "eos-weather"
+label = "Weather"
+
+[[notifications.destinations]]
+id = "reminders"
+topic = "eos-reminders"
+label = "Reminders"
+
+[[notifications.destinations]]
+id = "system"
+topic = "eos-system"
+label = "System operations"
 
 # Optional semantic enrichment. Disabled by default; deterministic triage and
 # existing notification rules continue to work without a model or API.

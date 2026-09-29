@@ -22,6 +22,9 @@ from .events import EventListItem, EventWorkspaceConflict, event_lifecycle
 from .event_review import event_match_evidence, event_quality
 from .manual_events import ManualEventError, parse_manual_event
 from .news_catalog import NEWS_SOURCE_CATALOG
+from .notifications import (
+    NotificationRoutingService, parse_notification_policy, validate_notification_topics,
+)
 from .open_meteo import OpenMeteoProvider, WeatherProviderError
 from .persistence import ControlPlaneRepository, ManagedConfigRepository, RevisionConflictError
 from .providers import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
@@ -75,6 +78,7 @@ class ManagedConfigStore:
         base_rule_ids: set[str] | None = None,
         database: ManagedConfigRepository | None = None,
         provider_registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
+        notification_topics: tuple[str, ...] | None = None,
     ) -> None:
         self.path = path
         self.base_source_ids = base_source_ids or set()
@@ -82,6 +86,7 @@ class ManagedConfigStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.database = database
         self.provider_registry = provider_registry
+        self.notification_topics = notification_topics
         self.history_path = self.path.with_name(self.path.name + ".revisions")
         self.history_path.mkdir(parents=True, exist_ok=True)
         try:
@@ -116,6 +121,8 @@ class ManagedConfigStore:
             payload["analysis"] = dict(envelope["analysis"])
         if isinstance(envelope.get("digest"), Mapping):
             payload["digest"] = dict(envelope["digest"])
+        if "notifications" in envelope:
+            payload["notifications"] = envelope["notifications"]
         self.validate(payload)
         revision = max(1, int(envelope.get("revision", 1)))
         self.database.record_config_revision(
@@ -148,6 +155,8 @@ class ManagedConfigStore:
             envelope["analysis"] = dict(data["analysis"])
         if isinstance(data.get("digest"), Mapping):
             envelope["digest"] = dict(data["digest"])
+        if "notifications" in data:
+            envelope["notifications"] = data["notifications"]
         payload = json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary.write_text(payload, encoding="utf-8")
@@ -170,6 +179,8 @@ class ManagedConfigStore:
             result["analysis"] = _public(dict(data["analysis"]))
         if isinstance(data.get("digest"), Mapping):
             result["digest"] = _public(dict(data["digest"]))
+        if "notifications" in data:
+            result["notifications"] = _public(data["notifications"])
         return result
 
     def metadata(self) -> dict[str, Any]:
@@ -218,6 +229,17 @@ class ManagedConfigStore:
             for index, item in enumerate(sources)
         )
         parsed_rules = tuple(_parse_rule(item, index) for index, item in enumerate(rules))
+        if self.notification_topics is not None and any(
+            rule.topic is not None and rule.topic not in self.notification_topics for rule in parsed_rules
+        ):
+            raise AdminError("rule topic is not provisioned for this publisher")
+        if "notifications" in data:
+            try:
+                policy = parse_notification_policy(data["notifications"])
+                if self.notification_topics is not None:
+                    validate_notification_topics(policy, self.notification_topics)
+            except ValueError as exc:
+                raise AdminError(str(exc)) from exc
         source_ids = self.base_source_ids | {source.id for source in parsed_sources}
         rule_ids = self.base_rule_ids | {rule.id for rule in parsed_rules}
         if len(source_ids) != len(self.base_source_ids) + len(parsed_sources):
@@ -245,7 +267,16 @@ class ManagedConfigStore:
             result["analysis"] = dict(payload["analysis"])
         if isinstance(payload.get("digest"), Mapping):
             result["digest"] = dict(payload["digest"])
+        if "notifications" in payload:
+            result["notifications"] = payload["notifications"]
         return result, revision
+
+    def set_notifications(
+        self, value: Mapping[str, Any], actor: str = "admin", *, expected_revision: int,
+    ) -> int:
+        current, _ = self._snapshot()
+        current["notifications"] = dict(value)
+        return self.write(current, actor, "notification routing update", expected_revision=expected_revision)
 
     def write(
         self,
@@ -476,7 +507,7 @@ class ManagedConfigStore:
         )
         return True
 
-    def read_revision(self, revision: int) -> dict[str, list[dict[str, Any]]]:
+    def read_revision(self, revision: int) -> dict[str, Any]:
         if revision == self.revision:
             return self.read()
         if self.database is not None:
@@ -487,6 +518,9 @@ class ManagedConfigStore:
             if not isinstance(data, Mapping):
                 raise AdminError("configuration revision payload is invalid")
             result = {"sources": data.get("sources", []), "rules": data.get("rules", [])}
+            for section in ("analysis", "digest", "notifications"):
+                if section in data:
+                    result[section] = data[section]
             self.validate(result)
             return result
         snapshot = self.history_path / f"{int(revision):08d}.json"
@@ -499,6 +533,9 @@ class ManagedConfigStore:
         if not isinstance(data, Mapping):
             raise AdminError("configuration revision must be an object")
         result = {"sources": data.get("sources", []), "rules": data.get("rules", [])}
+        for section in ("analysis", "digest", "notifications"):
+            if section in data:
+                result[section] = data[section]
         self.validate(result)
         return result
 
@@ -694,7 +731,9 @@ def make_handler(
     *,
     heartbeat_timeout_seconds: int = 90,
     provider_registry: ProviderRegistry | None = None,
-    notification_topic: str = "eos",
+    notification_topic: str = "eos-news",
+    notification_routing: NotificationRoutingService | None = None,
+    notification_base_url: str = "",
 ):
     registry = provider_registry or store.provider_registry
     authenticator = AdminAuth(database, auth_token)
@@ -913,6 +952,15 @@ def make_handler(
                     "revision": store.metadata(),
                     "status": status,
                 })
+                return
+            if path == "/api/notifications":
+                if notification_routing is None:
+                    self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "notification routing is not configured"})
+                    return
+                result = notification_routing.public()
+                result["base_url"] = notification_base_url
+                result["topics"] = database.notification_topic_status(notification_routing.allowed_topics)
+                self._json(HTTPStatus.OK, result)
                 return
             if path in {"/api/health", "/health"}:
                 health = self._health()
@@ -1331,6 +1379,25 @@ def make_handler(
                     return
                 expected_revision = self._expected_revision()
                 actor = self._actor()
+                if path == "/api/notifications":
+                    if notification_routing is None:
+                        raise AdminError("notification routing is not configured")
+                    if expected_revision is None:
+                        raise AdminError("If-Match is required for notification routing changes")
+                    policy = parse_notification_policy(data)
+                    validate_notification_topics(policy, notification_routing.allowed_topics)
+                    revision = store.set_notifications(data, actor, expected_revision=expected_revision)
+                    self._json(HTTPStatus.OK, {"revision": revision, "restart_required": False})
+                    return
+                if path == "/api/notifications/test":
+                    if notification_routing is None:
+                        raise AdminError("notification routing is not configured")
+                    topic = data.get("topic")
+                    if not isinstance(topic, str) or topic not in notification_routing.allowed_topics:
+                        raise AdminError("notification test topic is not provisioned")
+                    alert_id = database.enqueue_notification_test(topic, actor, int(time.time()))
+                    self._json(HTTPStatus.ACCEPTED, {"alert_id": alert_id, "queued": True})
+                    return
                 if path in {"/api/news-events/repair/preview", "/api/news-events/repair/apply"}:
                     action = data.get("action")
                     keys = data.get("event_keys")
@@ -1813,7 +1880,9 @@ def serve(
     environment: Mapping[str, str] | None = None,
     *,
     heartbeat_timeout_seconds: int = 90,
-    notification_topic: str = "eos",
+    notification_topic: str = "eos-news",
+    notification_routing: NotificationRoutingService | None = None,
+    notification_base_url: str = "",
 ) -> None:
     env = os.environ if environment is None else environment
     token = env.get(config.auth_token_env, "") if config.auth_token_env else None
@@ -1829,6 +1898,8 @@ def serve(
             token,
             heartbeat_timeout_seconds=heartbeat_timeout_seconds,
             notification_topic=notification_topic,
+            notification_routing=notification_routing,
+            notification_base_url=notification_base_url,
         ),
     )
     try:

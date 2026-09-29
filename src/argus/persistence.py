@@ -18,6 +18,7 @@ from .digest import (
     DigestRetryRepository,
 )
 from .models import FeedFetchResult, IngestReport, OutboxMessage, SourceState
+from .notifications import NotificationAdministrationRepository
 from .manual_events import ManualEventSpec
 from .reminders import ReminderSpec
 from .rules import RuleSet
@@ -237,6 +238,7 @@ class PromptRepository(Protocol):
 
 @runtime_checkable
 class ControlPlaneRepository(
+    NotificationAdministrationRepository,
     ManagedConfigRepository, PromptRepository, DigestReaderRepository,
     EventPageRepository, DigestRunRepository,
     EventRepository, EventEvidenceRepository, EventWorkspaceRepository, SourceHealthRepository,

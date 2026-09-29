@@ -5,6 +5,26 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-29
+
+### Added
+
+- Manage notification destinations, category routes, muting, subscription links,
+  delivery state and explicit topic tests in a desktop/mobile administration view.
+- Route news/digests, weather, reminders and system failures/recoveries centrally;
+  freeze the destination and configuration revision when enqueuing, not retrying.
+- Restrict administrator routing to root-provisioned, exact publisher topics;
+  the application never receives ntfy administrator or ACL-management credentials.
+- Add schema 29 notification category/revision fields and a guarded four-topic
+  activation tool; document subscription migration and schema/ACL rollback.
+
+### Fixed
+
+- Preserve analysis, digest and notification policy when reading and rolling back
+  historical managed revisions, including file-backed configuration snapshots.
+- Accept managed overrides containing policy sections without source/rule arrays.
+- Return destination, notification category and routing revision in saved details.
+
 ## [0.28.0] - 2026-09-29
 
 ### Added
