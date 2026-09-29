@@ -107,6 +107,7 @@ class OutboxMessage:
     created_at: int = 0
     confidence: float = 0.5
     evidence: tuple[str, ...] = ()
+    rule_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

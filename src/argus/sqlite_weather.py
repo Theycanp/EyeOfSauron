@@ -63,9 +63,9 @@ class SQLiteWeather:
         ).fetchone()
         latest = json.loads(row["latest_json"]) if row["latest_json"] else None
         if isinstance(latest, dict):
-            observed_at = latest.get("observed_at")
-            forecast_date = (datetime.fromtimestamp(observed_at, ZoneInfo(subscription.timezone))
-                             .strftime("%Y%m%d") if isinstance(observed_at, int) else None)
+            window_date_at = latest.get("window_start_at", latest.get("observed_at"))
+            forecast_date = (datetime.fromtimestamp(window_date_at, ZoneInfo(subscription.timezone))
+                             .strftime("%Y%m%d") if isinstance(window_date_at, int) else None)
             latest["is_today"] = forecast_date == datetime.fromtimestamp(
                 time.time(), ZoneInfo(subscription.timezone)).strftime("%Y%m%d")
             latest["air_quality"] = (dict(air_row) if air_row
@@ -296,9 +296,12 @@ class SQLiteWeather:
                 raise WeatherError("no fresh weather snapshot is available for today")
             message = "[测试通知] 今日天气快照\n"
             message += f"地点：{subscription.label}\n"
+            window_scope = ("今天00:00至明天06:00可用时段" if latest.get("window_start_at")
+                            else "今日")
+            rain_scope = "从现在至明天06:00预计" if latest.get("window_start_at") else "预计"
             message += (f"天气：{latest.get('condition', '暂无')}，当前 {latest.get('temperature_now', '—')}℃，"
-                        f"今日 {latest.get('low', '—')}~{latest.get('high', '—')}℃\n")
-            message += (f"降水 {latest.get('rain_mm', '—')} mm，最高概率 {latest.get('rain_probability', '—')}%，"
+                        f"{window_scope} {latest.get('low', '—')}~{latest.get('high', '—')}℃\n")
+            message += (f"{rain_scope}降水 {latest.get('rain_mm', '—')} mm，最高概率 {latest.get('rain_probability', '—')}%，"
                         f"阵风 {latest.get('wind_gust_kmh', '—')} km/h\n")
             message += (f"湿度 {latest.get('humidity', '—')}%，风 {latest.get('wind_speed_kmh', '—')} km/h "
                         f"{latest.get('wind_direction_name', '—')}\n")

@@ -16,6 +16,24 @@ const status: WeatherStatus = {
 }
 
 describe('WeatherPage', () => {
+  it('uses the saved timezone and window date while timezone edits are unsaved', async () => {
+    const start = 1790352000
+    const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
+      condition: '晴', low: 14, high: 20, rain_mm: 0, rain_probability: 0,
+      wind_gust_kmh: 12, temperature_now: 20, observed_at: start - 60,
+      is_today: true, window_start_at: start, window_end_at: start + 30 * 3600,
+      sunrise: start + 6 * 3600, sunset: start + 18 * 3600,
+    } }) } as unknown as AdminApi
+    const user = userEvent.setup()
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    expect(await screen.findByText('06:00 / 18:00')).toBeVisible()
+    expect(screen.getByText(/2026-09-26 ·/)).toBeVisible()
+    await user.clear(screen.getByLabelText('时区'))
+    await user.type(screen.getByLabelText('时区'), 'UTC')
+    expect(screen.getByText('06:00 / 18:00')).toBeVisible()
+    expect(screen.getByText(/2026-09-26 ·/)).toBeVisible()
+  })
+
   it('labels hourly fallback conditions as forecast and leaves unknown gusts blank', async () => {
     const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
       condition: '多云', low: 12, high: 25, rain_mm: 0, rain_probability: 0,
@@ -48,6 +66,43 @@ describe('WeatherPage', () => {
     expect(screen.getByRole('img', { name: '按小时显示降水量、雨雪类型与气温' })).toBeInTheDocument()
     expect(screen.getByText('最高 25°')).toBeInTheDocument()
     expect(screen.getByText('最低 12°')).toBeInTheDocument()
+  })
+
+  it('uses the rolling 24-hour range when hourly data crosses below today\'s low', async () => {
+    const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
+      condition: '晴', low: 16, high: 29, rain_mm: 0, rain_probability: 0,
+      wind_gust_kmh: 12, temperature_now: 20, observed_at: 1790395200, is_today: true,
+      hourly: [
+        { at: 1790395200, temperature: 20, precipitation: 0, rain_probability: 0, precipitation_type: 'none' },
+        { at: 1790431200, temperature: 14, precipitation: 0, rain_probability: 0, precipitation_type: 'none' },
+      ],
+    } }) } as unknown as AdminApi
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    expect(await screen.findByText(/未来24小时高低温/)).toBeInTheDocument()
+    expect(screen.getByText('最低 14°')).toBeInTheDocument()
+    expect(screen.getByText('最高 20°')).toBeInTheDocument()
+  })
+
+  it('keeps missing past hours blank in a partial midnight-to-six window', async () => {
+    const start = 1790352000
+    const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
+      condition: '晴', low: 14, high: 20, rain_mm: 2, rain_probability: 80,
+      wind_gust_kmh: 12, temperature_now: 20, observed_at: start + 7 * 3600,
+      is_today: true, window_start_at: start, window_end_at: start + 30 * 3600,
+      window_complete: false,
+      forecast_hours: [
+        { at: start + 7 * 3600, temperature: 20, precipitation: 0, rain_probability: 0 },
+        { at: start + 29 * 3600, temperature: 14, precipitation: 2, rain_probability: 80 },
+      ],
+    } }) } as unknown as AdminApi
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    expect(await screen.findByText('今天 00:00—明天 06:00')).toBeInTheDocument()
+    expect(screen.getByText(/可用时段高低温/)).toBeInTheDocument()
+    expect(screen.getByText(/空白时段表示未提供数据/)).toBeInTheDocument()
+    const chart = screen.getByRole('img', { name: '按小时显示降水量、雨雪类型与气温' })
+    const firstPoint = chart.querySelector('.temperature-point')
+    expect(Number(firstPoint?.getAttribute('cx'))).toBeGreaterThan(150)
+    expect(chart.querySelectorAll('.temperature-line')).toHaveLength(2)
   })
 
   it('selects a searched place and saves a revisioned subscription', async () => {

@@ -251,7 +251,11 @@ In the reminder editor, enable **require acknowledgement** to make the ntfy
 notification open its occurrence in the EOS admin page. Set the interval in
 minutes (1 to 43,200) and the number of additional sends (0 means unlimited,
 up to 100). Repeats start after actual delivery, never while the previous copy
-is still queued or retrying. Click **已收到** on the linked page to stop repeats
+is still queued or retrying. New editor drafts default to five minutes and
+three additional sends; acknowledgement remains opt-in. Editing keeps the
+saved interval, including existing one-hour settings. The API still requires an
+explicit interval when acknowledgement is enabled, rather than silently changing
+stored reminders. Click **已收到** on the linked page to stop repeats
 for that occurrence; for daily reminders, tomorrow's occurrence remains
 independent. The read endpoint is `GET /api/reminders/occurrences/<id>` and the
 CSRF-protected write endpoint is `POST

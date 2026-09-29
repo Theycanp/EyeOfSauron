@@ -48,13 +48,16 @@ async function mockAdminApi(page: Page) {
         weatherRefreshPending = true
         await route.fulfill({ json: { subscription: weatherSubscription, restart_required: false } })
       } else {
+        const localDayStart = now - ((now + 8 * 3600) % 86400)
         if (!weatherHasForecast && !weatherRefreshPending) weatherHasForecast = true
         else if (weatherRefreshPending) weatherRefreshPending = false
         await route.fulfill({ json: { subscription: weatherSubscription, latest: weatherHasForecast ? {
-          condition: '多云', low: 16, high: 24, rain_mm: 0, rain_probability: 20,
+          condition: '多云', low: 13, high: 20, rain_mm: 0, rain_probability: 20,
           uv_index_max: 5.4,
-          forecast_hours: Array.from({ length: 24 }, (_, index) => ({ at: now + index * 3600,
-            temperature: 20 - index / 6, precipitation: index < 4 ? 0.4 : 0,
+          window_start_at: localDayStart, window_end_at: localDayStart + 30 * 3600,
+          window_complete: true,
+          forecast_hours: Array.from({ length: 30 }, (_, index) => ({ at: localDayStart + index * 3600,
+            temperature: 20 - index / 4, precipitation: index < 4 ? 0.4 : 0,
             rain_probability: index < 4 ? 65 : 10, weather_code: index < 4 ? 61 : 2 })),
           wind_gust_kmh: 32, temperature_now: 20, humidity: 58,
           wind_speed_kmh: 12, wind_direction_name: '东南',
@@ -330,6 +333,29 @@ test('login screen exposes the EyeOfSauron identity and accessible account field
   await expect(page.getByLabel('密码')).toBeVisible()
 })
 
+test('weather notification opens saved content after login and returns to weather home', async ({ page }, testInfo) => {
+  await mockAdminApi(page)
+  await page.route('**/api/alerts/18', route => route.fulfill({ json: {
+    alert: { id: 18, rule_id: 'weather.daily', title: '今日天气 · 易县',
+      message: '易县：多云，当前 20℃。\n今天 00:00 至明天 06:00 模型小时数据：13~20℃。\n从现在至明天 06:00 预计降水 2 mm，最高降雨概率 80%。\n阳历 2026-09-29，农历八月十九。\n数据：Open-Meteo 预报，非官方气象预警。',
+      priority: 3, confidence: 0.7, status: 'delivered', created_at: 1790636400,
+      delivered_at: 1790636401, source_url: '/#/weather' },
+    observation: null, incident: null, documents: [],
+  } }))
+  await page.goto('/events/18')
+  await page.getByLabel('用户名').fill('owner')
+  await page.getByLabel('密码').fill('correct-horse-battery')
+  await page.getByRole('button', { name: '进入后台' }).click()
+  await expect(page.getByRole('article', { name: '天气通知详情' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '今日天气 · 易县' })).toBeVisible()
+  await expect(page.getByText(/从现在至明天 06:00 预计降水 2 mm/)).toBeVisible()
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', await page.locator('body').evaluate(node => node.clientWidth))
+  await page.screenshot({ path: testInfo.outputPath('weather-notification-detail.png'), fullPage: true })
+  await page.getByRole('link', { name: '天气主页' }).click()
+  await expect(page.getByRole('heading', { name: /本地天气/ })).toBeVisible()
+  await expect(page).toHaveURL(/\/#\/weather$/)
+})
+
 test('notification deep link survives login and opens the saved article detail', async ({ page }, testInfo) => {
   await mockAdminApi(page)
   await page.goto('/events/17')
@@ -543,6 +569,21 @@ test('dead letters can be retried and pending delivery can be cancelled', async 
   await expect(page.getByText('当前没有等待发送的通知')).toBeVisible()
 })
 
+test('new acknowledgement reminders default to five-minute repeats', async ({ page }, testInfo) => {
+  await mockAdminApi(page)
+  await login(page)
+  const menu = page.getByRole('button', { name: '打开导航' })
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('button', { name: '提醒', exact: true }).click()
+  await page.getByRole('button', { name: '新建提醒' }).first().click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('checkbox', { name: /需要确认收到/ }).check()
+  await expect(dialog.getByLabel('重复间隔（分钟）')).toHaveValue('5')
+  await expect(dialog.getByLabel('重复次数')).toHaveValue('3')
+  await dialog.getByLabel('重复间隔（分钟）').scrollIntoViewIfNeeded()
+  await page.screenshot({ path: testInfo.outputPath('reminder-five-minutes.png'), fullPage: true })
+})
+
 test('weather location and schedule are usable on desktop and mobile', async ({ page }, testInfo) => {
   await mockAdminApi(page)
   await login(page)
@@ -564,7 +605,15 @@ test('weather location and schedule are usable on desktop and mobile', async ({ 
   await expect(page.getByText('天气订阅已保存，正在立即获取新地点天气…')).toBeVisible()
   await expect(page.getByText('天气订阅已更新，已载入最新数据。')).toBeVisible({ timeout: 10_000 })
   await expect(page.getByRole('heading', { name: '本地天气 · 北京市天安门' })).toBeVisible()
-  await expect(page.getByRole('region', { name: '今日雨雪预报' })).toBeVisible()
+  await expect(page.getByRole('region', { name: '今日与明晨雨雪预报' })).toBeVisible()
+  await expect(page.getByText('今天 00:00—明天 06:00')).toBeVisible()
+  await expect(page.getByText('时段高低温')).toBeVisible()
+  if (testInfo.project.name === 'mobile') {
+    const timeline = page.getByRole('region', { name: '天气时间轴', exact: true })
+    expect(await timeline.evaluate(node => node.scrollWidth > node.clientWidth)).toBe(true)
+    await timeline.evaluate(node => { node.scrollLeft = node.scrollWidth })
+    expect(await timeline.evaluate(node => node.scrollLeft)).toBeGreaterThan(0)
+  }
   await expect(page.locator('body')).toHaveJSProperty('scrollWidth', await page.locator('body').evaluate((node) => node.clientWidth))
   await page.evaluate(() => window.scrollTo(0, 0))
   await page.screenshot({ path: testInfo.outputPath('weather.png'), fullPage: true })

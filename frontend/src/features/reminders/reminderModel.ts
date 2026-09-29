@@ -21,11 +21,11 @@ export interface ReminderDraft {
 }
 
 export function emptyReminderDraft(): ReminderDraft {
-  return { id: '', title: '定时提醒', message: '', scheduleKind: 'once', runAtLocal: dateTimeValue(), delayValue: 30, delayUnit: 60, dailyTime: '09:00', timezone: browserZone, priority: 3, enabled: true, ackEnabled: false, repeatIntervalSeconds: 3600, repeatMaxAttempts: 3 }
+  return { id: '', title: '定时提醒', message: '', scheduleKind: 'once', runAtLocal: dateTimeValue(), delayValue: 30, delayUnit: 60, dailyTime: '09:00', timezone: browserZone, priority: 3, enabled: true, ackEnabled: false, repeatIntervalSeconds: 300, repeatMaxAttempts: 3 }
 }
 
 export function reminderDraft(item: Reminder): ReminderDraft {
-  return { id: item.id, title: item.title, message: item.message, scheduleKind: item.schedule_kind, runAtLocal: dateTimeValue(item.run_at), delayValue: 30, delayUnit: 60, dailyTime: item.daily_time || '09:00', timezone: item.timezone || browserZone, priority: Number(item.priority), enabled: item.enabled, ackEnabled: Boolean(item.ack_enabled), repeatIntervalSeconds: Number(item.repeat_interval_seconds || 3600), repeatMaxAttempts: Number(item.repeat_max_attempts || 0) }
+  return { id: item.id, title: item.title, message: item.message, scheduleKind: item.schedule_kind, runAtLocal: dateTimeValue(item.run_at), delayValue: 30, delayUnit: 60, dailyTime: item.daily_time || '09:00', timezone: item.timezone || browserZone, priority: Number(item.priority), enabled: item.enabled, ackEnabled: Boolean(item.ack_enabled), repeatIntervalSeconds: Number(item.repeat_interval_seconds ?? 300), repeatMaxAttempts: Number(item.repeat_max_attempts || 0) }
 }
 
 export function reminderPayload(draft: ReminderDraft): Record<string, unknown> {

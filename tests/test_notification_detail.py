@@ -46,6 +46,26 @@ class _Opener:
 
 
 class NotificationLinkTests(unittest.TestCase):
+    def test_weather_notification_opens_saved_detail_and_keeps_weather_home_action(self) -> None:
+        for rule in ("weather.daily", "weather.rain_change", "weather.qweather.alert", "weather.test"):
+            with self.subTest(rule=rule):
+                alert = OutboxMessage(id=18, topic="eos", title="今日天气", message="Saved weather",
+                                      priority=3, tags=("sunny",), attempts=1,
+                                      click_url="https://eos.example:10008/#/weather", rule_id=rule)
+                notifier = NtfyNotifier("https://ntfy.example", "private-token", 10,
+                                        "https://eos.example:10008")
+                opener = _Opener()
+                notifier._opener = opener
+                notifier.publish(alert)
+                payload = json.loads(opener.request.data)
+                self.assertEqual("https://eos.example:10008/events/18", payload["click"])
+                self.assertEqual("天气主页", payload["actions"][0]["label"])
+                self.assertEqual(alert.click_url, payload["actions"][0]["url"])
+                notifier = NtfyNotifier("https://ntfy.example", "private-token", 10)
+                notifier._opener = opener
+                notifier.publish(alert)
+                self.assertEqual(alert.click_url, json.loads(opener.request.data)["click"])
+
     def test_ntfy_routes_main_click_to_eos_and_keeps_original_article_action(self) -> None:
         alert = OutboxMessage(
             id=17,

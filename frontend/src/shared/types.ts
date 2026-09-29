@@ -41,6 +41,11 @@ export interface WeatherStatus {
     calendar?: { lunar: string; festivals: string }
     hourly?: WeatherHour[]
     forecast_hours?: WeatherHour[]
+    window_start_at?: number
+    window_end_at?: number
+    window_complete?: boolean
+    tomorrow_early_rain_mm?: number
+    tomorrow_early_rain_probability?: number
     observed_at: number
     is_today: boolean
   } | null
@@ -293,6 +298,7 @@ export interface Incident extends JsonRecord {
 
 export interface AlertDetailRecord extends JsonRecord {
   id: number
+  rule_id?: string
   observation_id?: number | null
   incident_id?: number | null
   title: string

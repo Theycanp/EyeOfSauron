@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from typing import Any, Mapping, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -316,13 +316,24 @@ def weather_description(code: int | None) -> str:
 
 
 def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForecast, now: int) -> tuple[str, dict[str, Any]]:
-    local_now = datetime.fromtimestamp(now, ZoneInfo(subscription.timezone))
-    today = [hour for hour in forecast.hours
-             if datetime.fromtimestamp(hour.at, ZoneInfo(subscription.timezone)).date() == local_now.date()]
-    remaining = [hour for hour in today if hour.at >= now]
-    temperatures = [hour.temperature for hour in today if hour.temperature is not None]
+    timezone = ZoneInfo(subscription.timezone)
+    local_now = datetime.fromtimestamp(now, timezone)
+    start = int(datetime.combine(local_now.date(), time.min, timezone).timestamp())
+    tomorrow = local_now.date() + timedelta(days=1)
+    tomorrow_start = int(datetime.combine(tomorrow, time.min, timezone).timestamp())
+    end = int(datetime.combine(tomorrow, time(6), timezone).timestamp())
+    window = [hour for hour in forecast.hours if start <= hour.at < end
+              and hour.temperature is not None and math.isfinite(hour.temperature)
+              and hour.precipitation is not None and math.isfinite(hour.precipitation)
+              and hour.rain_probability is not None and math.isfinite(hour.rain_probability)]
+    complete = {hour.at for hour in window} == set(range(start, end, 3600))
+    remaining = [hour for hour in window if hour.at >= now]
+    early = [hour for hour in remaining if tomorrow_start <= hour.at < end]
+    temperatures = [hour.temperature for hour in window if hour.temperature is not None]
     rain = sum(max(0, hour.precipitation or 0) for hour in remaining)
     probability = max((hour.rain_probability or 0 for hour in remaining), default=0)
+    early_rain = sum(max(0, hour.precipitation or 0) for hour in early)
+    early_probability = max((hour.rain_probability or 0 for hour in early), default=0)
     gusts = [hour.wind_gust for hour in remaining if hour.wind_gust is not None]
     gust = max(gusts) if gusts else None
     gust_text = f"阵风最高 {gust:.0f} km/h" if gust is not None else "阵风暂无数据"
@@ -339,15 +350,22 @@ def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForeca
     uv = (f"今日最高紫外线指数 {forecast.uv_index_max:.1f}"
           if forecast.uv_index_max is not None else "今日最高紫外线指数暂无数据")
     conditions_label = "最近小时预报" if forecast.conditions_basis == "hourly_forecast" else "当前"
-    message = (f"{subscription.label}：{weather_description(forecast.weather_code)}，{conditions_label} {forecast.temperature:.0f}℃，{temp_range}。"
-               f"今日剩余时段预计降水 {rain:.1f} mm，最高降雨概率 {probability:.0f}%，"
+    coverage_note = "" if complete else "（仅统计可用小时，缺失时段不补算）"
+    message = (f"{subscription.label}：{weather_description(forecast.weather_code)}，{conditions_label} {forecast.temperature:.0f}℃。"
+               f"今天 00:00 至明天 06:00 模型小时数据{coverage_note}：{temp_range}。"
+               f"从现在至明天 06:00 预计降水 {rain:.1f} mm，最高降雨概率 {probability:.0f}%；"
+               f"其中明天 00:00—06:00 预计降水 {early_rain:.1f} mm，最高概率 {early_probability:.0f}%。"
                f"{gust_text}；{humidity}；{wind}。\n"
                f"{sun}；{uv}。\n"
                f"阳历 {local_now.date().isoformat()}，{calendar['lunar']}。{calendar['festivals']}"
-               f"\n数据：{forecast.provider} 预报，非官方气象预警。")
+               f"\n已过去小时的模型数据不是实测。数据：{forecast.provider} 预报，非官方气象预警。")
     return message, {"condition": weather_description(forecast.weather_code),
                      "low": low, "high": high, "rain_mm": round(rain, 1),
                      "rain_probability": round(probability), "wind_gust_kmh": round(gust) if gust is not None else None,
+                     "tomorrow_early_rain_mm": round(early_rain, 1),
+                     "tomorrow_early_rain_probability": round(early_probability),
+                     "window_start_at": start, "window_end_at": end,
+                     "window_complete": complete,
                      "temperature_now": forecast.temperature,
                      "humidity": forecast.humidity,
                      "wind_speed_kmh": forecast.wind_speed,
@@ -362,9 +380,8 @@ def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForeca
                           "rain_probability": hour.rain_probability,
                           "wind_gust": hour.wind_gust,
                           "weather_code": hour.weather_code}
-                         for hour in forecast.hours
-                         if now <= hour.at <= now + 48 * 3600
-                     ][:48],
+                         for hour in window
+                     ],
                      "calendar": calendar,
                      "observed_at": forecast.observed_at,
                      "provider": forecast.provider,

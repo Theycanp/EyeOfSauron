@@ -3369,6 +3369,7 @@ class Database:
             confidence=float(row["confidence"]),
             evidence=evidence,
             created_at=int(row["created_at"]),
+            rule_id=str(row["rule_id"]),
         )
 
     def mark_delivered(self, alert_id: int, now: int) -> None:
@@ -3575,7 +3576,7 @@ class Database:
             return None
         row = self.connection.execute(
             """
-            SELECT id, observation_id, incident_id, reminder_id, reminder_occurrence_id,
+            SELECT id, rule_id, observation_id, incident_id, reminder_id, reminder_occurrence_id,
                    title, message, priority,
                    confidence, evidence_json, tags_json, click_url, status,
                    created_at, delivered_at
