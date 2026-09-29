@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -127,6 +128,24 @@ def _matches(spec: tuple[str, str, int], socket: tuple[str, str, int]) -> bool:
     )
 
 
+def _load_streak_start(
+    pending: Any, now: int, threshold: float, sustain_seconds: int, max_gap: int,
+) -> int:
+    """Resume only a recent, ordered streak sampled under the same policy."""
+    if isinstance(pending, dict):
+        since = pending.get("since")
+        sampled_at = pending.get("sampled_at")
+        if (
+            type(since) is int and type(sampled_at) is int
+            and 0 <= since <= sampled_at <= now
+            and now - sampled_at <= max_gap
+            and pending.get("threshold") == threshold
+            and pending.get("sustain_seconds") == sustain_seconds
+        ):
+            return since
+    return now
+
+
 class HostHealthCollector:
     """Low-frequency tri-state local checks; unknown never means recovered."""
 
@@ -139,6 +158,7 @@ class HostHealthCollector:
         self.inode_threshold = float(settings.get("inode_used_percent", 90.0))
         self.memory_threshold = float(settings.get("memory_used_percent", 90.0))
         self.load_threshold = float(settings.get("load1", max(1.0, os.cpu_count() or 1)))
+        self.load_sustain_seconds = int(settings.get("load_sustain_seconds", 300))
         self.port_allowlist = tuple(
             spec for value in settings.get("allowed_listen_ports", [])
             if (spec := _port_spec(value)) is not None
@@ -150,6 +170,15 @@ class HostHealthCollector:
 
     def fetch(self, state: SourceState) -> FeedFetchResult:
         now = datetime.now(UTC)
+        now_epoch = int(now.timestamp())
+        try:
+            previous = json.loads(state.cursor or "{}")
+        except (TypeError, ValueError):
+            previous = {}
+        if not isinstance(previous, dict):
+            previous = {}
+        previous_active = set(previous.get("active", [])) if isinstance(previous.get("active"), list) else set()
+        load_pending: dict[str, Any] | None = None
         active: dict[str, str] = {}
         unknown_prefixes: set[str] = set()
         for path in self.paths:
@@ -177,8 +206,23 @@ class HostHealthCollector:
         except OSError:
             unknown_prefixes.add("load")
         else:
-            if load1 >= self.load_threshold:
-                active["load"] = f"1 分钟 load 为 {load1:.2f}"
+            if not math.isfinite(load1) or load1 < 0:
+                unknown_prefixes.add("load")
+            elif load1 >= self.load_threshold:
+                since = _load_streak_start(
+                    previous.get("load_pending") if not state.consecutive_failures else None,
+                    now_epoch, self.load_threshold, self.load_sustain_seconds,
+                    max(3 * self.config.poll_interval_seconds, self.config.request_timeout_seconds),
+                )
+                load_pending = {
+                    "since": since, "sampled_at": now_epoch,
+                    "threshold": self.load_threshold, "sustain_seconds": self.load_sustain_seconds,
+                }
+                if "load" in previous_active or now_epoch - since >= self.load_sustain_seconds:
+                    active["load"] = (
+                        f"1 分钟 load 为 {load1:.2f}，阈值 {self.load_threshold:g}；"
+                        f"连续采样超限至少 {now_epoch - since} 秒。"
+                    )
 
         for unit, health in _unit_health(list(self.units)).items():
             identity = f"unit:{unit}"
@@ -207,13 +251,6 @@ class HostHealthCollector:
                         identity = f"listen:missing:{protocol}:{family}:{port}"
                         active[identity] = f"要求的 {protocol.upper()} {family} 端口 {port} 当前未监听"
 
-        try:
-            previous = json.loads(state.cursor or "{}")
-        except (TypeError, ValueError):
-            previous = {}
-        if not isinstance(previous, dict):
-            previous = {}
-        previous_active = set(previous.get("active", [])) if isinstance(previous.get("active"), list) else set()
         preserved_unknown = {
             identity
             for identity in previous_active
@@ -259,10 +296,10 @@ class HostHealthCollector:
                     "recovery": True,
                 },
             ))
-        cursor = json.dumps(
-            {"active": sorted(current_active), "updated_at": int(now.timestamp())},
-            sort_keys=True,
-        )
+        progress: dict[str, Any] = {"active": sorted(current_active), "updated_at": now_epoch}
+        if load_pending is not None:
+            progress["load_pending"] = load_pending
+        cursor = json.dumps(progress, sort_keys=True)
         return FeedFetchResult(
             tuple(observations),
             None,

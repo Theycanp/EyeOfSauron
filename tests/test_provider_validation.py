@@ -88,12 +88,17 @@ class ProviderValidationTests(unittest.TestCase):
                                         "required_listen_ports": [22, "tcp:18080"]})
         self.assertEqual(90, result.settings["disk_used_percent"])
         self.assertGreaterEqual(result.settings["load1"], 1)
+        self.assertEqual(300, result.settings["load_sustain_seconds"])
         for field, value in (("paths", "/"), ("units", [1]), ("required_listen_ports", [True]),
                              ("allowed_listen_ports", [{}]), ("disk_used_percent", 0),
                              ("inode_used_percent", 101), ("memory_used_percent", float("nan")),
-                             ("load1", float("inf"))):
+                             ("load1", float("inf")), ("load_sustain_seconds", -1),
+                             ("load_sustain_seconds", True), ("load_sustain_seconds", 1.5),
+                             ("load_sustain_seconds", "300"), ("load_sustain_seconds", 86401)):
             with self.subTest(field=field, value=value), self.assertRaises(ProviderConfigError):
                 self.validate("host", {field: value})
+        for seconds in (0, 300, 86400):
+            self.assertEqual(seconds, self.validate("host", {"load_sustain_seconds": seconds}).settings["load_sustain_seconds"])
 
     def test_feed_allowlist_and_unconfigured_experimental_sources_fail_closed(self) -> None:
         for url, allowed in ((None, ("example.com",)), ("https://example.com/feed", ())):

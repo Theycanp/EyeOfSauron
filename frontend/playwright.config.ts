@@ -5,6 +5,7 @@ const port = process.env.EOS_E2E_PORT || '4173'
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
+  workers: process.env.EOS_E2E_WORKERS ? Number(process.env.EOS_E2E_WORKERS) : undefined,
   retries: 1,
   use: {
     baseURL: `http://127.0.0.1:${port}`,
