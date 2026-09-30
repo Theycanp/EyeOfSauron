@@ -64,10 +64,13 @@ class SQLiteWeather:
         latest = json.loads(row["latest_json"]) if row["latest_json"] else None
         if isinstance(latest, dict):
             window_date_at = latest.get("window_start_at", latest.get("observed_at"))
-            forecast_date = (datetime.fromtimestamp(window_date_at, ZoneInfo(subscription.timezone))
-                             .strftime("%Y%m%d") if isinstance(window_date_at, int) else None)
-            latest["is_today"] = forecast_date == datetime.fromtimestamp(
-                time.time(), ZoneInfo(subscription.timezone)).strftime("%Y%m%d")
+            forecast_date = (datetime.fromtimestamp(latest.get("observed_at"), ZoneInfo(subscription.timezone))
+                             .strftime("%Y%m%d") if isinstance(latest.get("observed_at"), int) else None)
+            current_at = int(time.time())
+            latest["is_today"] = (window_date_at <= current_at < latest["window_end_at"]
+                                  if isinstance(window_date_at, int) and isinstance(latest.get("window_end_at"), int)
+                                  else forecast_date == datetime.fromtimestamp(
+                                      current_at, ZoneInfo(subscription.timezone)).strftime("%Y%m%d"))
             latest["air_quality"] = (dict(air_row) if air_row
                                      and 0 <= int(time.time()) - int(air_row["observed_at"]) <= 6 * 3600 else None)
             latest["astronomy"] = (dict(sky_row) if sky_row and sky_row["local_date"] == forecast_date
@@ -296,9 +299,11 @@ class SQLiteWeather:
                 raise WeatherError("no fresh weather snapshot is available for today")
             message = "[测试通知] 今日天气快照\n"
             message += f"地点：{subscription.label}\n"
-            window_scope = ("今天00:00至明天06:00可用时段" if latest.get("window_start_at")
-                            else "今日")
-            rain_scope = "从现在至明天06:00预计" if latest.get("window_start_at") else "预计"
+            window_start = latest.get("window_start_at")
+            window_scope = ("06:00至次日06:00可用时段" if isinstance(window_start, int)
+                            and datetime.fromtimestamp(window_start, ZoneInfo(subscription.timezone)).hour == 6
+                            else "00:00至次日06:00可用时段" if isinstance(window_start, int) else "今日")
+            rain_scope = "从现在至时段结束06:00预计" if isinstance(window_start, int) else "预计"
             message += (f"天气：{latest.get('condition', '暂无')}，当前 {latest.get('temperature_now', '—')}℃，"
                         f"{window_scope} {latest.get('low', '—')}~{latest.get('high', '—')}℃\n")
             message += (f"{rain_scope}降水 {latest.get('rain_mm', '—')} mm，最高概率 {latest.get('rain_probability', '—')}%，"

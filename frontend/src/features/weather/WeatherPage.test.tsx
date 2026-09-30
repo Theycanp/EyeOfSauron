@@ -17,12 +17,12 @@ const status: WeatherStatus = {
 
 describe('WeatherPage', () => {
   it('uses the saved timezone and window date while timezone edits are unsaved', async () => {
-    const start = 1790352000
+    const start = 1790352000 + 6 * 3600
     const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
       condition: '晴', low: 14, high: 20, rain_mm: 0, rain_probability: 0,
       wind_gust_kmh: 12, temperature_now: 20, observed_at: start - 60,
-      is_today: true, window_start_at: start, window_end_at: start + 30 * 3600,
-      sunrise: start + 6 * 3600, sunset: start + 18 * 3600,
+      is_today: true, window_start_at: start, window_end_at: start + 24 * 3600,
+      sunrise: start, sunset: start + 12 * 3600,
     } }) } as unknown as AdminApi
     const user = userEvent.setup()
     render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
@@ -83,26 +83,52 @@ describe('WeatherPage', () => {
     expect(screen.getByText('最高 20°')).toBeInTheDocument()
   })
 
-  it('keeps missing past hours blank in a partial midnight-to-six window', async () => {
-    const start = 1790352000
+  it('keeps missing past hours blank in a partial six-to-six window', async () => {
+    const start = 1790352000 + 6 * 3600
     const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
       condition: '晴', low: 14, high: 20, rain_mm: 2, rain_probability: 80,
       wind_gust_kmh: 12, temperature_now: 20, observed_at: start + 7 * 3600,
-      is_today: true, window_start_at: start, window_end_at: start + 30 * 3600,
+      is_today: true, window_start_at: start, window_end_at: start + 24 * 3600,
       window_complete: false,
       forecast_hours: [
         { at: start + 7 * 3600, temperature: 20, precipitation: 0, rain_probability: 0 },
-        { at: start + 29 * 3600, temperature: 14, precipitation: 2, rain_probability: 80 },
+        { at: start + 23 * 3600, temperature: 14, precipitation: 2, rain_probability: 80 },
       ],
     } }) } as unknown as AdminApi
     render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
-    expect(await screen.findByText('今天 00:00—明天 06:00')).toBeInTheDocument()
+    expect(await screen.findByText('今天 06:00—明天 06:00')).toBeInTheDocument()
     expect(screen.getByText(/可用时段高低温/)).toBeInTheDocument()
     expect(screen.getByText(/空白时段表示未提供数据/)).toBeInTheDocument()
     const chart = screen.getByRole('img', { name: '按小时显示降水量、雨雪类型与气温' })
     const firstPoint = chart.querySelector('.temperature-point')
     expect(Number(firstPoint?.getAttribute('cx'))).toBeGreaterThan(150)
     expect(chart.querySelectorAll('.temperature-line')).toHaveLength(2)
+  })
+
+  it('labels the before-six window as yesterday through today', async () => {
+    const start = 1790352000 - 18 * 3600
+    const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
+      condition: '晴', low: 14, high: 20, rain_mm: 0, rain_probability: 0,
+      wind_gust_kmh: 12, temperature_now: 20, observed_at: 1790352000 + 3 * 3600,
+      is_today: true, window_start_at: start, window_end_at: 1790352000 + 6 * 3600,
+      forecast_hours: [{ at: 1790352000 + 3 * 3600, temperature: 20, precipitation: 0, rain_probability: 0 }],
+    } }) } as unknown as AdminApi
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    expect(await screen.findByText('昨天 06:00—今天 06:00')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '昨日至今晨雨雪预报' })).toBeInTheDocument()
+    expect(screen.getByText(/2026-09-26 ·/)).toBeInTheDocument()
+  })
+
+  it('keeps the previous 30-hour label until an existing snapshot is refreshed', async () => {
+    const start = 1790352000
+    const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
+      condition: '晴', low: 14, high: 20, rain_mm: 0, rain_probability: 0,
+      wind_gust_kmh: 12, temperature_now: 20, observed_at: start + 7 * 3600,
+      is_today: true, window_start_at: start, window_end_at: start + 30 * 3600,
+      forecast_hours: [{ at: start + 7 * 3600, temperature: 20, precipitation: 0, rain_probability: 0 }],
+    } }) } as unknown as AdminApi
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    expect(await screen.findByText('今天 00:00—明天 06:00')).toBeInTheDocument()
   })
 
   it('selects a searched place and saves a revisioned subscription', async () => {

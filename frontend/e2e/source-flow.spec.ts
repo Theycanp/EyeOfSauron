@@ -48,15 +48,15 @@ async function mockAdminApi(page: Page) {
         weatherRefreshPending = true
         await route.fulfill({ json: { subscription: weatherSubscription, restart_required: false } })
       } else {
-        const localDayStart = now - ((now + 8 * 3600) % 86400)
+        const localDayStart = now - ((now + 8 * 3600 - 6 * 3600 + 86400) % 86400)
         if (!weatherHasForecast && !weatherRefreshPending) weatherHasForecast = true
         else if (weatherRefreshPending) weatherRefreshPending = false
         await route.fulfill({ json: { subscription: weatherSubscription, latest: weatherHasForecast ? {
           condition: '多云', low: 13, high: 20, rain_mm: 0, rain_probability: 20,
           uv_index_max: 5.4,
-          window_start_at: localDayStart, window_end_at: localDayStart + 30 * 3600,
+          window_start_at: localDayStart, window_end_at: localDayStart + 24 * 3600,
           window_complete: true,
-          forecast_hours: Array.from({ length: 30 }, (_, index) => ({ at: localDayStart + index * 3600,
+          forecast_hours: Array.from({ length: 24 }, (_, index) => ({ at: localDayStart + index * 3600,
             temperature: 20 - index / 4, precipitation: index < 4 ? 0.4 : 0,
             rain_probability: index < 4 ? 65 : 10, weather_code: index < 4 ? 61 : 2 })),
           wind_gust_kmh: 32, temperature_now: 20, humidity: 58,
@@ -652,8 +652,8 @@ test('weather location and schedule are usable on desktop and mobile', async ({ 
   await expect(page.getByText('天气订阅已保存，正在立即获取新地点天气…')).toBeVisible()
   await expect(page.getByText('天气订阅已更新，已载入最新数据。')).toBeVisible({ timeout: 10_000 })
   await expect(page.getByRole('heading', { name: '本地天气 · 北京市天安门' })).toBeVisible()
-  await expect(page.getByRole('region', { name: '今日与明晨雨雪预报' })).toBeVisible()
-  await expect(page.getByText('今天 00:00—明天 06:00')).toBeVisible()
+  await expect(page.getByRole('region', { name: /^(今日与明晨|昨日至今晨)雨雪预报$/ })).toBeVisible()
+  await expect(page.getByText(/^(今天 06:00—明天 06:00|昨天 06:00—今天 06:00)$/)).toBeVisible()
   await expect(page.getByText('时段高低温')).toBeVisible()
   if (testInfo.project.name === 'mobile') {
     const timeline = page.getByRole('region', { name: '天气时间轴', exact: true })

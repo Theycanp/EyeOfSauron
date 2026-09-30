@@ -318,17 +318,18 @@ def weather_description(code: int | None) -> str:
 def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForecast, now: int) -> tuple[str, dict[str, Any]]:
     timezone = ZoneInfo(subscription.timezone)
     local_now = datetime.fromtimestamp(now, timezone)
-    start = int(datetime.combine(local_now.date(), time.min, timezone).timestamp())
-    tomorrow = local_now.date() + timedelta(days=1)
-    tomorrow_start = int(datetime.combine(tomorrow, time.min, timezone).timestamp())
-    end = int(datetime.combine(tomorrow, time(6), timezone).timestamp())
+    window_date = local_now.date() if local_now.time() >= time(6) else local_now.date() - timedelta(days=1)
+    start = int(datetime.combine(window_date, time(6), timezone).timestamp())
+    end_date = window_date + timedelta(days=1)
+    overnight_start = int(datetime.combine(end_date, time.min, timezone).timestamp())
+    end = int(datetime.combine(end_date, time(6), timezone).timestamp())
     window = [hour for hour in forecast.hours if start <= hour.at < end
               and hour.temperature is not None and math.isfinite(hour.temperature)
               and hour.precipitation is not None and math.isfinite(hour.precipitation)
               and hour.rain_probability is not None and math.isfinite(hour.rain_probability)]
     complete = {hour.at for hour in window} == set(range(start, end, 3600))
     remaining = [hour for hour in window if hour.at >= now]
-    early = [hour for hour in remaining if tomorrow_start <= hour.at < end]
+    early = [hour for hour in remaining if overnight_start <= hour.at < end]
     temperatures = [hour.temperature for hour in window if hour.temperature is not None]
     rain = sum(max(0, hour.precipitation or 0) for hour in remaining)
     probability = max((hour.rain_probability or 0 for hour in remaining), default=0)
@@ -351,10 +352,12 @@ def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForeca
           if forecast.uv_index_max is not None else "今日最高紫外线指数暂无数据")
     conditions_label = "最近小时预报" if forecast.conditions_basis == "hourly_forecast" else "当前"
     coverage_note = "" if complete else "（仅统计可用小时，缺失时段不补算）"
+    window_label = ("今天 06:00 至明天 06:00" if window_date == local_now.date()
+                    else "昨天 06:00 至今天 06:00")
     message = (f"{subscription.label}：{weather_description(forecast.weather_code)}，{conditions_label} {forecast.temperature:.0f}℃。"
-               f"今天 00:00 至明天 06:00 模型小时数据{coverage_note}：{temp_range}。"
-               f"从现在至明天 06:00 预计降水 {rain:.1f} mm，最高降雨概率 {probability:.0f}%；"
-               f"其中明天 00:00—06:00 预计降水 {early_rain:.1f} mm，最高概率 {early_probability:.0f}%。"
+               f"{window_label} 模型小时数据{coverage_note}：{temp_range}。"
+               f"从现在至时段结束 06:00 预计降水 {rain:.1f} mm，最高降雨概率 {probability:.0f}%；"
+               f"其中结束日 00:00—06:00 预计降水 {early_rain:.1f} mm，最高概率 {early_probability:.0f}%。"
                f"{gust_text}；{humidity}；{wind}。\n"
                f"{sun}；{uv}。\n"
                f"阳历 {local_now.date().isoformat()}，{calendar['lunar']}。{calendar['festivals']}"

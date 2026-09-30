@@ -53,7 +53,7 @@ first successful fetch after that sends one recovery alert.
 
 At or after the configured local time (default 07:00), the first successful fetch
 on that same local calendar day queues one daily forecast per date. It reports current
-condition, the local midnight-to-next-day-06:00 temperature range, remaining-window predicted precipitation,
+condition, the local 06:00-to-next-day-06:00 temperature range, remaining-window predicted precipitation,
 maximum rain probability, gusts, humidity, wind, sunrise/sunset, the day's
 maximum UV index when Open-Meteo supplies it, Gregorian and lunar dates, and a
 small verified set of fixed-date festivals. Fresh optional
@@ -215,30 +215,37 @@ resolves a map click to an IANA timezone using Open-Meteo's fixed-host forecast
 endpoint with `timezone=auto` and a single current field. Coordinates are
 strictly bounded before network access; an unavailable or invalid provider
 timezone is an explicit failure and never silently reuses the previous zone.
-New snapshots store the hourly window from the subscription's local calendar
-day at 00:00 through the next day at 06:00 (end exclusive). This is 30 hours in
-Asia/Shanghai; a daylight-saving transition can make the elapsed window 29 or
-31 hours. `window_start_at`, `window_end_at` and `window_complete` describe the
+New snapshots store the hourly window from the subscription's local 06:00
+through the next day at 06:00 (end exclusive). Before local 06:00 the active
+window starts at yesterday's 06:00. This is 24 hours in Asia/Shanghai; a
+daylight-saving transition can make the elapsed window 23 or 25 hours.
+`window_start_at`, `window_end_at` and `window_complete` describe the
 same typed summary projection as `forecast_hours`, not a separate persistent
 schedule or subscription. No schema change or additional API polling is needed.
 The daily message and temperature reference lines use this window's available
 hours; future precipitation/gust totals exclude hours before the current query.
-Tomorrow 00:00-06:00 precipitation is separately summarized in the daily message.
+The window's final 00:00-06:00 precipitation is separately summarized in the
+daily message. The calendar date and astronomy remain tied to the observation's
+local date, even before 06:00 when the weather window started yesterday.
 Forecast hours before the current time are model data, not observations. They
 are shown with muted precipitation bars and a query-time marker. Missing past
 hours, especially with the future-only QWeather fallback, remain blank with a
 partial-coverage label; they are not filled from zero or another provider.
+Before 06:00, Open-Meteo's current-day forecast can omit the prior day's
+06:00-00:00 hours; this is expected partial coverage, not a failed collection.
 The axis uses actual timestamps and distinguishes tomorrow's hours; missing
 temperature hours break the line instead of inventing a connecting trajectory.
 On narrow screens the timeline scrolls horizontally at a readable fixed plot
-width rather than shrinking all 30 hours and labels into tiny text.
+width rather than shrinking all hours and labels into tiny text.
 Older snapshots without window metadata retain the legacy rolling-24-hour view
 until the next successful poll; existing notifications are not rewritten.
 Rain-change alerts still use the remaining local calendar day, severe-weather
 detectors still use their near-term horizons, and official/minute warnings are
 unchanged. UV maxima, calendar and astronomy remain scoped to today's date.
 Displayed times use the saved subscription timezone, never an unsaved form edit;
-the date label uses the summary window date, not a near-midnight current sample.
+the calendar date label uses the local observation date, not the weather-window
+start date. Existing saved notifications keep their original text; the next
+successful weather poll produces the new window without a database migration.
 
 ## Saved notification details (0.28.0)
 
