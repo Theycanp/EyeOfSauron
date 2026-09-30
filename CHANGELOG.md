@@ -5,6 +5,15 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.29.3] - 2026-09-30
+
+### Fixed
+
+- Send an origin-only Referer to the official OpenStreetMap tile endpoint,
+  as its usage policy requires, while keeping page paths private. Detect failed
+  tile loads and show the existing manual-location fallback.
+- Bundle the Leaflet location marker explicitly so it renders in production.
+
 ## [0.29.2] - 2026-09-30
 
 ### Changed
