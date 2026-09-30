@@ -5,6 +5,19 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.29.2] - 2026-09-30
+
+### Changed
+
+- Display and summarize each local weather day from 06:00 to the following
+  06:00, using the previous day's window before 06:00. Existing saved
+  notifications are unchanged; no schema or provider-query change is required.
+
+### Notes
+
+- Mobile notification links remain controlled by ntfy and the browser. A web
+  page cannot reliably replace an already open tab launched by another app.
+
 ## [0.29.1] - 2026-09-29
 
 ### Fixed
