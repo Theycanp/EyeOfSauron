@@ -68,10 +68,10 @@ class AdminAuthHttpTests(unittest.TestCase):
             try:
                 with urllib.request.urlopen(base_url) as response:
                     csp = response.headers["Content-Security-Policy"]
-                    self.assertIn("https://a.tile.openstreetmap.org", csp)
-                    self.assertIn("https://b.tile.openstreetmap.org", csp)
-                    self.assertIn("https://c.tile.openstreetmap.org", csp)
+                    self.assertIn("https://tile.openstreetmap.org", csp)
+                    self.assertNotIn("https://a.tile.openstreetmap.org", csp)
                     self.assertNotIn("img-src *", csp)
+                    self.assertEqual("strict-origin-when-cross-origin", response.headers["Referrer-Policy"])
                     content_length = response.headers["Content-Length"]
                 with urllib.request.urlopen(urllib.request.Request(base_url, method="HEAD")) as response:
                     self.assertEqual(content_length, response.headers["Content-Length"])

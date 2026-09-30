@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import L from 'leaflet'
+import markerIconUrl from 'leaflet/dist/images/marker-icon.png'
+import markerShadowUrl from 'leaflet/dist/images/marker-shadow.png'
 import { CloudSun, Droplets, LocateFixed, MapPin, Moon, RefreshCw, Search, Sun, Wind } from 'lucide-react'
 import type { AdminApi } from '../../shared/api'
 import type { WeatherHour, WeatherPlace, WeatherStatus, WeatherSubscription } from '../../shared/types'
@@ -149,10 +151,18 @@ function WeatherMap({ latitude, longitude, disabled, onPick }: WeatherMapProps) 
     if (!nodeRef.current || mapRef.current) return
     try {
       const map = L.map(nodeRef.current, { zoomControl: true, attributionControl: true }).setView([initialPointRef.current.latitude, initialPointRef.current.longitude], 11)
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map)
+      const tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
+      }).addTo(map)
+      let tileLoaded = false
+      tiles.on('tileload', () => { tileLoaded = true; setMapError(false) })
+      tiles.on('tileerror', () => { if (!tileLoaded) setMapError(true) })
       map.on('click', (event) => { if (!disabledRef.current) pickRef.current(Number(event.latlng.lat.toFixed(6)), Number(event.latlng.lng.toFixed(6))) })
       mapRef.current = map
-      markerRef.current = L.marker([initialPointRef.current.latitude, initialPointRef.current.longitude]).addTo(map)
+      markerRef.current = L.marker([initialPointRef.current.latitude, initialPointRef.current.longitude], {
+        icon: L.icon({ iconUrl: markerIconUrl, shadowUrl: markerShadowUrl, iconSize: [25, 41],
+          iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41] }),
+      }).addTo(map)
       window.setTimeout(() => map.invalidateSize(), 0)
     } catch {
       window.setTimeout(() => setMapError(true), 0)

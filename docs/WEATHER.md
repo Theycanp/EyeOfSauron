@@ -191,21 +191,30 @@ correct local coordinates, current schema, no duplicate outbox rows, and the pub
 admin entry. `argus weather-test` creates a labelled snapshot through the normal
 outbox without changing rain or daily state; use only on explicit operator request.
 
-The admin Weather page also provides a Leaflet/OpenStreetMap map picker. A map
-click updates the draft coordinates without saving; the backend resolves the
+The admin Weather page also provides a Leaflet/OpenStreetMap map picker. It uses
+the official `tile.openstreetmap.org` endpoint and sends the EOS origin as
+Referer without the page path, as the tile usage policy requires. Both the
+Nginx template and application static responses use
+`Referrer-Policy: strict-origin-when-cross-origin`; `no-referrer` blocks tiles.
+The location marker is bundled explicitly because Leaflet's default icon-path
+inference is unreliable after production bundling. A map click updates the
+draft coordinates without saving; the backend resolves the
 coordinates' timezone before the operator can save. Only the latest coordinate
 selection may update the timezone, so an older lookup cannot overwrite a newer
 map click. If lookup fails, the previous timezone remains but the UI explicitly
 requires review. Search and direct coordinate editing remain available if map
-tiles are blocked. Direct coordinate edits also require timezone review. Browser location is an
+tiles are blocked. Failed tile loads show a fallback; a provider-supplied block
+image can still return HTTP 200, so acceptance checks actual map pixels and
+response headers, not only status codes. Direct coordinate edits also require
+timezone review. Browser location is an
 explicit user action: the browser permission prompt is requested on that click,
 and a denied/timeout state explains how to retry site permissions. Saving a new
 location starts a bounded foreground refresh poll, so the home page updates as
 soon as the worker records a successful forecast rather than waiting for the
 next hourly cycle. The page title includes the active location, and the daily
 UV maximum (when supplied by the forecast) is shown with the other metrics.
-The admin Content Security Policy permits images only from the three explicit
-OpenStreetMap tile hosts in addition to local/data images; no arbitrary image
+The admin Content Security Policy permits images only from the official
+OpenStreetMap tile host in addition to local/data images; no arbitrary image
 origin is allowed. If the bounded foreground poll does not see a fresh forecast,
 the page reports that collection continues in the background instead of claiming
 the new location is ready. Tile loading failures do not block coordinate search

@@ -655,6 +655,9 @@ test('weather location and schedule are usable on desktop and mobile', async ({ 
   await expect(page.getByRole('region', { name: /^(今日与明晨|昨日至今晨)雨雪预报$/ })).toBeVisible()
   await expect(page.getByText(/^(今天 06:00—明天 06:00|昨天 06:00—今天 06:00)$/)).toBeVisible()
   await expect(page.getByText('时段高低温')).toBeVisible()
+  const marker = page.locator('.weather-map .leaflet-marker-icon')
+  await expect.poll(() => marker.evaluate((node) => (node as HTMLImageElement).naturalWidth)).toBeGreaterThan(0)
+  await expect(page.locator('.weather-map .leaflet-tile').first()).toHaveAttribute('src', /^https:\/\/tile\.openstreetmap\.org\//)
   if (testInfo.project.name === 'mobile') {
     const timeline = page.getByRole('region', { name: '天气时间轴', exact: true })
     expect(await timeline.evaluate(node => node.scrollWidth > node.clientWidth)).toBe(true)
@@ -664,4 +667,16 @@ test('weather location and schedule are usable on desktop and mobile', async ({ 
   await expect(page.locator('body')).toHaveJSProperty('scrollWidth', await page.locator('body').evaluate((node) => node.clientWidth))
   await page.evaluate(() => window.scrollTo(0, 0))
   await page.screenshot({ path: testInfo.outputPath('weather.png'), fullPage: true })
+})
+
+test('blocked map tiles show a usable location fallback', async ({ page }) => {
+  await page.route('https://tile.openstreetmap.org/**', (route) => route.abort())
+  await mockAdminApi(page)
+  await login(page)
+  const menu = page.getByRole('button', { name: '打开导航' })
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('button', { name: '天气', exact: true }).click()
+  await expect(page.getByText('地图暂时不可用，请使用搜索或下方坐标输入。你仍可以保存坐标。')).toBeVisible()
+  await expect(page.getByLabel('纬度')).toBeEnabled()
+  await expect(page.getByLabel('经度')).toBeEnabled()
 })

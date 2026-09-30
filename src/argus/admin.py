@@ -864,13 +864,12 @@ def make_handler(
                 "no-store" if path.name == "index.html" else "public, max-age=31536000, immutable",
             )
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
             self.send_header("X-Request-ID", self.request_id)
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; "
-                "img-src 'self' data: https://a.tile.openstreetmap.org "
-                "https://b.tile.openstreetmap.org https://c.tile.openstreetmap.org; "
+                "img-src 'self' data: https://tile.openstreetmap.org; "
                 "font-src 'self'; form-action 'self'; frame-ancestors 'none'; "
                 "base-uri 'none'; manifest-src 'self'",
             )
