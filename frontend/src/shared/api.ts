@@ -33,6 +33,7 @@ import type {
   EventRepairPreview,
   EventQuality,
   WeatherPlace,
+  WeatherPlaceResolution,
   WeatherProvider,
   WeatherProviderChannel,
   WeatherProviderPoliciesResponse,
@@ -228,6 +229,10 @@ export class AdminApi {
   weatherPlaceTimezone(latitude: number, longitude: number): Promise<{ timezone: string }> {
     const query = new URLSearchParams({ lat: String(latitude), lon: String(longitude) })
     return this.request(`/api/weather/place-timezone?${query}`, {}, 20_000)
+  }
+  weatherPlaceResolution(latitude: number, longitude: number): Promise<WeatherPlaceResolution> {
+    const query = new URLSearchParams({ lat: String(latitude), lon: String(longitude) })
+    return this.request(`/api/weather/place-resolution?${query}`, {}, 20_000)
   }
   saveWeather(subscription: Omit<WeatherSubscription, 'id'>): Promise<{ subscription: WeatherSubscription }> {
     return this.request('/api/weather', { method: 'POST', body: JSON.stringify(subscription) })

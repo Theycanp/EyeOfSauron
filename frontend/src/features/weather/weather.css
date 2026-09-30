@@ -47,6 +47,13 @@
 .weather-place-results button:hover { background: var(--surface-soft); }
 .weather-place-results small { color: var(--text-faint); white-space: nowrap; }
 .weather-map-wrap { display: grid; gap: 5px; }
+.weather-page .page-actions > div { min-width: 0; }
+.weather-page .page-actions h2 { letter-spacing: 0; overflow-wrap: anywhere; }
+.weather-page .page-actions .weather-location-detail { display: flex; gap: 4px 14px; flex-wrap: wrap; font-size: 12px; }
+.weather-name-input { display: flex; gap: 8px; min-width: 0; }
+.weather-name-field { display: grid; gap: 6px; min-width: 0; }
+.weather-name-input input { flex: 1; min-width: 0; }
+.weather-name-input .icon-button { flex-shrink: 0; }
 .weather-map { height: 255px; width: 100%; border: 1px solid var(--border); border-radius: 7px; background: #e7edf0; z-index: 0; }
 .weather-map .leaflet-control-attribution { font-size: 9px; }
 .weather-map-caption { color: var(--text-faint); font-size: 11px; }

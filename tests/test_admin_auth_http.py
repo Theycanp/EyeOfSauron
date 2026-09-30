@@ -161,6 +161,21 @@ class AdminAuthHttpTests(unittest.TestCase):
                     )) as response:
                         self.assertEqual("Asia/Shanghai", json.loads(response.read())["timezone"])
                     resolve.assert_called_once_with(40.156116, 116.283563)
+                from argus.places import PlaceResolution
+                with patch("argus.admin.QWeatherProvider.from_environment") as provider:
+                    provider.return_value.resolve_place.return_value = PlaceResolution(
+                        "北京市 · 昌平", "Asia/Shanghai", "QWeather", "administrative",
+                    )
+                    for _ in range(2):
+                        with urllib.request.urlopen(urllib.request.Request(
+                            f"{base_url}/api/weather/place-resolution?lat=40.1563&lon=116.2836",
+                            headers={"Cookie": cookie_values},
+                        )) as response:
+                            resolved_place = json.loads(response.read())
+                            self.assertEqual("北京市 · 昌平", resolved_place["label"])
+                            self.assertEqual("Asia/Shanghai", resolved_place["timezone"])
+                            self.assertNotIn("latitude", resolved_place)
+                    provider.return_value.resolve_place.assert_called_once()
                 for bad_query in ("lat=nan&lon=116", "lat=91&lon=116", "lat=40&lon=181",
                                   "lat=40&lat=41&lon=116", "lat=40", "lat=40&lon=116&extra=1"):
                     with self.assertRaises(urllib.error.HTTPError) as invalid_timezone:
@@ -169,9 +184,18 @@ class AdminAuthHttpTests(unittest.TestCase):
                             headers={"Cookie": cookie_values},
                         ))
                     self.assertEqual(400, invalid_timezone.exception.code)
+                    with self.assertRaises(urllib.error.HTTPError) as invalid_place:
+                        urllib.request.urlopen(urllib.request.Request(
+                            f"{base_url}/api/weather/place-resolution?{bad_query}",
+                            headers={"Cookie": cookie_values},
+                        ))
+                    self.assertEqual(400, invalid_place.exception.code)
                 with self.assertRaises(urllib.error.HTTPError) as denied_timezone:
                     urllib.request.urlopen(f"{base_url}/api/weather/place-timezone?lat=40&lon=116")
                 self.assertEqual(401, denied_timezone.exception.code)
+                with self.assertRaises(urllib.error.HTTPError) as denied_place:
+                    urllib.request.urlopen(f"{base_url}/api/weather/place-resolution?lat=40&lon=116")
+                self.assertEqual(401, denied_place.exception.code)
                 weather_payload = {key: value for key, value in weather["subscription"].items() if key != "id"}
                 weather_payload["daily_time"] = "08:00"
                 weather_write = urllib.request.Request(
@@ -363,6 +387,12 @@ class AdminAuthHttpTests(unittest.TestCase):
                     f"{base_url}/api/weather", headers={"Cookie": reader_cookies}
                 )) as response:
                     self.assertEqual(200, response.status)
+                with self.assertRaises(urllib.error.HTTPError) as reader_place:
+                    urllib.request.urlopen(urllib.request.Request(
+                        f"{base_url}/api/weather/place-resolution?lat=40&lon=116",
+                        headers={"Cookie": reader_cookies},
+                    ))
+                self.assertEqual(403, reader_place.exception.code)
                 reader_weather_write = urllib.request.Request(
                     f"{base_url}/api/weather", data=json.dumps(weather_payload).encode(),
                     headers={"Cookie": reader_cookies, "Content-Type": "application/json", "Origin": base_url},

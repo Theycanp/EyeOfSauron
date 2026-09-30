@@ -219,8 +219,39 @@ origin is allowed. If the bounded foreground poll does not see a fresh forecast,
 the page reports that collection continues in the background instead of claiming
 the new location is ready. Tile loading failures do not block coordinate search
 or saving.
+
+Map and browser selections resolve the chosen WGS84 coordinates to a readable
+nearby city/district name through the separate `PlaceProvider` port in
+`places.py`. QWeather GeoAPI currently implements that port using the existing
+JWT transport; its returned city-center coordinates are never substituted for
+the pin. For the Shahe test coordinates, the real response names Changping in
+Beijing, not a verified campus or shop. The operator can edit the name and
+re-run lookup with the name-field button. The heading shows the saved name;
+coordinates and timezone appear on a secondary line. Legacy generated
+coordinate labels are shortened in the heading, without rewriting history.
+
+`GET /api/weather/place-resolution?lat=...&lon=...` requires `settings:write`
+and accepts only finite, in-range coordinates. A successful response includes
+`label`, `timezone`, `provider` and `precision=administrative`. Without configured
+or working QWeather, Open-Meteo resolves timezone and `label` is null; the UI
+asks for manual naming. Total provider timeout is bounded (QWeather 5 seconds,
+Open-Meteo fallback 12 seconds). There is no continuous reverse lookup or
+background location tracking. Selection is debounced for 350 ms; superseded
+responses and unmounted pages cannot alter the draft, and edits to name/timezone
+made while a request is pending are preserved.
+
+The admin unit loads the same optional `/etc/argus/qweather.env` as the daemon.
+All users share a maximum of 60 uncached selections per rolling hour in the
+single admin process. Cache keys round only for lookup reuse to six decimals;
+saved coordinates retain the user's original precision. The process cache is
+bounded to 128 entries: 24 hours for names, 60 seconds for timezone-only fallback.
+HTTP 429 leaves manual naming/timezone available. Cache and request accounting
+are disposable and reset on process restart; this is separate from persistent
+background forecast budgets. No schema migration is required.
+GeoAPI documentation: [coordinate city lookup](https://dev.qweather.com/en/docs/api/geoapi/city-lookup/).
+
 The authenticated read-only `GET /api/weather/place-timezone?lat=...&lon=...`
-resolves a map click to an IANA timezone using Open-Meteo's fixed-host forecast
+remains available for timezone-only callers. It uses Open-Meteo's fixed-host forecast
 endpoint with `timezone=auto` and a single current field. Coordinates are
 strictly bounded before network access; an unavailable or invalid provider
 timezone is an explicit failure and never silently reuses the previous zone.
@@ -340,8 +371,9 @@ or change the active subscription as part of recording this plan.
 Current search uses Open-Meteo's settlement-oriented geocoding API. A read-only
 query for Beijing University of Posts and Telecommunications Shahe campus in
 Chinese returned no results, while `Beijing` returned city results. The current
-Leaflet/OpenStreetMap picker supports manual coordinates, but does not provide
-detailed reverse geocoding. Browser location requests currently allow a
+Leaflet/OpenStreetMap picker supports manual coordinates and QWeather
+city/district naming, but does not provide detailed reverse geocoding.
+Browser location requests currently allow a
 ten-minute cached result and do not request high accuracy.
 
 Prefer a Tencent proof of concept for personal use; keep Amap as an alternative.

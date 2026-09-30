@@ -54,6 +54,13 @@ creates another revision; it never edits history.
   Turning off condition notifications does not turn off collection; turning off
   a provider channel does stop its background requests. Quota/disabled state
   must not be mistaken for an upstream outage.
+- Map/browser coordinate naming uses the existing optional QWeather JWT
+  environment in the admin service. It runs on explicit selection or the name
+  lookup button, independently of forecast channel switches. No QWeather
+  configuration means timezone-only fallback plus an editable place name.
+  Successful lookups are cached for 24 hours (128 entries); missing names for
+  60 seconds. The shared admin process limits uncached selections to 60/hour;
+  restarting the process clears this derived cache and limit. See `WEATHER.md`.
 
 New credential-free source features should default on only after a real fetch and
 parser probe succeeds. Credential-dependent and device-control features remain

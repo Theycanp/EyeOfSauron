@@ -128,6 +128,13 @@ export interface WeatherPlace {
   timezone: string
 }
 
+export interface WeatherPlaceResolution {
+  label: string | null
+  timezone: string
+  provider: string | null
+  precision: 'administrative' | null
+}
+
 export interface AdminIdentity extends JsonRecord {
   id: number | null
   username: string

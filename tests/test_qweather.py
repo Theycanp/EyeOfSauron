@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
 from argus.qweather import QWeatherError, QWeatherProvider
+from argus.places import PlaceLookupError
 from argus.weather import WeatherSubscription
 
 
@@ -42,6 +43,30 @@ class QWeatherTests(unittest.TestCase):
         self.assertEqual({"iss": "Q123456789", "sub": "P123456789", "iat": NOW,
                           "exp": NOW + 900}, json.loads(decode(payload)))
         self.key.public_key().verify(decode(signature), f"{header}.{payload}".encode())
+
+    def test_place_lookup_names_region_without_snapping_the_coordinates(self) -> None:
+        from urllib.parse import parse_qs, urlsplit
+        payload = {"location": [{"name": "昌平", "adm1": "北京市", "country": "中国",
+                                 "tz": "Asia/Shanghai", "lat": "40.21809", "lon": "116.23591"}]}
+        with patch.object(self.provider, "_request", return_value=payload) as request:
+            result = self.provider.resolve_place(40.1563, 116.2836)
+        self.assertEqual("北京市 · 昌平", result.label)
+        self.assertEqual("administrative", result.precision)
+        self.assertEqual("Asia/Shanghai", result.timezone)
+        query = parse_qs(urlsplit(request.call_args.args[0]).query)
+        self.assertEqual(["116.283600,40.156300"], query["location"])
+        self.assertEqual(5, request.call_args.kwargs["timeout"])
+
+    def test_place_lookup_rejects_missing_names_and_invalid_timezones(self) -> None:
+        for payload in ({}, {"location": []}, {"location": ["invalid"]},
+                        {"location": [{"name": "昌平", "tz": "Invalid/Zone"}]},
+                        {"location": [{"name": "", "tz": "Asia/Shanghai"}]}):
+            with self.subTest(payload=payload), patch.object(self.provider, "_request", return_value=payload):
+                with self.assertRaises(PlaceLookupError):
+                    self.provider.resolve_place(40, 116)
+        with patch.object(self.provider, "_request", side_effect=QWeatherError("HTTP 429")):
+            with self.assertRaises(PlaceLookupError):
+                self.provider.resolve_place(40, 116)
 
     def test_bounded_gzip_json_request_hides_authentication_from_url(self) -> None:
         body = gzip.compress(json.dumps({"code": "200", "minutely": []}).encode())

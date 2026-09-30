@@ -288,6 +288,23 @@ class WeatherTests(unittest.TestCase):
                  "latitude": float("nan")}, actor="owner", now=DAY + 1,
             )
 
+    def test_name_only_update_preserves_forecast_and_daily_notification_state(self) -> None:
+        now = DAY + 10 * 3600
+        self.record(now)
+        before = self.database.get_weather_status()
+        notifications = self.alert_rules()
+        editable = {key: value for key, value in asdict(self.subscription).items() if key != "id"}
+        self.subscription = self.database.update_weather_subscription(
+            {**editable, "label": "北京市 · 昌平"}, actor="owner", now=now + 1,
+        )
+        after = self.database.get_weather_status()
+        for key in ("latest", "last_daily_date", "last_success_at", "rain_expected"):
+            self.assertEqual(before[key], after[key])
+        self.assertEqual(editable["latitude"], self.subscription.latitude)
+        self.assertEqual(editable["longitude"], self.subscription.longitude)
+        self.assertEqual(0, self.record(now + 600))
+        self.assertEqual(notifications, self.alert_rules())
+
     def test_schema_twenty_two_migration_is_additive(self) -> None:
         self.database.close()
         connection = sqlite3.connect(self.path)

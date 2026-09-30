@@ -5,6 +5,23 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.29.4] - 2026-09-30
+
+### Fixed
+
+- Resolve map/browser coordinates to a readable nearby administrative name
+  through QWeather GeoAPI. Keep the chosen WGS84 pin unchanged, display its
+  coordinates below the heading, and retain editable names and timezone fallback.
+- Ignore superseded coordinate lookups and preserve names/timezones manually
+  edited while a lookup is pending. Add a manual name-resolution action.
+
+### Notes
+
+- The admin service now loads the optional existing QWeather environment file.
+  City/district naming does not provide school/shop POI lookup. No schema or
+  forecast-policy change is required; place requests are operator initiated,
+  cached and limited to 60 uncached selections per process per hour.
+
 ## [0.29.3] - 2026-09-30
 
 ### Fixed

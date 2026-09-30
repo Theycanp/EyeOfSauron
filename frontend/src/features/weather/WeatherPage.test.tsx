@@ -202,7 +202,7 @@ describe('WeatherPage', () => {
   it('uses the latest coordinate timezone response and ignores an older response', async () => {
     const original = navigator.geolocation
     let call = 0
-    const pending: Array<(value: { timezone: string }) => void> = []
+    const pending: Array<(value: { label: string; timezone: string }) => void> = []
     Object.defineProperty(navigator, 'geolocation', {
       configurable: true,
       value: { getCurrentPosition: (success: PositionCallback) => {
@@ -211,20 +211,24 @@ describe('WeatherPage', () => {
       } },
     })
     try {
+      const resolvePlace = vi.fn().mockImplementation(() => new Promise((resolve) => pending.push(resolve)))
       const api = {
         weather: vi.fn().mockResolvedValue(status),
-        weatherPlaceTimezone: vi.fn().mockImplementation(() => new Promise((resolve) => pending.push(resolve))),
+        weatherPlaceResolution: resolvePlace,
       } as unknown as AdminApi
       const user = userEvent.setup()
       render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
       await screen.findByText('雨情等待基线')
       await user.click(screen.getByRole('button', { name: '浏览器定位' }))
+      await waitFor(() => expect(resolvePlace).toHaveBeenCalledTimes(1))
       await user.click(screen.getByRole('button', { name: '浏览器定位' }))
-      expect((api.weatherPlaceTimezone as ReturnType<typeof vi.fn>).mock.calls).toEqual([[35.7, 139.7], [40.7, -74]])
-      pending[1]?.({ timezone: 'America/New_York' })
+      await waitFor(() => expect(resolvePlace).toHaveBeenCalledTimes(2))
+      expect(resolvePlace.mock.calls).toEqual([[35.7, 139.7], [40.7, -74]])
+      pending[1]?.({ label: '美国 · 纽约', timezone: 'America/New_York' })
       await waitFor(() => expect(screen.getByLabelText('时区')).toHaveValue('America/New_York'))
-      pending[0]?.({ timezone: 'Asia/Tokyo' })
+      pending[0]?.({ label: '日本 · 东京', timezone: 'Asia/Tokyo' })
       await waitFor(() => expect(screen.getByLabelText('时区')).toHaveValue('America/New_York'))
+      expect(screen.getByLabelText('地点名称')).toHaveValue('美国 · 纽约')
     } finally {
       Object.defineProperty(navigator, 'geolocation', { configurable: true, value: original })
     }
@@ -239,7 +243,7 @@ describe('WeatherPage', () => {
     try {
       const api = {
         weather: vi.fn().mockResolvedValue(status),
-        weatherPlaceTimezone: vi.fn().mockRejectedValue(new Error('lookup unavailable')),
+        weatherPlaceResolution: vi.fn().mockRejectedValue(new Error('lookup unavailable')),
       } as unknown as AdminApi
       const user = userEvent.setup()
       render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
@@ -247,6 +251,89 @@ describe('WeatherPage', () => {
       await user.click(screen.getByRole('button', { name: '浏览器定位' }))
       expect(await screen.findByText(/无法自动确认该坐标的时区/)).toBeInTheDocument()
       expect(screen.getByLabelText('时区')).toHaveValue('Asia/Shanghai')
+    } finally {
+      Object.defineProperty(navigator, 'geolocation', { configurable: true, value: original })
+    }
+  })
+
+  it('fills a coordinate name without changing the selected coordinates', async () => {
+    const api = {
+      weather: vi.fn().mockResolvedValue(status),
+      weatherPlaceResolution: vi.fn().mockResolvedValue({ label: '北京市 · 昌平', timezone: 'Asia/Shanghai' }),
+    } as unknown as AdminApi
+    const user = userEvent.setup()
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    await screen.findByText('雨情等待基线')
+    await user.click(screen.getByRole('button', { name: '识别地名' }))
+    await waitFor(() => expect(screen.getByLabelText('地点名称')).toHaveValue('北京市 · 昌平'))
+    expect(screen.getByLabelText('纬度')).toHaveValue(status.subscription.latitude)
+    expect(screen.getByLabelText('经度')).toHaveValue(status.subscription.longitude)
+  })
+
+  it('preserves a name and timezone edited while lookup is pending', async () => {
+    let resolve: (value: { label: string; timezone: string }) => void = () => undefined
+    const resolvePlace = vi.fn().mockImplementation(() => new Promise((done) => { resolve = done }))
+    const api = {
+      weather: vi.fn().mockResolvedValue(status),
+      weatherPlaceResolution: resolvePlace,
+    } as unknown as AdminApi
+    const user = userEvent.setup()
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    await screen.findByText('雨情等待基线')
+    await user.click(screen.getByRole('button', { name: '识别地名' }))
+    await waitFor(() => expect(resolvePlace).toHaveBeenCalledTimes(1))
+    await user.clear(screen.getByLabelText('地点名称'))
+    await user.type(screen.getByLabelText('地点名称'), '沙河校区')
+    await user.clear(screen.getByLabelText('时区'))
+    await user.type(screen.getByLabelText('时区'), 'UTC')
+    resolve({ label: '北京市 · 昌平', timezone: 'Asia/Shanghai' })
+    await screen.findByText(/已识别附近行政区域/)
+    expect(screen.getByLabelText('地点名称')).toHaveValue('沙河校区')
+    expect(screen.getByLabelText('时区')).toHaveValue('UTC')
+  })
+
+  it('resolves timezone but asks for a name when no place provider is available', async () => {
+    const api = {
+      weather: vi.fn().mockResolvedValue(status),
+      weatherPlaceResolution: vi.fn().mockResolvedValue({ label: null, timezone: 'Asia/Tokyo' }),
+    } as unknown as AdminApi
+    const user = userEvent.setup()
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    await screen.findByText('雨情等待基线')
+    await user.click(screen.getByRole('button', { name: '识别地名' }))
+    await screen.findByText(/暂未识别到地名/)
+    expect(screen.getByLabelText('地点名称')).toHaveValue(status.subscription.label)
+    expect(screen.getByLabelText('时区')).toHaveValue('Asia/Tokyo')
+  })
+
+  it('keeps legacy coordinate labels out of the title and shows coordinates separately', async () => {
+    const api = { weather: vi.fn().mockResolvedValue({ ...status, subscription: {
+      ...status.subscription, label: '地图坐标 纬度 40.1563，经度 116.2836',
+    } }) } as unknown as AdminApi
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    expect(await screen.findByRole('heading', { name: '本地天气 · 已选地点' })).toBeVisible()
+    expect(screen.getByText('纬度 40.1561')).toBeVisible()
+    expect(screen.getByText('经度 116.2836')).toBeVisible()
+  })
+
+  it('ignores a delayed browser position after manual coordinate selection', async () => {
+    const original = navigator.geolocation
+    let complete: PositionCallback = () => undefined
+    Object.defineProperty(navigator, 'geolocation', {
+      configurable: true, value: { getCurrentPosition: (success: PositionCallback) => { complete = success } },
+    })
+    try {
+      const api = { weather: vi.fn().mockResolvedValue(status) } as unknown as AdminApi
+      const user = userEvent.setup()
+      render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+      await screen.findByText('雨情等待基线')
+      await user.click(screen.getByRole('button', { name: '浏览器定位' }))
+      expect(screen.getByRole('button', { name: '保存天气订阅' })).toBeDisabled()
+      await user.clear(screen.getByLabelText('纬度'))
+      await user.type(screen.getByLabelText('纬度'), '35.7')
+      complete({ coords: { latitude: 40.7, longitude: -74 } } as GeolocationPosition)
+      expect(screen.getByLabelText('纬度')).toHaveValue(35.7)
+      expect(screen.getByRole('button', { name: '保存天气订阅' })).toBeEnabled()
     } finally {
       Object.defineProperty(navigator, 'geolocation', { configurable: true, value: original })
     }

@@ -64,6 +64,11 @@ a fresh validated Open-Meteo poll, and the weather page's read/write permissions
 For QWeather, provision a separate Ed25519 private key readable only by the
 service group, configure the five environment variables in `WEATHER.md` through
 `/etc/argus/qweather.env`, and verify minute, warning and astronomy timestamps.
+The admin unit also loads this optional file for QWeather GeoAPI city/district
+naming. Verify an authenticated administrator's `/api/weather/place-resolution`
+response contains a readable name and valid timezone; anonymous/viewer access
+must return 401/403. The selected coordinates must not be replaced by the
+provider's city-center coordinates. See `WEATHER.md` for lookup limits/fallback.
 For schema 26, confirm a current air-quality estimate and local-date-matched
 sun/moon data appear on the Weather page; missing optional data must not block
 the forecast or official warnings. The `lunardate` runtime dependency is pinned
