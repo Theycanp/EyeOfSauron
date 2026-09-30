@@ -27,7 +27,9 @@ from .notifications import (
 )
 from .open_meteo import OpenMeteoProvider, WeatherProviderError
 from .persistence import ControlPlaneRepository, ManagedConfigRepository, RevisionConflictError
+from .places import PlaceLookupError, PlaceLookupLimited, PlaceProvider, PlaceResolutionService
 from .providers import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
+from .qweather import QWeatherError, QWeatherProvider
 from .reminders import ReminderError, parse_reminder
 from .util import sanitize_error
 
@@ -37,6 +39,13 @@ LOGGER = logging.getLogger("argus.admin")
 
 class AdminError(ValueError):
     pass
+
+
+def _place_provider() -> PlaceProvider | None:
+    try:
+        return QWeatherProvider.from_environment()
+    except (QWeatherError, OSError, ValueError, TypeError) as exc:
+        raise PlaceLookupError("place provider is unavailable") from exc
 
 
 _SENSITIVE_KEY = re.compile(r"(?:^|_)(?:token|password|secret|key|api_?key|apikey)(?:$|_)")
@@ -737,6 +746,7 @@ def make_handler(
 ):
     registry = provider_registry or store.provider_registry
     authenticator = AdminAuth(database, auth_token)
+    place_resolver = PlaceResolutionService(_place_provider, OpenMeteoProvider().resolve_timezone)
     class Handler(BaseHTTPRequestHandler):
         server_version = f"ArgusAdmin/{__version__}"
 
@@ -926,6 +936,8 @@ def make_handler(
             request = urllib.parse.urlsplit(self.path)
             path = request.path
             required = "users:manage" if path.startswith("/api/users") else "read"
+            if path == "/api/weather/place-resolution":
+                required = "settings:write"
             if not self._authorized(required):
                 status = HTTPStatus.FORBIDDEN if getattr(self, "auth_context", None) else HTTPStatus.UNAUTHORIZED
                 self._json(status, {"error": "forbidden", "code": "forbidden"})
@@ -1229,7 +1241,7 @@ def make_handler(
                     return
                 self._json(HTTPStatus.OK, {"places": places})
                 return
-            if path == "/api/weather/place-timezone":
+            if path in {"/api/weather/place-timezone", "/api/weather/place-resolution"}:
                 latitude_values, longitude_values = query.get("lat", []), query.get("lon", [])
                 if (set(query) != {"lat", "lon"} or len(latitude_values) != 1
                         or len(longitude_values) != 1
@@ -1238,16 +1250,24 @@ def make_handler(
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "valid lat and lon are required", "code": "invalid_query"})
                     return
                 try:
-                    timezone = OpenMeteoProvider().resolve_timezone(
-                        float(latitude_values[0]), float(longitude_values[0])
-                    )
+                    latitude, longitude = float(latitude_values[0]), float(longitude_values[0])
+                    if path == "/api/weather/place-resolution":
+                        resolution = place_resolver.resolve(latitude, longitude)
+                    else:
+                        timezone = OpenMeteoProvider().resolve_timezone(latitude, longitude)
                 except ValueError:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid coordinates", "code": "invalid_query"})
                     return
                 except WeatherProviderError as exc:
                     self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc), "code": "timezone_lookup_failed"})
                     return
-                self._json(HTTPStatus.OK, {"timezone": timezone})
+                except PlaceLookupLimited:
+                    self._json(HTTPStatus.TOO_MANY_REQUESTS, {
+                        "error": "地点识别次数过多，请稍后重试或手动填写名称与时区。", "code": "place_lookup_limited",
+                    })
+                    return
+                self._json(HTTPStatus.OK, asdict(resolution) if path == "/api/weather/place-resolution"
+                           else {"timezone": timezone})
                 return
             if path == "/api/weather":
                 self._json(HTTPStatus.OK, database.get_weather_status())

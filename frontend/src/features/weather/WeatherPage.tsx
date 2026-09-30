@@ -29,6 +29,10 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
+function locationTitle(label: string): string {
+  return /^(地图坐标|当前位置) 纬度 /.test(label) ? '已选地点' : label
+}
+
 function hourLabel(at: number, timezone: string): string {
   return localClock(at, timezone).replace(/^0/, '')
 }
@@ -196,20 +200,34 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
   const [refreshing, setRefreshing] = useState(false)
   const [resolvingTimezone, setResolvingTimezone] = useState(false)
   const [timezoneWarning, setTimezoneWarning] = useState('')
+  const [locationNameNotice, setLocationNameNotice] = useState('')
   const locationRequest = useRef(0)
+  const timezoneEdit = useRef(0)
 
   const pickCoordinates = async (latitude: number, longitude: number, label: string) => {
     const request = ++locationRequest.current
+    const timezoneVersion = timezoneEdit.current
+    setGeoState('idle')
     setDraft((current) => current && ({ ...current, label, latitude, longitude }))
     setTimezoneWarning('')
+    setLocationNameNotice('')
     setResolvingTimezone(true)
     try {
-      const result = await api.weatherPlaceTimezone(latitude, longitude)
+      await delay(350)
+      if (request !== locationRequest.current) return
+      const result = await api.weatherPlaceResolution(latitude, longitude)
       if (request !== locationRequest.current) return
       if (!result.timezone) throw new Error('时区解析结果为空')
-      setDraft((current) => current && ({ ...current, timezone: result.timezone }))
+      setDraft((current) => current && ({ ...current,
+        timezone: timezoneVersion === timezoneEdit.current ? result.timezone : current.timezone,
+        label: current.label === label && result.label ? result.label : current.label,
+      }))
+      setLocationNameNotice(result.label
+        ? '已识别附近行政区域，可将名称改为学校、住宅或其他便于辨认的名称。'
+        : '暂未识别到地名，请手动填写地点名称。')
     } catch {
       if (request === locationRequest.current) setTimezoneWarning('无法自动确认该坐标的时区；已保留原时区，请核对并修改后再保存。')
+      if (request === locationRequest.current) setLocationNameNotice('地点识别暂不可用，请手动填写地点名称。')
     } finally {
       if (request === locationRequest.current) setResolvingTimezone(false)
     }
@@ -239,7 +257,7 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
       if (cause instanceof Error && cause.message.includes('登录')) onUnauthorized()
       else setError(cause instanceof Error ? cause.message : '天气数据暂时无法读取')
     })
-    return () => { active = false }
+    return () => { active = false; locationRequest.current += 1 }
   }, [api, onUnauthorized])
 
   const search = async () => {
@@ -264,22 +282,18 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
       return
     }
     setGeoState('requesting')
-    setBusy(true)
     const request = ++locationRequest.current
     navigator.geolocation.getCurrentPosition(
       ({ coords }) => {
-        if (request === locationRequest.current) {
-          const latitude = Number(coords.latitude.toFixed(6))
-          const longitude = Number(coords.longitude.toFixed(6))
-          void pickCoordinates(latitude, longitude, `当前位置 纬度 ${latitude.toFixed(4)}，经度 ${longitude.toFixed(4)}`)
-        }
-        setBusy(false)
+        if (request !== locationRequest.current) return
+        const latitude = Number(coords.latitude.toFixed(6))
+        const longitude = Number(coords.longitude.toFixed(6))
+        void pickCoordinates(latitude, longitude, '当前位置')
         setGeoState('idle')
         setError('')
       },
       (cause) => {
         if (request !== locationRequest.current) return
-        setBusy(false)
         const state = cause.code === 1 ? 'denied' : cause.code === 3 ? 'timeout' : 'unavailable'
         setGeoState(state)
         setError(cause.code === 1
@@ -345,9 +359,20 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
     locationRequest.current += 1
     setResolvingTimezone(false)
     setTimezoneWarning('')
+    setLocationNameNotice('')
+    setGeoState('idle')
     setDraft((current) => current && ({ ...current, ...place }))
     setPlaces([])
     setQuery('')
+  }
+
+  const editCoordinate = (field: 'latitude' | 'longitude', value: number) => {
+    locationRequest.current += 1
+    setGeoState('idle')
+    setResolvingTimezone(false)
+    setLocationNameNotice('')
+    setTimezoneWarning('坐标已手动修改，请识别地名并核对时区。')
+    setDraft((current) => current && ({ ...current, label: '地图选点', [field]: value }))
   }
 
   if (!draft) return error ? <div className="form-error" role="alert">{error}<button className="button subtle" onClick={() => { void load(true) }}>重试</button></div>
@@ -360,10 +385,15 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
     localDate(latest.window_start_at, snapshotTimezone) === localDate(latest.observed_at, snapshotTimezone)
 
   const forecastHours = latest?.hourly ?? latest?.forecast_hours ?? []
+  const selectingLocation = resolvingTimezone || geoState === 'requesting'
   return <div className="weather-page">
     <div className="page-actions"><button className="button subtle" aria-expanded={showProviders} onClick={() => setShowProviders(value => !value)}>天气来源与预算</button></div>
     {showProviders && <WeatherProvidersPanel api={api} canWrite={canWrite} onUnauthorized={onUnauthorized} />}
-    <div className="page-actions"><div><h2>本地天气 · {status?.subscription.label || draft.label}</h2><p>{status?.subscription.timezone || draft.timezone}</p></div>
+    <div className="page-actions"><div><h2>本地天气 · {locationTitle(status?.subscription.label || draft.label)}</h2><p className="weather-location-detail">
+      <span>纬度 {(status?.subscription.latitude ?? draft.latitude).toFixed(4)}</span>
+      <span>经度 {(status?.subscription.longitude ?? draft.longitude).toFixed(4)}</span>
+      <span>{status?.subscription.timezone || draft.timezone}</span>
+    </p></div>
       <button className="icon-button" aria-label="刷新天气状态" title="刷新天气状态" onClick={() => { void load() }}><RefreshCw size={18} /></button></div>
 
     <section className="weather-current" aria-label="最新天气预报">
@@ -405,21 +435,23 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
       <div className="weather-section-heading"><MapPin size={19} /><h3>订阅地点</h3></div>
       <div className="weather-location-tools"><div className="weather-search"><input aria-label="搜索城市或地区" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void search() } }} placeholder="搜索城市或地区" />
         <button className="icon-button" type="button" aria-label="搜索地点" title="搜索地点" disabled={searching || query.trim().length < 2} onClick={() => { void search() }}>{searching ? <RefreshCw className="spin" size={18} /> : <Search size={18} />}</button></div>
-        <button className="button subtle" type="button" aria-label="浏览器定位" onClick={() => { void requestLocation() }} disabled={busy || !canWrite}><LocateFixed size={17} />{geoState === 'requesting' ? '正在请求定位…' : geoState === 'denied' ? '重新请求定位' : '浏览器定位'}</button></div>
+        <button className="button subtle" type="button" aria-label="浏览器定位" onClick={() => { void requestLocation() }} disabled={busy || geoState === 'requesting' || !canWrite}><LocateFixed size={17} />{geoState === 'requesting' ? '正在请求定位…' : geoState === 'denied' ? '重新请求定位' : '浏览器定位'}</button></div>
       {geoState === 'denied' && <div className="geo-help" role="status">定位权限被浏览器拒绝。请点击地址栏左侧的权限图标，允许此站点访问位置后重试。</div>}
-      {resolvingTimezone && <div className="geo-help" role="status">正在根据坐标确认时区…</div>}
+      {resolvingTimezone && <div className="geo-help" role="status">正在识别地点名称与时区…</div>}
       {timezoneWarning && <div className="geo-help" role="alert">{timezoneWarning}</div>}
+      {locationNameNotice && <div className="geo-help" role="status">{locationNameNotice}</div>}
       {!!places.length && <div className="weather-place-results" role="listbox" aria-label="地点搜索结果">{places.map((place) => <button disabled={!canWrite} type="button" role="option" aria-selected="false" key={`${place.latitude}-${place.longitude}`} onClick={() => choose(place)}>{place.label}<small>{place.latitude.toFixed(3)}, {place.longitude.toFixed(3)}</small></button>)}</div>}
-      <WeatherMap latitude={draft.latitude} longitude={draft.longitude} disabled={!canWrite} onPick={(latitude, longitude) => { void pickCoordinates(latitude, longitude, `地图坐标 纬度 ${latitude.toFixed(4)}，经度 ${longitude.toFixed(4)}`) }} />
-      <div className="form-grid two"><label><span>地点名称</span><input value={draft.label} maxLength={100} required disabled={!canWrite} onChange={(event) => setDraft({ ...draft, label: event.target.value })} /></label>
-        <label><span>时区</span><input value={draft.timezone} required disabled={!canWrite} onChange={(event) => { setTimezoneWarning(''); setDraft({ ...draft, timezone: event.target.value }) }} /></label></div>
-      <div className="form-grid two"><label><span>纬度</span><input type="number" step="any" min="-90" max="90" value={draft.latitude} required disabled={!canWrite} onChange={(event) => { locationRequest.current += 1; setResolvingTimezone(false); setTimezoneWarning('坐标已手动修改，请核对时区。'); setDraft({ ...draft, latitude: Number(event.target.value) }) }} /></label>
-        <label><span>经度</span><input type="number" step="any" min="-180" max="180" value={draft.longitude} required disabled={!canWrite} onChange={(event) => { locationRequest.current += 1; setResolvingTimezone(false); setTimezoneWarning('坐标已手动修改，请核对时区。'); setDraft({ ...draft, longitude: Number(event.target.value) }) }} /></label></div>
+      <WeatherMap latitude={draft.latitude} longitude={draft.longitude} disabled={busy || !canWrite} onPick={(latitude, longitude) => { void pickCoordinates(latitude, longitude, '地图选点') }} />
+      <div className="form-grid two"><div className="weather-name-field"><label htmlFor="weather-location-name">地点名称</label><div className="weather-name-input"><input id="weather-location-name" value={draft.label} maxLength={100} required disabled={!canWrite} onChange={(event) => setDraft({ ...draft, label: event.target.value })} />
+        <button className="icon-button" type="button" aria-label="识别地名" title="根据坐标识别地名" disabled={busy || resolvingTimezone || !canWrite} onClick={() => { void pickCoordinates(draft.latitude, draft.longitude, draft.label) }}><MapPin size={17} /></button></div></div>
+        <label><span>时区</span><input value={draft.timezone} required disabled={!canWrite} onChange={(event) => { timezoneEdit.current += 1; setTimezoneWarning(''); setDraft({ ...draft, timezone: event.target.value }) }} /></label></div>
+      <div className="form-grid two"><label><span>纬度</span><input type="number" step="any" min="-90" max="90" value={draft.latitude} required disabled={!canWrite} onChange={(event) => editCoordinate('latitude', Number(event.target.value))} /></label>
+        <label><span>经度</span><input type="number" step="any" min="-180" max="180" value={draft.longitude} required disabled={!canWrite} onChange={(event) => editCoordinate('longitude', Number(event.target.value))} /></label></div>
       <div className="weather-section-heading"><CloudSun size={19} /><h3>通知</h3></div>
       <div className="form-grid two"><label><span>每天推送时间</span><input type="time" value={draft.daily_time} disabled={!canWrite} required onChange={(event) => setDraft({ ...draft, daily_time: event.target.value })} /></label>
         <div className="weather-toggles"><label className="switch-field"><input type="checkbox" checked={draft.daily_enabled} disabled={!canWrite} onChange={(event) => setDraft({ ...draft, daily_enabled: event.target.checked })} /><span><strong>每日天气</strong></span></label>
           <label className="switch-field"><input type="checkbox" checked={draft.alerts_enabled} disabled={!canWrite} onChange={(event) => setDraft({ ...draft, alerts_enabled: event.target.checked })} /><span><strong>天气变化提醒</strong></span></label></div></div>
-      <div className="weather-footer"><span>预报：<a href="https://open-meteo.com/" target="_blank" rel="noopener noreferrer">Open-Meteo</a>（CC BY 4.0），每小时更新。临近雨雪、官方预警转发：<a href="https://developer.qweather.com/attribution.html" target="_blank" rel="noopener noreferrer">QWeather</a>。模型预报不是官方预警；预警可能延迟，请以发布机构为准。</span><button className="button primary" type="submit" disabled={busy || resolvingTimezone || !canWrite}>{busy || resolvingTimezone ? <RefreshCw className="spin" size={17} /> : <CloudSun size={17} />}{refreshing ? '正在刷新天气…' : '保存天气订阅'}</button></div>
+      <div className="weather-footer"><span>预报：<a href="https://open-meteo.com/" target="_blank" rel="noopener noreferrer">Open-Meteo</a>（CC BY 4.0），每小时更新。地名、临近雨雪、官方预警转发：<a href="https://developer.qweather.com/attribution.html" target="_blank" rel="noopener noreferrer">QWeather</a>。模型预报不是官方预警；预警可能延迟，请以发布机构为准。</span><button className="button primary" type="submit" disabled={busy || selectingLocation || !canWrite}>{busy || selectingLocation ? <RefreshCw className="spin" size={17} /> : <CloudSun size={17} />}{refreshing ? '正在刷新天气…' : '保存天气订阅'}</button></div>
     </form>
   </div>
 }

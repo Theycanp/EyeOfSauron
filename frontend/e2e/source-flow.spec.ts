@@ -40,6 +40,10 @@ async function mockAdminApi(page: Page) {
       await route.fulfill({ json: { places: [{ label: '北京市天安门', latitude: 39.905, longitude: 116.397, timezone: 'Asia/Shanghai' }] } })
       return
     }
+    if (path === '/api/weather/place-resolution') {
+      await route.fulfill({ json: { label: '北京市 · 昌平', timezone: 'Asia/Shanghai', provider: 'QWeather', precision: 'administrative' } })
+      return
+    }
     if (path === '/api/weather') {
       if (route.request().method() === 'POST') {
         const submitted = route.request().postDataJSON() as Partial<typeof weatherSubscription>
@@ -679,4 +683,24 @@ test('blocked map tiles show a usable location fallback', async ({ page }) => {
   await expect(page.getByText('地图暂时不可用，请使用搜索或下方坐标输入。你仍可以保存坐标。')).toBeVisible()
   await expect(page.getByLabel('纬度')).toBeEnabled()
   await expect(page.getByLabel('经度')).toBeEnabled()
+})
+
+test('map selection resolves a name and saves the original pin on desktop and mobile', async ({ page }, testInfo) => {
+  await mockAdminApi(page)
+  await login(page)
+  const menu = page.getByRole('button', { name: '打开导航' })
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('button', { name: '天气', exact: true }).click()
+  await page.locator('.weather-map').click({ position: { x: 140, y: 110 } })
+  const latitude = await page.getByLabel('纬度').inputValue()
+  const longitude = await page.getByLabel('经度').inputValue()
+  await expect(page.getByLabel('地点名称')).toHaveValue('北京市 · 昌平')
+  await expect(page.getByLabel('纬度')).toHaveValue(latitude)
+  await expect(page.getByLabel('经度')).toHaveValue(longitude)
+  await page.getByRole('button', { name: '保存天气订阅' }).click()
+  await expect(page.getByRole('heading', { name: '本地天气 · 北京市 · 昌平' })).toBeVisible()
+  await expect(page.getByText('天气订阅已更新，已载入最新数据。')).toBeVisible({ timeout: 10_000 })
+  await page.evaluate(() => window.scrollTo(0, 0))
+  await page.screenshot({ path: testInfo.outputPath('weather-place-name.png'), fullPage: true })
+  expect(await page.locator('body').evaluate(node => node.scrollWidth)).toBe(await page.locator('body').evaluate(node => node.clientWidth))
 })

@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
+from .places import PlaceLookupError, PlaceResolution
 from .weather import (
     ForecastHour, NowcastSlot, OfficialWeatherAlert, WeatherAstronomy, WeatherForecast,
     WeatherNowcast, WeatherSubscription, WeatherRequestDenied, validate_forecast,
@@ -152,14 +153,14 @@ class QWeatherProvider:
         signing_input = header + b"." + payload
         return (signing_input + b"." + _b64(self.key.sign(signing_input))).decode("ascii")
 
-    def _request(self, path: str) -> dict[str, Any]:
+    def _request(self, path: str, *, timeout: float = 12) -> dict[str, Any]:
         request = urllib.request.Request(
             f"https://{self.host}{path}",
             headers={"Authorization": "Bearer " + self._token(), "Accept": "application/json",
                      "Accept-Encoding": "gzip", "User-Agent": "EyeOfSauron/0.24"},
         )
         try:
-            with self.opener.open(request, timeout=12) as response:
+            with self.opener.open(request, timeout=timeout) as response:
                 if response.status != 200 or not response.headers.get("Content-Type", "").lower().startswith("application/json"):
                     raise QWeatherError("QWeather returned an invalid HTTP response")
                 raw = response.read(_MAX_BODY + 1)
@@ -183,6 +184,33 @@ class QWeatherProvider:
                 raise QWeatherError(f"QWeather returned provider status {code}")
             raise QWeatherError("QWeather returned an invalid payload")
         return result
+
+    def resolve_place(self, latitude: float, longitude: float) -> PlaceResolution:
+        if (not math.isfinite(latitude) or not math.isfinite(longitude)
+                or not -90 <= latitude <= 90 or not -180 <= longitude <= 180):
+            raise ValueError("invalid coordinates")
+        query = urllib.parse.urlencode({
+            "location": f"{longitude:.6f},{latitude:.6f}", "lang": "zh", "number": "1",
+        })
+        try:
+            payload = self._request("/geo/v2/city/lookup?" + query, timeout=5)
+            locations = payload.get("location")
+            item = locations[0] if isinstance(locations, list) and locations else None
+            if not isinstance(item, dict):
+                raise PlaceLookupError("place lookup returned no region")
+            name, timezone = _text(item.get("name"), 80), _text(item.get("tz"), 80)
+            if not name or not timezone:
+                raise PlaceLookupError("place lookup returned an incomplete region")
+            ZoneInfo(timezone)
+            parts = [_text(item.get(key), 80) for key in ("country", "adm1", "name")]
+            if parts[0] == "中国":
+                parts = parts[1:]
+            label = " · ".join(dict.fromkeys(part for part in parts if part))
+            if len(label) > 100:
+                raise PlaceLookupError("place name is too long")
+            return PlaceResolution(label, timezone, "QWeather", "administrative")
+        except (QWeatherError, ValueError, KeyError) as exc:
+            raise PlaceLookupError("QWeather place lookup failed") from exc
 
     def fetch_minutely(self, subscription: WeatherSubscription) -> WeatherNowcast:
         location = urllib.parse.quote(f"{subscription.longitude:.2f},{subscription.latitude:.2f}")

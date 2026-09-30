@@ -43,8 +43,10 @@ weather warning on the production ntfy topic.
 When QWeather is configured, also verify independent `minutely`, `alerts` and
 `astronomy`
 success timestamps and zero unexplained failures. Keep JWT identifiers and the
-private-key path in `/etc/argus/qweather.env` (root:argus 0640), loaded only by
-the daemon. See `WEATHER.md` for variable names and `RELEASES.md` for selecting
+private-key path in `/etc/argus/qweather.env` (root:argus 0640), loaded by
+the daemon and admin service (the latter for operator-triggered GeoAPI naming).
+Neither service exposes credentials in admin responses. See `WEATHER.md` for
+variable names and `RELEASES.md` for selecting
 the locked, root-owned runtime using `ARGUS_PYTHON`.
 On explicit operator request, `argus weather-test` queues one labelled current
 weather snapshot through the normal outbox. It refuses missing or stale forecasts
