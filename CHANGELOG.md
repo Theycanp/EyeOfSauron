@@ -5,6 +5,21 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.29.6] - 2026-10-01
+
+### Changed
+
+- Use `gpt-6.1-sol` as the default daily-digest API model; retain the existing
+  `gpt-6-astra` fallback and managed configuration interface.
+
+### Fixed
+
+- Hide the empty precipitation chart when the forecast contains no precipitation
+  signal and render the summary as “无降水”.
+- Group acknowledgement reminder repeat controls into a bordered, responsive
+  repeat-policy section so the fields stay aligned on desktop and stack cleanly
+  on mobile.
+
 ## [0.29.5] - 2026-10-01
 
 ### Fixed

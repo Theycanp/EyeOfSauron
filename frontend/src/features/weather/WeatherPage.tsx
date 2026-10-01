@@ -46,6 +46,14 @@ function precipitationKind(hour: WeatherHour): 'rain' | 'snow' | 'sleet' | 'none
   return 'none'
 }
 
+function hasPrecipitationSignal(
+  latest: { rain_mm?: number | null; rain_probability?: number | null } | null | undefined,
+  hours: WeatherHour[],
+): boolean {
+  if ((latest?.rain_mm ?? 0) > 0 || (latest?.rain_probability ?? 0) > 0) return true
+  return hours.some((hour) => precipitationKind(hour) !== 'none')
+}
+
 function ForecastChart({ hours, timezone, high, low, start, end, complete, observedAt }: {
   hours: WeatherHour[]; timezone: string; high: number | null; low: number | null
   start?: number; end?: number; complete?: boolean; observedAt: number
@@ -385,6 +393,11 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
     localDate(latest.window_start_at, snapshotTimezone) === localDate(latest.observed_at, snapshotTimezone)
 
   const forecastHours = latest?.hourly ?? latest?.forecast_hours ?? []
+  const precipitationAvailable = hasPrecipitationSignal(latest, forecastHours)
+  const precipitationKnown = latest?.rain_mm != null || latest?.rain_probability != null || forecastHours.length > 0
+  const precipitationSummary = !precipitationKnown ? '降水待获取'
+    : !precipitationAvailable ? '无降水'
+      : `${latest?.window_start_at ? '至时段结束06时预计' : '今日'}降水 ${latest?.rain_mm ?? '—'} mm`
   const selectingLocation = resolvingTimezone || geoState === 'requesting'
   return <div className="weather-page">
     <div className="page-actions"><button className="button subtle" aria-expanded={showProviders} onClick={() => setShowProviders(value => !value)}>天气来源与预算</button></div>
@@ -402,11 +415,11 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
         {latest?.conditions_basis === 'hourly_forecast' && <p>近时段小时预报 · QWeather 兜底</p>}
         <h3>{status?.latest?.condition || '暂无预报'}</h3>
         <p>{latest?.low != null && latest.high != null ? `${Math.round(latest.low)}~${Math.round(latest.high)}℃` : '温度待获取'}
-          <span> · </span>{latest?.window_start_at ? '至时段结束06时预计' : today ? '今日' : '当日'}降水 {latest?.rain_mm ?? '—'} mm<span> · </span>阵风 {latest?.wind_gust_kmh ?? '—'} km/h</p>
+          <span> · </span>{precipitationSummary}<span> · </span>阵风 {latest?.wind_gust_kmh ?? '—'} km/h</p>
       </div>
       <div className="weather-current-side"><Wind size={17} />{status?.rain_expected === true ? '今日内预计有雨' : status?.rain_expected === false ? '今日内暂无明显降雨信号' : '雨情等待基线'}</div>
     </section>
-    {latest && today && <section className="weather-precipitation" aria-label={windowStartsToday ? '今日与明晨雨雪预报' : '昨日至今晨雨雪预报'}>
+    {latest && today && precipitationAvailable && <section className="weather-precipitation" aria-label={windowStartsToday ? '今日与明晨雨雪预报' : '昨日至今晨雨雪预报'}>
       <div className="weather-section-heading"><Droplets size={19} /><h3>{windowStartsToday ? '今日与明晨雨雪' : '昨日至今晨雨雪'}</h3><span className="weather-section-summary">{latest.rain_probability > 0 ? `至${windowStartsToday ? '明晨' : '今晨'}06时 · 降水概率 ${Math.round(latest.rain_probability)}% · ${latest.rain_mm.toFixed(1)} mm` : `至${windowStartsToday ? '明晨' : '今晨'}06时暂无明显降水预报`}</span></div>
       {forecastHours.length ? <ForecastChart hours={forecastHours} timezone={snapshotTimezone} high={latest.high} low={latest.low} start={latest.window_start_at} end={latest.window_end_at} complete={latest.window_complete} observedAt={status?.last_success_at ?? latest.observed_at} /> : <p className="weather-chart-empty">小时级雨雪曲线将在下一次天气查询后显示。</p>}
     </section>}
