@@ -48,6 +48,11 @@ the daemon and admin service (the latter for operator-triggered GeoAPI naming).
 Neither service exposes credentials in admin responses. See `WEATHER.md` for
 variable names and `RELEASES.md` for selecting
 the locked, root-owned runtime using `ARGUS_PYTHON`.
+Channel timestamps shown on the Weather page are last successful query times,
+not predicted precipitation times. Astronomy refreshes on local date rollover;
+UTC budget rollover wakes the independent channels without overriding their
+enable switches or budgets. If moon data is missing, check the astronomy
+budget/state and its snapshot date separately from the daily forecast.
 On explicit operator request, `argus weather-test` queues one labelled current
 weather snapshot through the normal outbox. It refuses missing or stale forecasts
 and does not alter the daily/rain alert state; verify delivery in outbox status.

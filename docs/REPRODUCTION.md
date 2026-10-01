@@ -74,6 +74,11 @@ sun/moon data appear on the Weather page; missing optional data must not block
 the forecast or official warnings. The `lunardate` runtime dependency is pinned
 in `requirements/runtime.txt`. A new
 installation must obtain its own credentials; no provider key is bundled.
+For 0.29.5 and later, the isolated service regressions cover local midnight,
+exhausted astronomy budget followed by UTC reset, disabled channels and failure
+backoff. Confirm that the Weather page labels channel times as `上次查询`, and
+that a fresh same-date astronomy snapshot supplies moon details without resending
+the day's previously delivered weather report.
 For schema 25/26, confirm the distinct approximate solar-noon angle and timestamp
 are present after a successful QWeather astronomy poll, while the admin also
 shows the independently sampled current angle. Missing noon data must not block

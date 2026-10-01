@@ -739,10 +739,25 @@ class ArgusService:
         revision: int | None = None
         due = {"minutely": 0, "alerts": 0, "astronomy": 0}
         policy_signatures: dict[str, tuple[Any, ...]] = {}
+        astronomy_schedule_date: str | None = None
+        budget_day: int | None = None
         while not self.stop_event.is_set():
             subscription = self.database.get_weather_subscription()
             if subscription.revision != revision:
                 revision = subscription.revision
+                due = {"minutely": 0, "alerts": 0, "astronomy": 0}
+                astronomy_schedule_date = None
+            now = now_epoch()
+            local_date = datetime.fromtimestamp(now, ZoneInfo(subscription.timezone)).strftime("%Y%m%d")
+            # A six-hour cadence can cross local midnight without becoming due.
+            # Refresh once for the new calendar date, while retaining the normal
+            # backoff after a failed attempt.
+            if astronomy_schedule_date != local_date:
+                astronomy_schedule_date = local_date
+                due["astronomy"] = 0
+            if budget_day != now // 86400:
+                budget_day = now // 86400
+                # Budget days are UTC, independently of local astronomy dates.
                 due = {"minutely": 0, "alerts": 0, "astronomy": 0}
             base_url = self.config.admin.public_base_url or self.config.digest.public_base_url
             click_url = f"{base_url}/#/weather" if base_url else ""
@@ -783,7 +798,6 @@ class ArgusService:
                             click_url=click_url,
                         )
                     else:
-                        local_date = datetime.now(ZoneInfo(subscription.timezone)).date().strftime("%Y%m%d")
                         if budgeted_astronomy:
                             event_loop = asyncio.get_running_loop()
                             def before_request() -> None:

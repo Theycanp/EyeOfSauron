@@ -74,7 +74,12 @@ async function mockAdminApi(page: Page) {
           observed_at: now, is_today: true,
         } : null,
           last_success_at: weatherHasForecast ? now + 1 : null, last_daily_date: null, last_error: null,
-          consecutive_failures: 0, rain_expected: null } })
+          consecutive_failures: 0, rain_expected: null,
+          qweather: {
+            minutely: { last_success_at: now, last_error: null, consecutive_failures: 0 },
+            alerts: { last_success_at: now, last_error: null, consecutive_failures: 0 },
+            astronomy: { last_success_at: now, last_error: null, consecutive_failures: 0 },
+          } } })
       }
       return
     }
@@ -644,6 +649,7 @@ test('weather location and schedule are usable on desktop and mobile', async ({ 
   await expect(page.getByRole('heading', { name: '本地天气' })).toBeVisible()
   await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('欧洲 AQI 27')
   await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('月升 / 月落')
+  await expect(page.getByLabel('和风天气状态')).toContainText('上次查询')
   await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('太阳角度')
   await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('方位 230.0°')
   await expect(page.getByRole('region', { name: '今日天气详情' })).toContainText('农历2026年8月16日')

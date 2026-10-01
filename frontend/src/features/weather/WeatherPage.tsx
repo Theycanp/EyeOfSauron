@@ -425,7 +425,7 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
 
     {status?.last_error && <div className="partial-error" role="status">天气取数失败 {status.consecutive_failures} 次：{status.last_error}</div>}
     {status?.qweather && <div className="weather-provider-status" aria-label="和风天气状态">{Object.entries(status.qweather).map(([kind, provider]) => <div key={kind}>
-      <strong>{kind === 'minutely' ? '临近雨雪' : kind === 'alerts' ? '官方预警' : '日月天文'}</strong><span>{provider.last_success_at ? formatDate(provider.last_success_at) : '等待和风天气查询'}</span>
+      <strong>{kind === 'minutely' ? '临近雨雪' : kind === 'alerts' ? '官方预警' : '日月天文'}</strong><span>{provider.last_success_at ? `上次查询 ${formatDate(provider.last_success_at)}` : '等待和风天气查询'}</span>
       {provider.last_error && <span className="form-error">连续失败 {provider.consecutive_failures} 次：{provider.last_error}</span>}
     </div>)}</div>}
     {error && <div className="form-error" role="alert">{error}</div>}
