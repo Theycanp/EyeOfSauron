@@ -16,6 +16,15 @@ const status: WeatherStatus = {
 }
 
 describe('WeatherPage', () => {
+  it('labels provider timestamps as query times, not rain forecasts', async () => {
+    const api = { weather: vi.fn().mockResolvedValue({ ...status, qweather: {
+      minutely: { last_success_at: 1790816160, last_error: null, consecutive_failures: 0 },
+    } }) } as unknown as AdminApi
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    const panel = await screen.findByLabelText('和风天气状态')
+    expect(panel).toHaveTextContent('临近雨雪')
+    expect(panel).toHaveTextContent('上次查询')
+  })
   it('uses the saved timezone and window date while timezone edits are unsaved', async () => {
     const start = 1790352000 + 6 * 3600
     const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {

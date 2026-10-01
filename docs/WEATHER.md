@@ -148,7 +148,14 @@ than assuming a shared conversation's free-tier figure is guaranteed.
 
 The Open-Meteo forecast poll also requests optional air quality. Air-quality
 failure is logged but does not fail the forecast. QWeather astronomy is checked
-at startup and every six hours, with one-hour retry on failure. Neither optional
+at startup, immediately after the subscribed location's local calendar date
+changes, and every six hours, with one-hour retry on failure. A date rollover
+does not bypass the request budget and a failed rollover attempt retains the
+normal retry backoff. The independent channels also wake when their UTC daily
+budget resets (08:00 in Beijing), so a skipped six-hour query does not leave a
+morning gap after requests become available again. The Weather page explicitly
+labels channel timestamps as their last query, not a forecast of rain/snow at
+that time. Neither optional
 provider has permission to generate a weather hazard or official warning. The
 Weather page marks an old forecast as historical and shows the subscription
 timezone; optional air quality expires after six hours and astronomy must match

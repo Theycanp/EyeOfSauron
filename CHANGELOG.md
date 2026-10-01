@@ -5,6 +5,16 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.29.5] - 2026-10-01
+
+### Fixed
+
+- Label QWeather channel timestamps as the last query time so they are not
+  mistaken for a precipitation timestamp.
+- Refresh QWeather astronomy immediately after the subscribed location's local
+  date rolls over, and wake independent channels when their UTC budget resets.
+  Preserve the request budget and retry backoff; no schema change is required.
+
 ## [0.29.4] - 2026-09-30
 
 ### Fixed

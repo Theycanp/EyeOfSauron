@@ -446,6 +446,115 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         provider.fetch_alerts.assert_called_once()
         provider.fetch_astronomy.assert_called_once()
 
+    async def test_local_weather_budget_reset_wakes_astronomy_after_local_rollover(self) -> None:
+        from datetime import datetime
+        from unittest.mock import Mock
+        from argus.weather import WeatherAstronomy
+
+        service = self._service(None, None)
+        start = int(datetime.fromisoformat("2026-09-30T14:30:00+00:00").timestamp())
+        clock = start
+        provider = Mock()
+        calls = []
+        def sky(subscription, date):
+            calls.append((clock, date))
+            return WeatherAstronomy(date, None, None, None, None, "亏凸月", 75)
+        provider.fetch_astronomy.side_effect = sky
+        service.local_weather_provider = provider
+        self.database.record_weather_provider_availability("qweather", configured=True, now=start)
+        self.database.update_weather_provider_policy(
+            "qweather", "astronomy", enabled=True, interval_seconds=21600,
+            daily_budget=1, actor="tester", now=start,
+        )
+        async def advance(awaitable, *, timeout):
+            nonlocal clock
+            awaitable.close()
+            clock += 600
+            if len(calls) >= 2:
+                service.stop_event.set()
+                return True
+            if clock > start + 11 * 3600:
+                self.fail("astronomy did not resume at UTC budget reset")
+            raise TimeoutError
+        with (patch("argus.service.now_epoch", side_effect=lambda: clock),
+              patch("argus.service.asyncio.wait_for", side_effect=advance),
+              patch.object(self.database, "record_weather_nowcast", return_value=0),
+              patch("argus.service.nowcast_signal", return_value=None)):
+            await service._local_weather_loop()
+        self.assertEqual(["20260930", "20261001"], [date for _, date in calls])
+        reset = int(datetime.fromisoformat("2026-10-01T00:00:00+00:00").timestamp())
+        self.assertEqual(reset, calls[1][0])
+        row = next(item for item in self.database.list_weather_provider_policies()
+                   if item["kind"] == "astronomy")
+        self.assertEqual(1, row["requests"])
+        self.assertEqual("2026-10-01", row["budget_day"])
+
+    async def test_astronomy_local_rollover_refreshes_once_and_retains_failure_backoff(self) -> None:
+        from datetime import datetime
+        from unittest.mock import Mock
+        from argus.weather import WeatherAstronomy
+
+        service = self._service(None, None)
+        start = int(datetime.fromisoformat("2026-09-30T15:30:00+00:00").timestamp())
+        clock = start
+        provider = Mock()
+        calls = []
+        def sky(subscription, date):
+            calls.append((clock, date))
+            if len(calls) > 1:
+                raise RuntimeError("temporary provider failure")
+            return WeatherAstronomy(date, None, None, None, None, "亏凸月", 75)
+        provider.fetch_astronomy.side_effect = sky
+        service.local_weather_provider = provider
+        self.database.record_weather_provider_availability("qweather", configured=True, now=start)
+        async def advance(awaitable, *, timeout):
+            nonlocal clock
+            awaitable.close()
+            clock += 600
+            if len(calls) >= 3:
+                service.stop_event.set()
+                return True
+            if clock > start + 3 * 3600:
+                self.fail("astronomy did not follow the one-hour retry")
+            raise TimeoutError
+        with (patch("argus.service.now_epoch", side_effect=lambda: clock),
+              patch("argus.service.asyncio.wait_for", side_effect=advance),
+              patch.object(self.database, "record_weather_nowcast", return_value=0),
+              patch("argus.service.nowcast_signal", return_value=None)):
+            await service._local_weather_loop()
+        self.assertEqual(["20260930", "20261001", "20261001"], [date for _, date in calls])
+        self.assertEqual(start + 1800, calls[1][0])
+        self.assertEqual(calls[1][0] + 3600, calls[2][0])
+
+    async def test_astronomy_rollover_keeps_disabled_channel_disabled(self) -> None:
+        from datetime import datetime
+        from unittest.mock import Mock
+
+        service = self._service(None, None)
+        start = int(datetime.fromisoformat("2026-09-30T15:30:00+00:00").timestamp())
+        clock = start
+        provider = Mock()
+        service.local_weather_provider = provider
+        self.database.record_weather_provider_availability("qweather", configured=True, now=start)
+        self.database.update_weather_provider_policy(
+            "qweather", "astronomy", enabled=False, interval_seconds=21600,
+            daily_budget=24, actor="tester", now=start,
+        )
+        async def advance(awaitable, *, timeout):
+            nonlocal clock
+            awaitable.close()
+            clock += 600
+            if clock > start + 3600:
+                service.stop_event.set()
+                return True
+            raise TimeoutError
+        with (patch("argus.service.now_epoch", side_effect=lambda: clock),
+              patch("argus.service.asyncio.wait_for", side_effect=advance),
+              patch.object(self.database, "record_weather_nowcast", return_value=0),
+              patch("argus.service.nowcast_signal", return_value=None)):
+            await service._local_weather_loop()
+        provider.fetch_astronomy.assert_not_called()
+
     def _queue_content_fetch(self) -> int:
         baseline = FeedFetchResult((), None, None)
         self.database.record_source_success(
