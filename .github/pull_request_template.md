@@ -12,6 +12,9 @@
 - [ ] Configuration, Prompt, dependency, and schema changes are documented
 - [ ] Secrets and production data are absent from code, logs, docs, and fixtures
 - [ ] Remaining work is recorded in the relevant roadmap with acceptance criteria
+- [ ] UI changes: desktop/mobile screenshots visually reviewed, including affected empty/expanded states and light/dark themes (or no UI change)
+
+Visual evidence / reviewed states:
 
 ## Deployment
 

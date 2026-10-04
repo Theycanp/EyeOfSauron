@@ -54,7 +54,7 @@ describe('WeatherPage', () => {
     expect(screen.getByText(/阵风 — km\/h/)).toBeInTheDocument()
   })
 
-  it('removes the precipitation panel when the whole forecast is dry', async () => {
+  it('keeps the temperature chart when the whole forecast is dry', async () => {
     const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
       condition: '晴', low: 8, high: 23, rain_mm: 0, rain_probability: 0,
       wind_gust_kmh: 37, temperature_now: 18, observed_at: 1790818200,
@@ -67,8 +67,11 @@ describe('WeatherPage', () => {
     } }) } as unknown as AdminApi
     render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
     expect(await screen.findByText('晴')).toBeInTheDocument()
-    expect(screen.getByText(/无降水/)).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '最新天气预报' })).toHaveTextContent('无降水')
     expect(screen.queryByRole('region', { name: '今日与明晨雨雪预报' })).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '逐小时天气预报' })).toBeVisible()
+    expect(screen.getByRole('img', { name: '按小时显示降水量、雨雪类型与气温' })).toBeVisible()
+    expect(screen.getByText('可用小时暂无降水预报')).toBeVisible()
   })
   it('distinguishes the approximate noon angle from the current angle', async () => {
     const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {

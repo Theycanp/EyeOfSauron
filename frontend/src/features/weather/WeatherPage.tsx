@@ -4,26 +4,13 @@ import markerIconUrl from 'leaflet/dist/images/marker-icon.png'
 import markerShadowUrl from 'leaflet/dist/images/marker-shadow.png'
 import { CloudSun, Droplets, LocateFixed, MapPin, Moon, RefreshCw, Search, Sun, Wind } from 'lucide-react'
 import type { AdminApi } from '../../shared/api'
-import type { WeatherHour, WeatherPlace, WeatherStatus, WeatherSubscription } from '../../shared/types'
+import type { WeatherPlace, WeatherStatus, WeatherSubscription } from '../../shared/types'
 import { formatDate } from '../../shared/utils'
 import 'leaflet/dist/leaflet.css'
 import './weather.css'
 import { WeatherProvidersPanel } from './WeatherProvidersPanel'
-
-interface Props {
-  api: AdminApi
-  canWrite: boolean
-  onUnauthorized: () => void
-}
-
-function localClock(timestamp: number | null | undefined, timezone: string): string {
-  if (timestamp == null) return '—'
-  return new Intl.DateTimeFormat('zh-CN', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(timestamp * 1000)
-}
-
-function localDate(timestamp: number, timezone: string): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(timestamp * 1000)
-}
+import { ForecastChart } from './ForecastChart'
+import { localClock, localDate, precipitationKind } from './weatherPresentation'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
@@ -33,111 +20,10 @@ function locationTitle(label: string): string {
   return /^(地图坐标|当前位置) 纬度 /.test(label) ? '已选地点' : label
 }
 
-function hourLabel(at: number, timezone: string): string {
-  return localClock(at, timezone).replace(/^0/, '')
-}
-
-function precipitationKind(hour: WeatherHour): 'rain' | 'snow' | 'sleet' | 'none' {
-  if (hour.precipitation_type) return hour.precipitation_type
-  const code = hour.weather_code ?? 0
-  if ([71, 73, 75, 77, 85, 86].includes(code)) return 'snow'
-  if ([66, 67].includes(code)) return 'sleet'
-  if ((hour.precipitation ?? 0) > 0 || [51, 53, 55, 56, 57, 61, 63, 65, 80, 81, 82].includes(code)) return 'rain'
-  return 'none'
-}
-
-function hasPrecipitationSignal(
-  latest: { rain_mm?: number | null; rain_probability?: number | null } | null | undefined,
-  hours: WeatherHour[],
-): boolean {
-  if ((latest?.rain_mm ?? 0) > 0 || (latest?.rain_probability ?? 0) > 0) return true
-  return hours.some((hour) => precipitationKind(hour) !== 'none')
-}
-
-function ForecastChart({ hours, timezone, high, low, start, end, complete, observedAt }: {
-  hours: WeatherHour[]; timezone: string; high: number | null; low: number | null
-  start?: number; end?: number; complete?: boolean; observedAt: number
-}) {
-  const fixedWindow = start != null && end != null && Number.isFinite(start) && Number.isFinite(end) && end > start
-  const windowStart = start ?? 0
-  const windowEnd = end ?? 0
-  const legacyWindow = fixedWindow && localClock(windowStart, timezone) === '00:00'
-  const visible = hours.filter((hour) => Number.isFinite(hour.at) && (!fixedWindow || (hour.at >= windowStart && hour.at < windowEnd)))
-    .slice(0, fixedWindow ? legacyWindow ? 32 : 26 : 24)
-  const firstHour = visible[0]
-  const lastHour = visible[visible.length - 1]
-  if (!firstHour || !lastHour) return null
-  const firstAt = fixedWindow ? windowStart : firstHour.at
-  const lastAt = fixedWindow ? windowEnd : lastHour.at
-  const temps = visible.map((hour) => hour.temperature).filter((value): value is number => value != null && Number.isFinite(value))
-  const visibleLow = temps.length ? Math.min(...temps) : null
-  const visibleHigh = temps.length ? Math.max(...temps) : null
-  const useDailyReferences = !fixedWindow && high != null && low != null && visibleLow != null && visibleHigh != null
-    && visibleLow >= low && visibleHigh <= high
-  const referenceLow = fixedWindow ? visibleLow : useDailyReferences ? low : visibleLow ?? low
-  const referenceHigh = fixedWindow ? visibleHigh : useDailyReferences ? high : visibleHigh ?? high
-  const referenceScope = fixedWindow ? (complete ? '时段' : '可用时段') : useDailyReferences ? '今日' : '未来24小时'
-  const precipitation = visible.map((hour) => Math.max(0, Number(hour.precipitation) || 0))
-  const maxPrecip = Math.max(1, ...precipitation)
-  const minTemp = Math.floor(Math.min(...(temps.length ? temps : [0]), referenceLow ?? Infinity) - 1)
-  const maxTemp = Math.ceil(Math.max(...(temps.length ? temps : [1]), referenceHigh ?? -Infinity) + 1)
-  const width = 760
-  const height = 216
-  const left = 34
-  const right = 18
-  const top = 18
-  const bottom = 42
-  const chartWidth = width - left - right
-  const chartHeight = height - top - bottom
-  const x = (at: number) => left + (lastAt <= firstAt ? chartWidth / 2 : ((at - firstAt) / (lastAt - firstAt)) * chartWidth)
-  const yTemp = (temp: number) => top + ((maxTemp - temp) / Math.max(1, maxTemp - minTemp)) * chartHeight
-  const yPrecip = (amount: number) => top + chartHeight - (amount / maxPrecip) * chartHeight
-  const lineSegments: string[] = []
-  let segment: string[] = []
-  for (const [index, hour] of visible.entries()) {
-    if (hour.temperature == null || !Number.isFinite(hour.temperature)) {
-      if (segment.length) lineSegments.push(segment.join(' '))
-      segment = []
-      continue
-    }
-    const previousHour = visible[index - 1]
-    if (previousHour && hour.at - previousHour.at !== 3600 && segment.length) {
-      lineSegments.push(segment.join(' '))
-      segment = []
-    }
-    segment.push(`${x(hour.at).toFixed(1)},${yTemp(hour.temperature).toFixed(1)}`)
-  }
-  if (segment.length) lineSegments.push(segment.join(' '))
-  const nowX = fixedWindow && firstAt <= observedAt && observedAt < windowEnd ? x(observedAt) : null
-  const windowStartsToday = fixedWindow && localDate(windowStart, timezone) === localDate(observedAt, timezone)
-  const heading = fixedWindow ? legacyWindow ? '今天 00:00—明天 06:00'
-    : windowStartsToday ? '今天 06:00—明天 06:00' : '昨天 06:00—今天 06:00' : '未来 24 小时趋势'
-  return <div className="weather-chart" aria-label="逐小时雨雪与温度趋势">
-    <div className="weather-chart-heading"><strong>{heading}</strong><span><i className="legend-dot rain" />雨雪量 <i className="legend-line" />气温 <i className="legend-line range" />{referenceScope}高低温</span></div>
-    <div className="weather-chart-plot" tabIndex={0} role="region" aria-label="天气时间轴"><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="按小时显示降水量、雨雪类型与气温">
-      <line x1={left} x2={width - right} y1={top + chartHeight} y2={top + chartHeight} className="chart-axis" />
-      <line x1={left} x2={width - right} y1={top + chartHeight / 2} y2={top + chartHeight / 2} className="chart-grid" />
-      <text x="4" y={top + 5} className="chart-scale">{maxTemp}°</text><text x="4" y={top + chartHeight} className="chart-scale">{minTemp}°</text>
-      {nowX != null && <g><line x1={nowX} x2={nowX} y1={top} y2={top + chartHeight} className="chart-now" /><text x={Math.min(nowX + 4, width - right - 20)} y={top + 12} className="chart-now-label">查询</text></g>}
-      {referenceHigh != null && <g><line x1={left} x2={width - right} y1={yTemp(referenceHigh)} y2={yTemp(referenceHigh)} className="temperature-reference" /><text x={width - right - 2} y={yTemp(referenceHigh) - 8} textAnchor="end" className="temperature-reference-label">最高 {Math.round(referenceHigh)}°</text></g>}
-      {referenceLow != null && <g><line x1={left} x2={width - right} y1={yTemp(referenceLow)} y2={yTemp(referenceLow)} className="temperature-reference" /><text x={width - right - 2} y={yTemp(referenceLow) - 8} textAnchor="end" className="temperature-reference-label">最低 {Math.round(referenceLow)}°</text></g>}
-      {visible.map((hour, index) => {
-        const amount = precipitation[index]
-        const kind = precipitationKind(hour)
-        const barWidth = Math.max(4, chartWidth / visible.length * 0.52)
-        const barHeight = amount ? Math.max(3, top + chartHeight - yPrecip(amount)) : 2
-        return <g key={hour.at}>
-          <rect x={x(hour.at) - barWidth / 2} y={top + chartHeight - barHeight} width={barWidth} height={barHeight} rx="2" className={`precip-bar ${kind}${hour.at < observedAt ? ' past' : ''}`} />
-          {kind !== 'none' && <text x={x(hour.at)} y={Math.max(top + 12, top + chartHeight - barHeight - 5)} textAnchor="middle" className="precip-label">{kind === 'snow' ? '雪' : kind === 'sleet' ? '雨夹雪' : '雨'}</text>}
-          {!fixedWindow && (index % (visible.length > 12 ? 3 : 2) === 0 || index === visible.length - 1) && <text x={x(hour.at)} y={height - 9} textAnchor="middle" className="chart-time">{hourLabel(hour.at, timezone)}</text>}
-        </g>
-      })}
-      {fixedWindow && Array.from({ length: 6 }, (_, index) => firstAt + (lastAt - firstAt) * index / 5).map((at) => <text key={at} x={x(at)} y={height - 9} textAnchor="middle" className="chart-time">{localDate(at, timezone) !== localDate(firstAt, timezone) ? '明 ' : ''}{hourLabel(at, timezone)}</text>)}
-      {lineSegments.map((points, index) => <polyline key={index} points={points} fill="none" className="temperature-line" />)}
-      {visible.map((hour) => hour.temperature != null && <circle key={`t-${hour.at}`} cx={x(hour.at)} cy={yTemp(hour.temperature)} r="2.6" className="temperature-point" />)}
-    </svg></div>
-    <div className="weather-chart-note">{fixedWindow ? '已过去小时的模型数据不是实测；空白时段表示未提供数据。' : ''}柱高为每小时预报降水量，气温线为小时气温。</div>
-  </div>
+interface Props {
+  api: AdminApi
+  canWrite: boolean
+  onUnauthorized: () => void
 }
 
 interface WeatherMapProps {
@@ -393,11 +279,16 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
     localDate(latest.window_start_at, snapshotTimezone) === localDate(latest.observed_at, snapshotTimezone)
 
   const forecastHours = latest?.hourly ?? latest?.forecast_hours ?? []
-  const precipitationAvailable = hasPrecipitationSignal(latest, forecastHours)
-  const precipitationKnown = latest?.rain_mm != null || latest?.rain_probability != null || forecastHours.length > 0
+  const precipitationAvailable = (latest?.rain_mm ?? 0) > 0 || (latest?.rain_probability ?? 0) > 0
+    || forecastHours.some(hour => precipitationKind(hour) !== 'none')
+  const futureHours = forecastHours.filter(hour => hour.at >= (latest?.observed_at ?? 0))
+  const remainingWet = (latest?.rain_mm ?? 0) > 0 || (latest?.rain_probability ?? 0) > 0
+    || futureHours.some(hour => precipitationKind(hour) !== 'none')
+  const precipitationKnown = latest?.rain_mm != null || latest?.rain_probability != null
+    || futureHours.some(hour => hour.precipitation != null || hour.rain_probability != null)
   const precipitationSummary = !precipitationKnown ? '降水待获取'
-    : !precipitationAvailable ? '无降水'
-      : `${latest?.window_start_at ? '至时段结束06时预计' : '今日'}降水 ${latest?.rain_mm ?? '—'} mm`
+    : !remainingWet ? latest?.window_complete === false ? '可用时段无降水，缺失时段未知' : '无降水'
+      : (latest?.rain_mm ?? 0) > 0 ? `剩余时段雨雪 ${latest?.rain_mm} mm` : '暂无明显降水量预报'
   const selectingLocation = resolvingTimezone || geoState === 'requesting'
   return <div className="weather-page">
     <div className="page-actions"><button className="button subtle" aria-expanded={showProviders} onClick={() => setShowProviders(value => !value)}>天气来源与预算</button></div>
@@ -413,27 +304,34 @@ export function WeatherPage({ api, canWrite, onUnauthorized }: Props) {
       <div className="weather-current-icon"><CloudSun size={34} /></div>
       <div><span className="eyebrow">{status?.last_success_at ? `${today ? '今日预报' : '历史预报'} · 上次查询 ${formatDate(status.last_success_at)}` : '等待首次查询'}</span>
         {latest?.conditions_basis === 'hourly_forecast' && <p>近时段小时预报 · QWeather 兜底</p>}
-        <h3>{status?.latest?.condition || '暂无预报'}</h3>
+        <div className="weather-current-main"><strong className="weather-current-temperature">{latest?.temperature_now != null ? `${Math.round(latest.temperature_now)}°` : '—'}</strong><h3>{latest?.condition || '暂无预报'}</h3></div>
         <p>{latest?.low != null && latest.high != null ? `${Math.round(latest.low)}~${Math.round(latest.high)}℃` : '温度待获取'}
           <span> · </span>{precipitationSummary}<span> · </span>阵风 {latest?.wind_gust_kmh ?? '—'} km/h</p>
       </div>
       <div className="weather-current-side"><Wind size={17} />{status?.rain_expected === true ? '今日内预计有雨' : status?.rain_expected === false ? '今日内暂无明显降雨信号' : '雨情等待基线'}</div>
     </section>
-    {latest && today && precipitationAvailable && <section className="weather-precipitation" aria-label={windowStartsToday ? '今日与明晨雨雪预报' : '昨日至今晨雨雪预报'}>
-      <div className="weather-section-heading"><Droplets size={19} /><h3>{windowStartsToday ? '今日与明晨雨雪' : '昨日至今晨雨雪'}</h3><span className="weather-section-summary">{latest.rain_probability > 0 ? `至${windowStartsToday ? '明晨' : '今晨'}06时 · 降水概率 ${Math.round(latest.rain_probability)}% · ${latest.rain_mm.toFixed(1)} mm` : `至${windowStartsToday ? '明晨' : '今晨'}06时暂无明显降水预报`}</span></div>
-      {forecastHours.length ? <ForecastChart hours={forecastHours} timezone={snapshotTimezone} high={latest.high} low={latest.low} start={latest.window_start_at} end={latest.window_end_at} complete={latest.window_complete} observedAt={status?.last_success_at ?? latest.observed_at} /> : <p className="weather-chart-empty">小时级雨雪曲线将在下一次天气查询后显示。</p>}
+    {latest && <section className="weather-precipitation" aria-label={precipitationAvailable ? windowStartsToday ? '今日与明晨雨雪预报' : '昨日至今晨雨雪预报' : '逐小时天气预报'}>
+      <div className="weather-section-heading"><CloudSun size={19} /><h3>气温与雨雪趋势</h3><span className="weather-section-summary">剩余时段 · {precipitationSummary}{latest.rain_probability > 0 ? ` · 概率 ${Math.round(latest.rain_probability)}%` : ''}</span></div>
+      {!today && <p className="weather-chart-note">这是上次成功查询保存的历史预报，请留意查询时间。</p>}
+      <ForecastChart hours={forecastHours} timezone={snapshotTimezone} high={latest.high} low={latest.low} start={latest.window_start_at} end={latest.window_end_at} complete={latest.window_complete} observedAt={status?.last_success_at ?? latest.observed_at} />
     </section>}
-    {latest && <section className="weather-metrics" aria-label={today ? '今日天气详情' : '历史天气详情'}>
+    {latest && <section className="weather-details" aria-label={today ? '今日天气详情' : '历史天气详情'}>
+      <div className="weather-section-heading"><Wind size={19} /><h3>生活与出行</h3></div>
+      <div className="weather-metrics weather-life-metrics">
       <div><Droplets size={16} /><span>湿度</span><strong>{latest.humidity != null ? `${Math.round(latest.humidity)}%` : '—'}</strong></div>
       <div><Wind size={16} /><span>风</span><strong>{latest.wind_speed_kmh != null ? `${Math.round(latest.wind_speed_kmh)} km/h ${latest.wind_direction_name || ''}` : '—'}</strong></div>
-      <div><Sun size={16} /><span>日出 / 日落</span><strong>{localClock(latest.sunrise, snapshotTimezone)} / {localClock(latest.sunset, snapshotTimezone)}</strong></div>
       <div><span>空气（模型估计）</span><strong>{latest.air_quality?.european_aqi != null ? `欧洲 AQI ${Math.round(latest.air_quality.european_aqi)}` : latest.air_quality?.us_aqi != null ? `美国 AQI ${Math.round(latest.air_quality.us_aqi)}` : '—'}<br />PM2.5 {latest.air_quality?.pm2_5 ?? '—'} · PM10 {latest.air_quality?.pm10 ?? '—'} μg/m³</strong></div>
+      <div><Sun size={16} /><span>今日最高紫外线指数</span><strong>{latest.uv_index_max != null ? `${latest.uv_index_max.toFixed(1)} · ${latest.uv_index_max >= 11 ? '极强' : latest.uv_index_max >= 8 ? '很强' : latest.uv_index_max >= 6 ? '强' : latest.uv_index_max >= 3 ? '中等' : '较弱'}` : '—'}</strong></div>
+      </div>
+      <div className="weather-section-heading"><Moon size={19} /><h3>日月与历法</h3></div>
+      <div className="weather-metrics">
+      <div><Sun size={16} /><span>日出 / 日落</span><strong>{localClock(latest.sunrise, snapshotTimezone)} / {localClock(latest.sunset, snapshotTimezone)}</strong></div>
       <div><Moon size={16} /><span>月升 / 月落</span><strong>{localClock(latest.astronomy?.moonrise, snapshotTimezone)} / {localClock(latest.astronomy?.moonset, snapshotTimezone)}</strong></div>
       <div><Moon size={16} /><span>月相</span><strong>{latest.astronomy?.moon_phase || '—'}{latest.astronomy?.moon_illumination != null ? ` · 照明 ${latest.astronomy.moon_illumination}%` : ''}</strong></div>
-      <div><Sun size={16} /><span>今日最高紫外线指数</span><strong>{latest.uv_index_max != null ? `${latest.uv_index_max.toFixed(1)} · ${latest.uv_index_max >= 11 ? '极强' : latest.uv_index_max >= 8 ? '很强' : latest.uv_index_max >= 6 ? '强' : latest.uv_index_max >= 3 ? '中等' : '较弱'}` : '—'}</strong></div>
       <div><Sun size={16} /><span>近似正午太阳高度</span><strong>{latest.astronomy?.solar_noon_elevation != null ? `${latest.astronomy.solar_noon_elevation.toFixed(1)}° · ${localClock(latest.astronomy.solar_noon_at, snapshotTimezone)} · 海平面基准` : '—'}</strong></div>
       <div><Sun size={16} /><span>查询时太阳角度</span><strong>{latest.astronomy?.solar_elevation != null ? `高度 ${latest.astronomy.solar_elevation.toFixed(1)}° · 方位 ${latest.astronomy.solar_azimuth != null ? `${latest.astronomy.solar_azimuth.toFixed(1)}°` : '—'} · ${localClock(latest.astronomy.updated_at, snapshotTimezone)} 查询` : '—'}</strong></div>
       <div><span>日期</span><strong>{localDate(latest.observed_at, snapshotTimezone)} · {latest.calendar?.lunar || '—'} {latest.calendar?.festivals || ''}</strong></div>
+      </div>
     </section>}
 
     {status?.last_error && <div className="partial-error" role="status">天气取数失败 {status.consecutive_failures} 次：{status.last_error}</div>}

@@ -478,14 +478,16 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             raise TimeoutError
         with (patch("argus.service.now_epoch", side_effect=lambda: clock),
               patch("argus.service.asyncio.wait_for", side_effect=advance),
+              patch("argus.sqlite_weather_policy.datetime", wraps=datetime) as policy_clock,
               patch.object(self.database, "record_weather_nowcast", return_value=0),
               patch("argus.service.nowcast_signal", return_value=None)):
+            policy_clock.now.side_effect = lambda timezone: datetime.fromtimestamp(clock, timezone)
             await service._local_weather_loop()
+            row = next(item for item in self.database.list_weather_provider_policies()
+                       if item["kind"] == "astronomy")
         self.assertEqual(["20260930", "20261001"], [date for _, date in calls])
         reset = int(datetime.fromisoformat("2026-10-01T00:00:00+00:00").timestamp())
         self.assertEqual(reset, calls[1][0])
-        row = next(item for item in self.database.list_weather_provider_policies()
-                   if item["kind"] == "astronomy")
         self.assertEqual(1, row["requests"])
         self.assertEqual("2026-10-01", row["budget_day"])
 
