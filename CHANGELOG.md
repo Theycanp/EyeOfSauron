@@ -5,6 +5,30 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.29.6] - 2026-10-04
+
+### Changed
+
+- Use `gpt-6.1-sol` as the default daily-digest API model; retain the existing
+  `gpt-6-astra` fallback and managed configuration interface.
+- Always show the hourly temperature trend, including dry weather. Give rain/snow
+  a separate labelled scale on the same timeline, with hour selection and a
+  responsive overview, daily-life and astronomy layout.
+- Shorten new daily weather messages; retain detailed optional measurements on
+  the weather page and full labelled test snapshots. Saved old messages are unchanged.
+- Require UI state/screenshot evidence in PRs and retain CI screenshot artifacts
+  for review. No forecast polling, alert thresholds or database migration changes.
+
+### Fixed
+
+- Render dry precipitation as “无降水”; distinguish partial/unknown coverage
+  and leave missing chart hours blank rather than inventing zero values.
+- Group acknowledgement reminder repeat controls into a bordered, responsive
+  repeat-policy section so the fields stay aligned on desktop and stack cleanly
+  on mobile.
+- Freeze both scheduler and quota-list clocks in the astronomy budget rollover
+  regression so it remains valid after the historical test date.
+
 ## [0.29.5] - 2026-10-01
 
 ### Fixed

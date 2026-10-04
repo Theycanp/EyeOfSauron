@@ -425,6 +425,18 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(items[0].attributes['notification_eligible'])
                 self.assertEqual((), rules.evaluate(items[0], self.now))
 
+    def test_runtime_rollout_defaults_to_current_digest_model(self):
+        current, _ = plan_official_news({})
+        current['rules'].append({
+            'id': 'global_breaking', 'kind': 'weighted_text', 'source_ids': [],
+            'threshold': 1, 'max_item_age_seconds': 86400,
+            'notification_title': 'Global', 'priority': 4, 'tags': ['newspaper'],
+            'patterns': [{'label': 'all', 'regex': '.', 'title_weight': 1, 'summary_weight': 0}],
+        })
+        planned, _ = plan_runtime_audit(current)
+        self.assertEqual('gpt-6.1-sol', planned['analysis']['api_model'])
+        self.assertEqual(['gpt-6-astra'], planned['analysis']['api_model_fallbacks'])
+
     def test_runtime_rollout_is_idempotent_and_preserves_operator_choices(self):
         current, _ = plan_official_news({})
         current['rules'].append({
@@ -443,6 +455,7 @@ class RuntimeAuditTests(unittest.IsolatedAsyncioTestCase):
         current['digest'] = {'api_summary': False}
         planned, first_probes = plan_runtime_audit(current)
         repeated, second_probes = plan_runtime_audit(planned)
+
         self.assertEqual(planned, repeated)
         self.assertTrue(first_probes)
         self.assertEqual([], second_probes)

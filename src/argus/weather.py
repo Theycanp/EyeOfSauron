@@ -342,7 +342,7 @@ def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForeca
     high = max(temperatures) if temperatures else None
     temp_range = f"{low:.0f}~{high:.0f}℃" if low is not None and high is not None else "温度暂无数据"
     calendar = calendar_context(local_now.date())
-    humidity = f"相对湿度 {forecast.humidity:.0f}%" if forecast.humidity is not None else "相对湿度暂无数据"
+    humidity = f"湿度 {forecast.humidity:.0f}%" if forecast.humidity is not None else "湿度暂无数据"
     wind = (f"风速 {forecast.wind_speed:.0f} km/h、风向 {wind_direction_name(forecast.wind_direction)}"
             if forecast.wind_speed is not None and forecast.wind_direction is not None else "风况暂无数据")
     sun = (f"日出 {format_clock(forecast.sunrise, subscription.timezone)}、日落 "
@@ -351,17 +351,19 @@ def summarize_weather(subscription: WeatherSubscription, forecast: WeatherForeca
     uv = (f"今日最高紫外线指数 {forecast.uv_index_max:.1f}"
           if forecast.uv_index_max is not None else "今日最高紫外线指数暂无数据")
     conditions_label = "最近小时预报" if forecast.conditions_basis == "hourly_forecast" else "当前"
-    coverage_note = "" if complete else "（仅统计可用小时，缺失时段不补算）"
+    coverage_note = "" if complete else "（缺失时段不补算）"
     window_label = ("今天 06:00 至明天 06:00" if window_date == local_now.date()
                     else "昨天 06:00 至今天 06:00")
-    message = (f"{subscription.label}：{weather_description(forecast.weather_code)}，{conditions_label} {forecast.temperature:.0f}℃。"
-               f"{window_label} 模型小时数据{coverage_note}：{temp_range}。"
-               f"从现在至时段结束 06:00 预计降水 {rain:.1f} mm，最高降雨概率 {probability:.0f}%；"
-               f"其中结束日 00:00—06:00 预计降水 {early_rain:.1f} mm，最高概率 {early_probability:.0f}%。"
-               f"{gust_text}；{humidity}；{wind}。\n"
-               f"{sun}；{uv}。\n"
-               f"阳历 {local_now.date().isoformat()}，{calendar['lunar']}。{calendar['festivals']}"
-               f"\n已过去小时的模型数据不是实测。数据：{forecast.provider} 预报，非官方气象预警。")
+    rain_text = (f"预计雨雪 {rain:.1f} mm，最高概率 {probability:.0f}%" if rain > 0
+                 else f"暂无明显降水量预报，最高概率 {probability:.0f}%" if probability > 0
+                 else "无降水" if complete else "可用小时无降水，缺失时段未知")
+    early_text = f"；结束日凌晨雨雪 {early_rain:.1f} mm" if early_rain > 0 else ""
+    message = (f"{weather_description(forecast.weather_code)} · {conditions_label} {forecast.temperature:.0f}℃ · {temp_range}\n"
+               f"气温时段：{window_label}{coverage_note}；剩余时段至06时：{rain_text}{early_text}。\n"
+               f"{gust_text} · {humidity} · {wind}\n"
+               f"{sun} · {uv}\n"
+               f"阳历 {local_now.date().isoformat()} · {calendar['lunar']} {calendar['festivals']}\n"
+               "模型预报，非官方气象预警；已过去小时的模型数据不是实测。")
     return message, {"condition": weather_description(forecast.weather_code),
                      "low": low, "high": high, "rain_mm": round(rain, 1),
                      "rain_probability": round(probability), "wind_gust_kmh": round(gust) if gust is not None else None,
@@ -407,22 +409,22 @@ def wind_direction_name(direction: float | None) -> str:
     return labels[int((direction % 360 + 22.5) // 45) % 8]
 
 
-def air_quality_text(value: WeatherAirQuality | None) -> str:
+def air_quality_text(value: WeatherAirQuality | None, *, compact: bool = False) -> str:
     if value is None:
         return "空气质量暂无数据"
-    parts = ["空气质量（模型估计，非站点实测）"]
+    parts = ["空气（模型估计）" if compact else "空气质量（模型估计，非站点实测）"]
     if value.european_aqi is not None:
         parts.append(f"欧洲 AQI {value.european_aqi:.0f}")
-    if value.us_aqi is not None:
+    if value.us_aqi is not None and (not compact or value.european_aqi is None):
         parts.append(f"美国 AQI {value.us_aqi:.0f}")
     if value.pm2_5 is not None:
         parts.append(f"PM2.5 {value.pm2_5:.1f} μg/m³")
-    if value.pm10 is not None:
+    if value.pm10 is not None and not compact:
         parts.append(f"PM10 {value.pm10:.1f} μg/m³")
-    return "，".join(parts) + "（Open-Meteo Air Quality）"
+    return "，".join(parts) + ("" if compact else "（Open-Meteo Air Quality）")
 
 
-def astronomy_text(value: Mapping[str, Any] | None, timezone: str) -> str:
+def astronomy_text(value: Mapping[str, Any] | None, timezone: str, *, compact: bool = False) -> str:
     if not isinstance(value, Mapping):
         return "月升月落暂无数据"
     phase = value.get("moon_phase") or "月相暂无数据"
@@ -432,6 +434,8 @@ def astronomy_text(value: Mapping[str, Any] | None, timezone: str) -> str:
     noon_at = value.get("solar_noon_at")
     solar = (f"，近似太阳正午高度角 {float(angle):.1f}°（{format_clock(noon_at, timezone)}，海平面基准）"
              if isinstance(angle, (int, float)) and isinstance(noon_at, int) else "")
+    if compact:
+        return f"月相 {phase} · 月升/月落 {format_clock(value.get('moonrise'), timezone)}/{format_clock(value.get('moonset'), timezone)}"
     return (f"月升 {format_clock(value.get('moonrise'), timezone)}、月落 "
             f"{format_clock(value.get('moonset'), timezone)}，月相 {phase}{light}{solar}")
 

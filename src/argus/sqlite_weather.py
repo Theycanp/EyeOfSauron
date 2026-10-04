@@ -159,13 +159,13 @@ class SQLiteWeather:
                     "FROM weather_astronomy WHERE subscription_id=? AND local_date=?",
                     (subscription.id, day.replace("-", "")),
                 ).fetchone()
-                daily_message += "\n" + astronomy_text(dict(sky_row) if sky_row else None, subscription.timezone)
+                daily_message += "\n" + astronomy_text(dict(sky_row) if sky_row else None, subscription.timezone, compact=True)
                 air_row = self.connection.execute(
                     "SELECT observed_at,pm2_5,pm10,european_aqi,us_aqi FROM weather_air_quality "
                     "WHERE subscription_id=?", (subscription.id,),
                 ).fetchone()
                 if air_row and 0 <= now - int(air_row["observed_at"]) <= 6 * 3600:
-                    daily_message += "\n" + air_quality_text(WeatherAirQuality(**dict(air_row)))
+                    daily_message += "\n" + air_quality_text(WeatherAirQuality(**dict(air_row)), compact=True)
                 else:
                     daily_message += "\n空气质量暂无数据"
                 queued += int(self.database._insert_alert(AlertCandidate(

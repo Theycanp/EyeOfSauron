@@ -403,9 +403,15 @@ class WeatherTests(unittest.TestCase):
         daily = self.database.connection.execute(
             "SELECT message FROM alerts WHERE rule_id='weather.daily'"
         ).fetchone()[0]
-        for expected in ("农历2026年8月16日", "PM2.5 15.0", "月相 满月", "近似太阳正午高度角 48.6", "12:06", "海平面基准"):
+        for expected in ("农历2026年8月16日", "PM2.5 15.0", "月相 满月", "无降水"):
             self.assertIn(expected, daily)
         self.assertNotIn("高度角 22.0", daily)
+        self.assertNotIn("预计降水 0.0 mm", daily)
+        self.assertNotIn("近似太阳正午高度角", daily)
+        self.assertLess(len(daily), 400)
+        with patch("argus.sqlite_weather.time.time", return_value=now):
+            sky = self.database.get_weather_status()["latest"]["astronomy"]
+        self.assertEqual(48.6, sky["solar_noon_elevation"])
         self.assertTrue(self.database.enqueue_weather_test(
             topic="eos", click_url="https://example.test/#/weather", now=now + 1,
         ))

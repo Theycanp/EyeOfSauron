@@ -1,26 +1,34 @@
 .weather-page { max-width: 920px; }
-.weather-current { display: flex; align-items: center; gap: 20px; min-height: 128px; padding: 23px 0; border-block: 1px solid var(--border); margin-bottom: 25px; }
+.weather-current { display: flex; align-items: center; flex-wrap: wrap; gap: 20px; min-height: 128px; padding: 22px; border: 1px solid var(--border); border-radius: 12px; background: linear-gradient(125deg, var(--accent-soft), var(--surface) 65%); margin-bottom: 24px; }
 .weather-current-icon { width: 64px; height: 64px; flex: 0 0 64px; display: grid; place-items: center; color: var(--accent); background: var(--accent-soft); border-radius: 8px; }
 .weather-current h3 { margin: 3px 0 1px; font-size: 24px; line-height: 1.25; }
 .weather-current p { margin: 0; color: var(--text-soft); }
-.weather-current-side { margin-left: auto; display: flex; align-items: center; gap: 7px; color: var(--text-soft); white-space: nowrap; }
+.weather-current-main { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; }
+.weather-current-temperature { font-size: 44px; font-weight: 600; line-height: 1.3; font-variant-numeric: tabular-nums; }
+.weather-current-side { flex-basis: 100%; display: flex; align-items: center; gap: 7px; color: var(--text-soft); font-size: 12px; }
 .weather-precipitation { margin: -7px 0 22px; }
 .weather-precipitation .weather-section-heading { margin-bottom: 10px; }
 .weather-section-summary { margin-left: auto; color: var(--text-soft); font-size: 12px; font-weight: 400; }
-.weather-chart { border: 1px solid var(--border); border-radius: 7px; background: var(--surface); padding: 12px 14px 10px; overflow: hidden; }
+.weather-chart { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 16px 16px 12px; overflow: hidden; }
 .weather-chart-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; color: var(--text-soft); font-size: 12px; }
 .weather-chart-heading strong { color: var(--text); font-size: 13px; }
 .weather-chart-heading span { display: flex; align-items: center; gap: 5px; }
 .legend-dot { width: 8px; height: 8px; display: inline-block; border-radius: 2px; background: #4a9bb5; }
 .legend-line { display: inline-block; width: 13px; border-top: 2px solid #e08546; margin-left: 7px; }
 .legend-line.range { border-top: 1px dashed #c78254; opacity: .65; }
-.weather-chart svg { display: block; width: 100%; min-height: 184px; margin-top: 2px; }
+.weather-chart svg { display: block; width: 100%; margin-top: 10px; cursor: crosshair; }
 .weather-chart-plot { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
 .chart-axis { stroke: var(--border-strong, #a4adb7); stroke-width: 1; }
 .chart-grid { stroke: var(--border); stroke-dasharray: 3 4; stroke-width: 1; }
-.chart-now { stroke: var(--text-faint); stroke-dasharray: 3 4; opacity: .5; }
-.chart-now-label { fill: var(--text-faint); font-size: 9px; }
 .chart-scale, .chart-time { fill: var(--text-faint); font-size: 10px; }
+.chart-unit { fill: var(--text-soft); font-size: 11px; font-weight: 600; }
+.chart-dry-label { fill: var(--text-faint); font-size: 12px; }
+.chart-selection { stroke: var(--text-faint); stroke-dasharray: 3 4; opacity: .5; pointer-events: none; }
+.weather-hour-detail { display: flex; flex-wrap: wrap; align-items: baseline; gap: 7px 18px; padding: 10px 12px; background: var(--surface-soft); border-radius: 7px; font-size: 12px; color: var(--text-soft); }
+.weather-hour-detail strong { color: var(--text); }
+.weather-hour-picker { display: flex; align-items: center; gap: 12px; margin-block: 12px; color: var(--text-soft); font-size: 12px; }
+.weather-hour-picker input { flex: 1; min-width: 0; height: 24px; padding: 0; accent-color: #e08546; }
+.weather-hour-picker input:focus-visible, .weather-chart-plot:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .precip-bar { opacity: .82; }
 .precip-bar.past { opacity: .35; }
 .precip-bar.rain { fill: #4a9bb5; }
@@ -65,17 +73,21 @@
 .weather-feedback { color: var(--positive); margin-bottom: 14px; }
 .weather-provider-status { display: grid; gap: 8px; padding-bottom: 16px; color: var(--text-soft); }
 .weather-provider-status > div { display: flex; flex-wrap: wrap; gap: 8px 18px; }
-.weather-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: -10px 0 24px; }
+.weather-details { margin-bottom: 24px; }
+.weather-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 12px 0 24px; }
 .weather-metrics > div { display: grid; grid-template-columns: 16px minmax(0, 1fr); grid-template-rows: min-content 1fr; align-items: start; gap: 5px 7px; min-width: 0; min-height: 74px; padding: 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-soft); }
 .weather-metrics > div > span:first-child { grid-column: 1 / -1; }
 .weather-metrics strong { grid-column: 1 / -1; color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
 .weather-metrics span { font-size: 11px; }
+.weather-life-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .weather-footer > span { min-width: 0; }
 .weather-footer .button { flex-shrink: 0; }
 @media (max-width: 680px) {
-  .weather-current { align-items: flex-start; flex-wrap: wrap; gap: 12px; }
+  .weather-current { align-items: flex-start; gap: 12px; padding: 16px; }
   .weather-current-icon { width: 50px; height: 50px; flex-basis: 50px; }
-  .weather-current-side { width: 100%; margin-left: 62px; }
+  .weather-current > div:not(.weather-current-icon):not(.weather-current-side) { min-width: 0; flex: 1; }
+  .weather-current-temperature { font-size: 36px; }
+  .weather-current-side { width: 100%; }
   .weather-location-tools { align-items: stretch; flex-wrap: wrap; }
   .weather-search { flex-basis: 100%; }
   .weather-footer { align-items: stretch; flex-direction: column; }
@@ -83,9 +95,9 @@
   .weather-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .weather-section-summary { width: 100%; margin-left: 27px; }
   .weather-precipitation .weather-section-heading { flex-wrap: wrap; }
-  .weather-chart { padding-inline: 8px; }
+  .weather-chart { padding-inline: 10px; }
   .weather-chart-heading { flex-wrap: wrap; gap: 6px; }
   .weather-chart-heading span { flex-wrap: wrap; }
-  .weather-chart svg { min-width: 760px; }
+  .weather-chart svg { min-width: 640px; }
   .weather-map { height: 220px; }
 }

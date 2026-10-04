@@ -53,6 +53,26 @@ describe('WeatherPage', () => {
     expect(await screen.findByText('近时段小时预报 · QWeather 兜底')).toBeInTheDocument()
     expect(screen.getByText(/阵风 — km\/h/)).toBeInTheDocument()
   })
+
+  it('keeps the temperature chart when the whole forecast is dry', async () => {
+    const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
+      condition: '晴', low: 8, high: 23, rain_mm: 0, rain_probability: 0,
+      wind_gust_kmh: 37, temperature_now: 18, observed_at: 1790818200,
+      is_today: true, window_start_at: 1790805600, window_end_at: 1790892000,
+      window_complete: true,
+      forecast_hours: [
+        { at: 1790805600, temperature: 11, precipitation: 0, rain_probability: 0, weather_code: 0 },
+        { at: 1790848800, temperature: 23, precipitation: 0, rain_probability: 0, weather_code: 0 },
+      ],
+    } }) } as unknown as AdminApi
+    render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
+    expect(await screen.findByText('晴')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '最新天气预报' })).toHaveTextContent('无降水')
+    expect(screen.queryByRole('region', { name: '今日与明晨雨雪预报' })).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '逐小时天气预报' })).toBeVisible()
+    expect(screen.getByRole('img', { name: '按小时显示降水量、雨雪类型与气温' })).toBeVisible()
+    expect(screen.getByText('可用小时暂无降水预报')).toBeVisible()
+  })
   it('distinguishes the approximate noon angle from the current angle', async () => {
     const api = { weather: vi.fn().mockResolvedValue({ ...status, latest: {
       condition: '晴', low: 12, high: 25, rain_mm: 0, rain_probability: 0,
@@ -82,7 +102,7 @@ describe('WeatherPage', () => {
       condition: '晴', low: 16, high: 29, rain_mm: 0, rain_probability: 0,
       wind_gust_kmh: 12, temperature_now: 20, observed_at: 1790395200, is_today: true,
       hourly: [
-        { at: 1790395200, temperature: 20, precipitation: 0, rain_probability: 0, precipitation_type: 'none' },
+        { at: 1790395200, temperature: 20, precipitation: 0.1, rain_probability: 10, precipitation_type: 'rain' },
         { at: 1790431200, temperature: 14, precipitation: 0, rain_probability: 0, precipitation_type: 'none' },
       ],
     } }) } as unknown as AdminApi
@@ -120,7 +140,7 @@ describe('WeatherPage', () => {
       condition: '晴', low: 14, high: 20, rain_mm: 0, rain_probability: 0,
       wind_gust_kmh: 12, temperature_now: 20, observed_at: 1790352000 + 3 * 3600,
       is_today: true, window_start_at: start, window_end_at: 1790352000 + 6 * 3600,
-      forecast_hours: [{ at: 1790352000 + 3 * 3600, temperature: 20, precipitation: 0, rain_probability: 0 }],
+      forecast_hours: [{ at: 1790352000 + 3 * 3600, temperature: 20, precipitation: 0.1, rain_probability: 10, precipitation_type: 'rain' }],
     } }) } as unknown as AdminApi
     render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
     expect(await screen.findByText('昨天 06:00—今天 06:00')).toBeInTheDocument()
@@ -134,7 +154,7 @@ describe('WeatherPage', () => {
       condition: '晴', low: 14, high: 20, rain_mm: 0, rain_probability: 0,
       wind_gust_kmh: 12, temperature_now: 20, observed_at: start + 7 * 3600,
       is_today: true, window_start_at: start, window_end_at: start + 30 * 3600,
-      forecast_hours: [{ at: start + 7 * 3600, temperature: 20, precipitation: 0, rain_probability: 0 }],
+      forecast_hours: [{ at: start + 7 * 3600, temperature: 20, precipitation: 0.1, rain_probability: 10, precipitation_type: 'rain' }],
     } }) } as unknown as AdminApi
     render(<WeatherPage api={api} canWrite onUnauthorized={vi.fn()} />)
     expect(await screen.findByText('今天 00:00—明天 06:00')).toBeInTheDocument()

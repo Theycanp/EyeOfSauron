@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 
-async function mockAdminApi(page: Page) {
+async function mockAdminApi(page: Page, weatherMode: 'rain' | 'dry' | 'snow' | 'partial' = 'rain') {
   let authenticated = false
   let weatherHasForecast = true
   let weatherRefreshPending = false
@@ -56,13 +56,16 @@ async function mockAdminApi(page: Page) {
         if (!weatherHasForecast && !weatherRefreshPending) weatherHasForecast = true
         else if (weatherRefreshPending) weatherRefreshPending = false
         await route.fulfill({ json: { subscription: weatherSubscription, latest: weatherHasForecast ? {
-          condition: '多云', low: 13, high: 20, rain_mm: 0, rain_probability: 20,
+          condition: weatherMode === 'snow' ? '小雪' : weatherMode === 'dry' ? '晴' : '多云', low: 13, high: 23, rain_mm: weatherMode === 'dry' ? 0 : 1.6, rain_probability: weatherMode === 'dry' ? 0 : 65,
           uv_index_max: 5.4,
           window_start_at: localDayStart, window_end_at: localDayStart + 24 * 3600,
-          window_complete: true,
+          window_complete: weatherMode !== 'partial',
           forecast_hours: Array.from({ length: 24 }, (_, index) => ({ at: localDayStart + index * 3600,
-            temperature: 20 - index / 4, precipitation: index < 4 ? 0.4 : 0,
-            rain_probability: index < 4 ? 65 : 10, weather_code: index < 4 ? 61 : 2 })),
+            temperature: Number((18 + 5 * Math.sin(index / 24 * 2 * Math.PI)).toFixed(1)),
+            precipitation: weatherMode === 'dry' ? 0 : index < 4 ? 0.4 : 0,
+            rain_probability: weatherMode === 'dry' ? 0 : index < 4 ? 65 : 10,
+            weather_code: weatherMode === 'dry' ? 0 : index < 4 ? weatherMode === 'snow' ? 71 : 61 : 2,
+          })).filter((_, index) => weatherMode !== 'partial' || (index >= 7 && index !== 12)),
           wind_gust_kmh: 32, temperature_now: 20, humidity: 58,
           wind_speed_kmh: 12, wind_direction_name: '东南',
           sunrise: 1790373600, sunset: 1790416800,
@@ -678,6 +681,33 @@ test('weather location and schedule are usable on desktop and mobile', async ({ 
   await page.evaluate(() => window.scrollTo(0, 0))
   await page.screenshot({ path: testInfo.outputPath('weather.png'), fullPage: true })
 })
+
+for (const mode of ['dry', 'snow', 'partial'] as const) {
+  test(`weather ${mode} forecast is readable and interactive`, async ({ page }, testInfo) => {
+    await mockAdminApi(page, mode)
+    await login(page)
+    const menu = page.getByRole('button', { name: '打开导航' })
+    if (await menu.isVisible()) await menu.click()
+    await page.getByRole('button', { name: '天气', exact: true }).click()
+    await expect(page.getByRole('img', { name: '按小时显示降水量、雨雪类型与气温' })).toBeVisible()
+    const slider = page.getByRole('slider', { name: '选择预报小时' })
+    await slider.focus()
+    await slider.press('Home')
+    await expect(page.getByLabel('选中小时天气')).toContainText(mode === 'snow' ? '雪 0.4 mm/h' : '无降水量预报')
+    await slider.press('End')
+    await expect(page.getByLabel('选中小时天气')).toContainText('05:00')
+    if (mode === 'partial') await expect(page.getByText('可用时段高低温')).toBeVisible()
+    if (mode === 'dry') await expect(page.getByText('可用小时暂无降水预报')).toBeVisible()
+    await expect(page.locator('body')).toHaveJSProperty('scrollWidth', await page.locator('body').evaluate(node => node.clientWidth))
+    await page.evaluate(() => window.scrollTo(0, 0))
+    await page.screenshot({ path: testInfo.outputPath(`weather-${mode}.png`), fullPage: true })
+    await page.evaluate(() => localStorage.setItem('eosTheme', 'dark'))
+    await page.reload()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+    await expect(page.getByRole('img', { name: '按小时显示降水量、雨雪类型与气温' })).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath(`weather-${mode}-dark.png`), fullPage: true })
+  })
+}
 
 test('blocked map tiles show a usable location fallback', async ({ page }) => {
   await page.route('https://tile.openstreetmap.org/**', (route) => route.abort())

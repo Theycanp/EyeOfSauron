@@ -609,6 +609,11 @@ h1, h2, h3, p { margin-top: 0; }
 .advanced-content label > span { color: var(--text); }
 .modal-body label small,
 .advanced-content label small { color: var(--text-faint); font-size: 11px; font-weight: 400; }
+.reminder-ack-section { display: grid; gap: 14px; margin-top: 2px; padding-top: 4px; }
+.reminder-repeat-fields { min-inline-size: 0; margin: 0; padding: 11px 14px 14px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }
+.reminder-repeat-fields legend { padding: 0 6px; color: var(--text); font-size: 12px; font-weight: 650; }
+.reminder-repeat-note { display: block; margin: -1px 0 12px; color: var(--text-faint); font-size: 11px; line-height: 1.5; }
+.reminder-repeat-fields .form-grid { gap: 12px; }
 
 input,
 select,

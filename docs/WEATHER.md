@@ -56,8 +56,13 @@ on that same local calendar day queues one daily forecast per date. It reports c
 condition, the local 06:00-to-next-day-06:00 temperature range, remaining-window predicted precipitation,
 maximum rain probability, gusts, humidity, wind, sunrise/sunset, the day's
 maximum UV index when Open-Meteo supplies it, Gregorian and lunar dates, and a
-small verified set of fixed-date festivals. Fresh optional
-air quality and matching-date QWeather moon data are appended when available;
+small verified set of fixed-date festivals. Since 0.29.6, new daily messages use
+short lines: conditions/temperature, window/remaining precipitation, wind/humidity,
+sun/UV, calendar, then compact moon and air quality when available. The moon
+illumination, solar angles, PM10 and a clearly labelled AQI standard remain on the
+weather page; full labelled test snapshots retain the detailed text. Dry weather
+is “无降水”, not “0 mm”; partial dry coverage says missing hours are unknown.
+Fresh optional air quality and matching-date QWeather moon data are appended when available;
 missing optional data is labelled missing, not invented. Qingming and other
 solar-term or movable festivals are not yet calculated. The daily-date key is durable; retries and
 restarts do not duplicate it. If the scheduled time is missed, the first
@@ -275,7 +280,7 @@ The window's final 00:00-06:00 precipitation is separately summarized in the
 daily message. The calendar date and astronomy remain tied to the observation's
 local date, even before 06:00 when the weather window started yesterday.
 Forecast hours before the current time are model data, not observations. They
-are shown with muted precipitation bars and a query-time marker. Missing past
+are shown with muted precipitation bars. Missing past
 hours, especially with the future-only QWeather fallback, remain blank with a
 partial-coverage label; they are not filled from zero or another provider.
 Before 06:00, Open-Meteo's current-day forecast can omit the prior day's
@@ -284,6 +289,21 @@ The axis uses actual timestamps and distinguishes tomorrow's hours; missing
 temperature hours break the line instead of inventing a connecting trajectory.
 On narrow screens the timeline scrolls horizontally at a readable fixed plot
 width rather than shrinking all hours and labels into tiny text.
+Since 0.29.6, temperature is always shown even on dry days. `ForecastChart.tsx`
+renders separate temperature (°C) and rain/snow (mm/h) plots on one time axis.
+The temperature line and available-hour extrema use the same data; rain bars
+do not share the temperature scale. Missing values stay blank and disconnected.
+Dry/unknown precipitation has explicit text rather than an empty card. Clicking
+the plot or using the labelled keyboard-accessible slider shows an hour's
+temperature, phase, quantity and probability; slider changes also bring that
+hour into view on phones. Refresh selects a valid hour from the replacement
+snapshot. Historical forecasts are explicitly labelled. The overview highlights
+current temperature, followed by the timeline, daily-life metrics and separate
+sun/moon/calendar metrics; provider and subscription controls follow below.
+`weatherPresentation.ts` holds shared time/phase formatting, without extra
+requests, chart libraries or persistent presentation state.
+Frontend unit and desktop/mobile E2E tests include dry, snow and partial forecasts;
+review their screenshots before submitting, including both light and dark themes.
 Older snapshots without window metadata retain the legacy rolling-24-hour view
 until the next successful poll; existing notifications are not rewritten.
 Rain-change alerts still use the remaining local calendar day, severe-weather
