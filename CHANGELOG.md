@@ -9,6 +9,9 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ### Fixed
 
+- Permit literal loopback HTTP for local ntfy delivery without public DNS/TLS
+  dependencies; bypass environment proxies and continue rejecting redirects,
+  remote plaintext endpoints and embedded credentials.
 - Reserve independent collection and thread capacity for host checks so blocked
   external requests cannot starve local health sampling.
 - Treat an inactive service with a listening activation socket as available;

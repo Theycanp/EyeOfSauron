@@ -463,3 +463,9 @@ sudo systemctl disable --now argus
 Disabling the unit leaves its code, configuration, and database recoverable.
 Do not delete `/var/lib/argus` unless the alert history and feed baseline
 are intentionally being discarded.
+
+Local ntfy on the same host may use `http://127.0.0.1:10009` (or literal
+`[::1]`). This exception does not accept hostnames or remote HTTP. Local
+delivery ignores environment HTTP proxies and never follows redirects; public
+endpoints and notification detail links continue to require HTTPS. Validate the
+notifier against the intended environment before restarting either service.
