@@ -56,8 +56,43 @@ def _unit_health(units: list[str]) -> dict[str, str]:
         except (OSError, subprocess.SubprocessError):
             health[unit] = "unknown"
             continue
-        health[unit] = "healthy" if result.returncode == 0 else "unhealthy"
+        if result.returncode == 0:
+            health[unit] = "healthy"
+        else:
+            health[unit] = _socket_unit_health(unit)
     return health
+
+
+def _socket_unit_health(unit: str) -> str:
+    """An inactive socket-activated service can still be ready for clients."""
+    try:
+        result = subprocess.run(
+            ["/usr/bin/systemctl", "show", "--property=ActiveState,TriggeredBy", "--", unit],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=False, timeout=3, env=_child_environment(),
+        )
+        if result.returncode != 0:
+            return "unknown"
+        properties = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+        # A failed process is still a failure even if its socket remains open.
+        if properties.get("ActiveState") != "inactive":
+            return "unhealthy"
+        for socket_unit in properties.get("TriggeredBy", "").split():
+            if not socket_unit.endswith(".socket"):
+                continue
+            socket_result = subprocess.run(
+                ["/usr/bin/systemctl", "show", "--property=ActiveState,SubState", "--", socket_unit],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, check=False, timeout=3, env=_child_environment(),
+            )
+            if socket_result.returncode != 0:
+                return "unknown"
+            state = dict(line.split("=", 1) for line in socket_result.stdout.splitlines() if "=" in line)
+            if state.get("ActiveState") == "active" and state.get("SubState") == "listening":
+                return "healthy"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return "unhealthy"
 
 
 def _listen_ports() -> set[tuple[str, str, int]] | None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import subprocess
 import unittest
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -10,12 +11,33 @@ from unittest.mock import patch
 
 from argus.config import SourceConfig
 from argus.database import Database
-from argus.host import HostHealthCollector
+from argus.host import HostHealthCollector, _unit_health
 from argus.models import SourceState
 from argus.rules import RuleSet
 
 
 class HostLoadTests(unittest.TestCase):
+    def test_socket_activated_service_is_healthy_only_while_socket_listens(self) -> None:
+        for active, socket_state, expected in (
+            ("inactive", "listening", "healthy"),
+            ("inactive", "dead", "unhealthy"),
+            ("failed", "listening", "unhealthy"),
+        ):
+            with self.subTest(active=active, socket_state=socket_state):
+                responses = [
+                    subprocess.CompletedProcess([], 3),
+                    subprocess.CompletedProcess([], 0, f"ActiveState={active}\nTriggeredBy=ssh.socket\n"),
+                    subprocess.CompletedProcess([], 0, f"ActiveState=active\nSubState={socket_state}\n"),
+                ]
+                with patch("argus.host.subprocess.run", side_effect=responses):
+                    self.assertEqual({"ssh.service": expected}, _unit_health(["ssh.service"]))
+
+    def test_socket_probe_failure_stays_unknown(self) -> None:
+        with patch("argus.host.subprocess.run", side_effect=[
+            subprocess.CompletedProcess([], 3), subprocess.TimeoutExpired("systemctl", 3),
+        ]):
+            self.assertEqual({"ssh.service": "unknown"}, _unit_health(["ssh.service"]))
+
     def setUp(self) -> None:
         self.source = SourceConfig(
             id="host_test", kind="host", publisher="bk", section="Host", dedupe_scope="host",

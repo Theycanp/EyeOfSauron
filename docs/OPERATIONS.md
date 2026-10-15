@@ -225,8 +225,9 @@ An empty retained JMA batch is healthy when the unfiltered Feed is current.
 
 `scripts/operations/check_status.py` reports dead-letter outbox rows as warnings.
 Recurring watchdog calls use `--quiet-success`: only a healthy result without
-warnings suppresses the JSON payload. Release gates and manual diagnostics keep
-their detailed output by default. The watchdog holds a shared lock on the
+warnings suppresses the JSON payload. Successful checks with warnings emit
+only status, errors and warnings, avoiding repeated full source dumps. Release
+gates and manual diagnostics keep their detailed output by default. The watchdog holds a shared lock on the
 existing install root `.release.lock` through checking and recovery; release,
 rollback and backups hold an exclusive lock. During maintenance it skips the
 poll without increasing its failure counter or restarting the engine. A missing
@@ -234,6 +235,11 @@ or unreadable release lock is an error, not a silently successful health check.
 The unit preserves its runtime directory between oneshot invocations so the
 consecutive failure counter survives timer polls; reboot resets this transient
 counter. Otherwise systemd would remove the counter at every service stop.
+
+Host collectors use a dedicated collection semaphore and bounded local I/O
+capacity, independent of outbound source and network thread capacity. Inactive
+services with a listening activation socket count as available; failed services
+still fail even if that socket remains open.
 
 The admin supports HEAD with the same status, headers and authentication as GET,
 without a response body. The browser icon is served locally; `/favicon.ico`

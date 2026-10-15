@@ -5,6 +5,17 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.29.7] - 2026-10-15
+
+### Fixed
+
+- Reserve independent collection and thread capacity for host checks so blocked
+  external requests cannot starve local health sampling.
+- Treat an inactive service with a listening activation socket as available;
+  continue reporting failed services even when their socket is open.
+- Emit compact warnings from the quiet watchdog instead of repeatedly dumping
+  all source diagnostics. Full diagnostics remain available on failure.
+
 ## [0.29.6] - 2026-10-04
 
 ### Changed
