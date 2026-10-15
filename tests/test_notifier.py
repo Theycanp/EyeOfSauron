@@ -104,6 +104,12 @@ class NotifierTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(b'{}')
 
+            def do_GET(self):
+                requests.append((self.path, self.headers.get("Authorization"), None))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{}')
+
             def log_message(self, *args):
                 pass
 
