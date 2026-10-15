@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 import unittest
 import urllib.error
 from dataclasses import replace
@@ -88,6 +92,44 @@ class NotifierTests(unittest.TestCase):
         payload = json.loads(opener.request.data)
         self.assertLess(len(payload["message"].encode("utf-8")), 4096)
         self.assertTrue(payload["message"].endswith("[内容较长，完整内容请点击通知查看]"))
+
+    def test_loopback_http_bypasses_proxy_and_refuses_redirect(self) -> None:
+        requests = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                requests.append((self.path, self.headers.get("Authorization"),
+                                 json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                self.send_response(302 if self.path == "/redirect" else 200)
+                self.send_header("Location", "/unexpected")
+                self.end_headers()
+                self.wfile.write(b'{}')
+
+            def log_message(self, *args):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with patch.dict(os.environ, {"http_proxy": "http://127.0.0.1:1", "no_proxy": "",
+                                             "HTTP_PROXY": "http://127.0.0.1:1", "NO_PROXY": ""}):
+                    base = f"http://127.0.0.1:{server.server_port}"
+                    NtfyNotifier(base, "test-token", 2).publish(_alert())
+                    with self.assertRaises(NotifyError):
+                        NtfyNotifier(base + "/redirect", "test-token", 2).publish(_alert())
+                self.assertEqual([row[0] for row in requests], ["/", "/redirect"])
+                self.assertEqual(requests[0][1], "Bearer test-token")
+                self.assertEqual(requests[0][2]["topic"], "eos")
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+
+    def test_loopback_exception_does_not_allow_remote_or_named_http(self) -> None:
+        for url in ("http://localhost:10009", "http://127.0.0.1.example:10009",
+                    "http://192.168.31.17:10009", "http://user@127.0.0.1:10009"):
+            with self.subTest(url=url), self.assertRaises(NotifyError):
+                NtfyNotifier(url, "token", 2)
+        NtfyNotifier("http://[::1]:10009", "token", 2)
 
     def test_rejects_plain_http_endpoint(self) -> None:
         with self.assertRaisesRegex(NotifyError, "must be HTTPS"):

@@ -112,8 +112,9 @@ class NtfyNotifier:
         detail_base_url: str = "",
     ) -> None:
         parsed = urlsplit(base_url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-            raise NotifyError("ntfy base URL must be HTTPS without embedded credentials")
+        local_http = parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1"}
+        if (parsed.scheme != "https" and not local_http) or not parsed.hostname or parsed.username or parsed.password:
+            raise NotifyError("ntfy base URL must be HTTPS or literal loopback HTTP without embedded credentials")
         if parsed.query or parsed.fragment:
             raise NotifyError("ntfy base URL cannot contain a query or fragment")
         if not token:
@@ -136,7 +137,11 @@ class NtfyNotifier:
                     "notification detail base URL must be credential-free HTTPS",
                     failure_kind="invalid_config",
                 )
-        self._opener = urllib.request.build_opener(_NoRedirect())
+        # Local credentials must never pass through an environment HTTP proxy.
+        handlers: list[urllib.request.BaseHandler] = [_NoRedirect()]
+        if local_http:
+            handlers.append(urllib.request.ProxyHandler({}))
+        self._opener = urllib.request.build_opener(*handlers)
 
     @classmethod
     def from_config(
