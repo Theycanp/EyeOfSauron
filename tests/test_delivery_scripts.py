@@ -221,6 +221,19 @@ class DailyBackupTests(unittest.TestCase):
                 self.assertEqual(0 if result["ok"] else 1, code)
                 self.assertEqual(expected_output, bool(output.getvalue()))
 
+    def test_quiet_warning_keeps_evidence_without_dumping_all_sources(self):
+        result = {"ok": True, "errors": [], "warnings": ["source delayed"],
+                  "sources": [{"source_id": "healthy"}] * 45}
+        with patch("sys.stdin", io.StringIO('{}')), \
+                patch("sys.stdout", new_callable=io.StringIO) as output, \
+                patch.object(check_status, "evaluate_status", return_value=result):
+            self.assertEqual(0, check_status.main([
+                "--status-file", "-", "--config", "unused.toml", "--quiet-success",
+            ]))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(["source delayed"], payload["warnings"])
+        self.assertNotIn("sources", payload)
+
     def test_watchdog_start_limit_allows_its_normal_timer_cadence(self):
         import configparser
         unit = configparser.ConfigParser(interpolation=None)

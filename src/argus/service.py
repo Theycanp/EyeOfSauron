@@ -26,7 +26,7 @@ from .persistence import RuntimeRepository
 from .models import FeedFetchResult, SourceState
 from .notifier import Notifier, delivery_error_details
 from .rules import RuleSet
-from .runtime_io import run_network_call
+from .runtime_io import run_local_call, run_network_call
 from .util import now_epoch, sanitize_error
 from .weather import (
     LocalWeatherProvider, WeatherAirQuality, WeatherProvider, WeatherRequestDenied, WeatherSubscription,
@@ -127,6 +127,7 @@ class ArgusService:
             availability("qweather", configured=local_weather_provider is not None, now=now_epoch())
         self.instance_id = uuid.uuid4().hex
         self._source_slots = asyncio.Semaphore(config.service.max_source_concurrency)
+        self._local_source_slots = asyncio.Semaphore(1)
         self._jitter = random.SystemRandom()
         self.reload_requested = False
 
@@ -143,8 +144,12 @@ class ArgusService:
         last_error: Exception | None = None
         for attempt in range(1, source_config.request_attempts + 1):
             try:
-                async with self._source_slots:
-                    result = await run_network_call(collector.fetch, state)  # type: ignore[attr-defined]
+                if source_config.kind == "host":
+                    async with self._local_source_slots:
+                        result = await run_local_call(collector.fetch, state)  # type: ignore[attr-defined]
+                else:
+                    async with self._source_slots:
+                        result = await run_network_call(collector.fetch, state)  # type: ignore[attr-defined]
                 break
             except asyncio.CancelledError:
                 raise

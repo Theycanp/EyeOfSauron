@@ -181,6 +181,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
         result = {"ok": False, "errors": [f"cannot evaluate status: {exc}"], "warnings": []}
+    if args.quiet_success and result["ok"] and result.get("warnings"):
+        # A source outage should retain its evidence without logging every
+        # healthy source on every timer tick. Full failures remain diagnostic.
+        result = {key: result[key] for key in ("ok", "errors", "warnings") if key in result}
     if not args.quiet_success or not result["ok"] or result.get("warnings"):
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result["ok"] else 1

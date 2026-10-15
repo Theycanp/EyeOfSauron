@@ -148,6 +148,42 @@ class RuntimeLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 service.request_stop()
                 await asyncio.wait_for(task, 2)
 
+    async def test_local_probe_survives_saturated_source_and_network_capacity(self):
+        import argus.runtime_io as runtime_io
+
+        source = production_config(self.root).sources[0]
+        host = replace(source, id="local_host", kind="host", settings={"paths": []})
+        config = replace(self.config, sources=(source, host),
+                         service=replace(self.config.service, max_source_concurrency=1))
+        entered = threading.Event()
+        release = threading.Event()
+        network_slots = runtime_io._network_slots
+        runtime_io._network_slots = threading.BoundedSemaphore(1)
+
+        def blocked(state):  # type: ignore[no-untyped-def]
+            entered.set()
+            release.wait(5)
+            return FeedFetchResult((), None, None)
+
+        remote_collector = Mock()
+        remote_collector.fetch.side_effect = blocked
+        local_collector = Mock()
+        local_collector.fetch.return_value = FeedFetchResult((), None, None)
+        service = ArgusService(config, self.db,
+                               {source.id: remote_collector, host.id: local_collector},
+                               RuleSet(()), None)
+        task = asyncio.create_task(service.poll_source_once(source.id))
+        try:
+            self.assertTrue(await asyncio.wait_for(asyncio.to_thread(entered.wait, 1), 2))
+            self.assertTrue(await asyncio.wait_for(service.poll_source_once(host.id), 1))
+            self.assertFalse(task.done())
+            local_collector.fetch.assert_called_once()
+            self.assertIsNotNone(self.db.get_source_state(host.id).last_success_at)
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2)
+            runtime_io._network_slots = network_slots
+
     async def test_worker_failure_marks_engine_failed(self):
         async def broken():
             raise RuntimeError("worker failed")
