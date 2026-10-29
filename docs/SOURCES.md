@@ -124,6 +124,13 @@ re-probed before a new rollout attempt.
 
 ## Activation and change control
 
+The optional [Tibo reset-announcement profile](TIBO_RESETS.md) has a separate
+`scripts/operations/activate_tibo_reset_monitor.py` preview/apply entry point.
+It uses a reviewed third-party Atom relay and a narrowly scoped personal
+subscription rule, not the general official-news rollout. Publication of this
+script alone does not enable it on another instance. Completion confirmation,
+upstream-heartbeat checks and dual-source failover remain deferred.
+
 Use `scripts/operations/activate_news_sources.py` with the active configuration
 revision. Run without `--apply` first; it lists additions and probes every one.
 The planner is idempotent and extends existing reviewed rules without replacing

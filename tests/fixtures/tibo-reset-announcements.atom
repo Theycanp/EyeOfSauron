@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>https://tokenusage.dev/api/resets.atom</id>
+  <title>Codex reset announcements</title>
+  <updated>2026-10-28T02:43:10.964Z</updated>
+  <rights>Reuse requires Data: tokenusage.dev linked to https://tokenusage.dev/resets on the same screen or in the same message. Personal use needs no visible credit. Relays must retain the credit link and pass on this condition.</rights>
+  <entry>
+    <id>https://x.com/i/status/2115273064481218829</id>
+    <title>Codex automatic reset announcement</title>
+    <published>2026-10-28T02:42:53.000Z</published>
+    <updated>2026-10-28T02:43:10.964Z</updated>
+    <link rel="alternate" type="text/html" href="https://x.com/i/status/2115273064481218829" />
+    <summary type="html">&lt;p&gt;Recorded from @thsottiaux on X. This is the monitor's classification, not proof that any account's limit was reset. Open the source post for wording and eligibility. &lt;a href="https://tokenusage.dev/resets"&gt;Data: tokenusage.dev&lt;/a&gt;&lt;/p&gt;</summary>
+  </entry>
+  <entry>
+    <id>https://x.com/i/status/2107913674593644711</id>
+    <title>Codex banked reset grant announcement</title>
+    <published>2026-10-07T19:19:17.000Z</published>
+    <updated>2026-10-07T19:20:19.474Z</updated>
+    <link rel="alternate" type="text/html" href="https://x.com/i/status/2107913674593644711" />
+    <summary type="html">&lt;p&gt;Recorded from @thsottiaux on X. This is the monitor's classification, not proof that any account's limit was reset. Open the source post for wording and eligibility. &lt;a href="https://tokenusage.dev/resets"&gt;Data: tokenusage.dev&lt;/a&gt;&lt;/p&gt;</summary>
+  </entry>
+</feed>

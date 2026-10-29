@@ -26,6 +26,8 @@ Start here:
 12. `WEATHER.md` — local-weather source research, forecast validation, polling,
     notification state, operational limits, and official-warning gaps.
 13. `NOTIFICATIONS.md` — 消息分类、主题路由、后台管理、权限、迁移与回滚。
+14. `TIBO_RESETS.md` — Tibo 重置公告的信源调查、启用脚本、可靠性边界、
+    验证与后续完成确认方案。
 
 Reference documents:
 

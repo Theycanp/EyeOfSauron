@@ -51,6 +51,10 @@ default concurrency when the variable is absent.
    retain application-level auth. Never expose port 18080 directly.
 8. Preview and apply reviewed sources with `activate_news_sources.py`, using the
    current active revision and requiring every new-source probe to pass.
+   The optional Tibo announcement subscription uses
+   `activate_tibo_reset_monitor.py --config /etc/argus/config.toml --expect-revision N`
+   with the same preview-before-apply policy. See [its handoff](TIBO_RESETS.md) for
+   the public feed, dedicated rule, management and explicit coverage gaps.
 
 ## Acceptance
 

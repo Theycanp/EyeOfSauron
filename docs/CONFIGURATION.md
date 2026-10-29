@@ -118,6 +118,14 @@ affected service because it is outside managed configuration revisions.
 
 ## Production profile
 
+The optional Tibo Codex-reset announcement source and dedicated priority-4 rule
+are installed explicitly by `scripts/operations/activate_tibo_reset_monitor.py`
+with `--config`, `--expect-revision` and, after preview, `--apply`. They use the
+existing **news** notification route; disable `tibo_codex_resets` in managed
+source settings to stop polling. Package upgrades do not add or replace this
+subscription. No credentials or schema change are required. See
+[`TIBO_RESETS.md`](TIBO_RESETS.md) for provenance and the completion/heartbeat gaps.
+
 The production template is `config/argus.production.toml`. It contains only the
 base Bloomberg set; reviewed managed sources are installed by the rollout tools
 and live in SQLite. This separation prevents a package upgrade from replacing
