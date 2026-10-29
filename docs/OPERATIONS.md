@@ -223,6 +223,15 @@ creates the next managed revision. Verify the applied revision, one successful
 twelve-hour JMA poll, zero direct JMA alerts, and continued five-minute USGS coverage after restart.
 An empty retained JMA batch is healthy when the unfiltered Feed is current.
 
+For the optional Tibo reset-announcement subscription, run
+`scripts/operations/activate_tibo_reset_monitor.py --config /etc/argus/config.toml
+--expect-revision N` as the instance operator. Preview fetches/replays the feed
+without activating it; add `--apply` only after it passes. Verify the resulting
+revision acknowledgement and first baseline, then use source diagnostics and
+the dedicated rule for routine management. This is an announcement subscription,
+not completion or personal-quota monitoring. Source research, failure behavior,
+rollback and follow-up acceptance criteria are in [`TIBO_RESETS.md`](TIBO_RESETS.md).
+
 `scripts/operations/check_status.py` reports dead-letter outbox rows as warnings.
 Recurring watchdog calls use `--quiet-success`: only a healthy result without
 warnings suppresses the JSON payload. Successful checks with warnings emit

@@ -1,8 +1,8 @@
-Bundled browser dependencies
-============================
+Third-party software and data
+=============================
 
-These notices cover the third-party libraries bundled in the administration
-UI. They do not replace the licenses of development tools or external services.
+These notices cover libraries bundled in the administration UI and attributed
+test data. They do not replace licenses of development tools or external services.
 News, market data, and other monitored content remain subject to their owners'
 rights and provider terms; the project license does not grant rights to them.
 
@@ -82,3 +82,16 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+tokenusage.dev reset-announcement fixture
+https://tokenusage.dev/resets
+------------------------------------
+
+The attributed Atom records in tests/fixtures/tibo-reset-announcements.atom
+are third-party data. Their original reuse condition is retained in the fixture:
+
+Reuse requires Data: tokenusage.dev linked to https://tokenusage.dev/resets on
+the same screen or in the same message. Personal use needs no visible credit.
+Relays must retain the credit link and pass on this condition.
+
+Provider interface and terms: https://tokenusage.dev/developers

@@ -5,6 +5,14 @@ Semantic Versioning and the Keep a Changelog structure.
 
 ## [Unreleased]
 
+### Added
+
+- Version the optional Tibo/Codex reset-announcement rollout script, offline
+  parser/configuration regression tests and source/operations handoff. Explicit
+  config paths and revision checks support reproducible preview/apply without
+  overwriting operator choices. The runtime subscription is unchanged; completed
+  resets, upstream-heartbeat alarms and automatic fallback are documented gaps.
+
 ## [0.29.7] - 2026-10-15
 
 ### Fixed
